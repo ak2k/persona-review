@@ -45,10 +45,32 @@
 # personas (correctness, adversarial, security) through all three and merge/dedup the findings.
 set -euo pipefail
 
+# bash >= 4.4, enforced rather than worked around. Expanding an EMPTY array as
+# "${ARR[@]}" is an unbound-variable error under `set -u` before 4.4, and with an EXIT
+# trap installed that abort exits **0** — this wrapper's default invocation (no -e, so
+# EFFORT_ARGS is empty) died on bash 3.2 before calling codex and reported success.
+# Individual call sites can be written defensively; the exit-0 masking applies to every
+# future `set -u` slip, so the version is the thing to check. macOS ships 3.2; the Nix
+# package patches the shebang to a modern bash, so this only fires for a source checkout.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] ||
+	{ [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -lt 4 ]; }; then
+	echo "ce-codex-persona: needs bash >= 4.4, found ${BASH_VERSION:-unknown}." >&2
+	echo "  macOS ships bash 3.2, where an unset-variable abort inside this script would exit 0." >&2
+	echo "  Install a newer bash (nix profile install nixpkgs#bash) or use the Nix package." >&2
+	exit 1
+fi
+
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
+# Split, because the one-liner this replaced could never reach its own `exit 2`: the
+# inner test only ran once the outer had established PERSONA was empty, -h, or --help.
+# Missing the required argument printed 46 lines to stdout and exited 0 — success, and a
+# transcript's worth of it, for an invocation that reviewed nothing.
 PERSONA="${1:-}"
-[ -z "$PERSONA" ] || [ "$PERSONA" = "-h" ] || [ "$PERSONA" = "--help" ] && { usage; [ -n "$PERSONA" ] && [ "$PERSONA" != "-h" ] && [ "$PERSONA" != "--help" ] && exit 2 || exit 0; }
+case "$PERSONA" in
+	-h|--help) usage; exit 0 ;;
+	"") usage >&2; exit 2 ;;
+esac
 shift
 
 MODEL="gpt-5.6-sol"; REPO="$PWD"; BASE=""; CTX=""; EFFORT=""
@@ -66,6 +88,18 @@ done
 
 command -v codex >/dev/null 2>&1 || { echo "ce-codex-persona: codex not on PATH" >&2; exit 1; }
 
+[ -d "$REPO" ] || { echo "ce-codex-persona: -C '$REPO' is not a directory" >&2; exit 2; }
+# A base ref that does not resolve is not a smaller review, it is an unscoped one: the
+# prompt would still tell the agent to `git diff $BASE..HEAD`, that command would fail
+# inside the sandbox, and the agent would review whatever it judged instead — returning
+# findings, or none, for a scope nobody chose. Refuse before spending the run.
+if [ -n "$BASE" ]; then
+	git -C "$REPO" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || {
+		echo "ce-codex-persona: base ref '$BASE' does not resolve in $REPO" >&2
+		exit 2
+	}
+fi
+
 # Preflight everything the run needs, including the findings gate — checking the gate
 # after the model call would spend a full xhigh run to discover a missing import.
 #
@@ -75,6 +109,15 @@ command -v codex >/dev/null 2>&1 || { echo "ce-codex-persona: codex not on PATH"
 # module itself — a PATH dependency is what killed the previous version of this wrapper.
 command -v python3 >/dev/null 2>&1 || { echo "ce-codex-persona: python3 not on PATH (needed by the findings gate)" >&2; exit 1; }
 PYROOT="${PERSONA_REVIEW_PYTHONPATH:-$(cd "$(dirname "$0")/.." && pwd)}"
+# The CWD, not $PYROOT, is what `python3 -c` and `python3 -m` put FIRST on sys.path, ahead
+# of every PYTHONPATH entry. So a `persona_review/` directory in the current directory —
+# and $REPO defaults to the cwd, i.e. the repo under review — silently REPLACED this gate:
+# the run reported a clean review of a run that never happened, and the planted module
+# executed as the user at import time, before codex was invoked and outside the read-only
+# sandbox the rest of this script is careful to set. PYTHONSAFEPATH drops that implicit
+# entry (3.11+; `python3 -P` is the flag form). Exported before the preflight import
+# below, which has exactly the same hole.
+export PYTHONSAFEPATH=1
 PYTHONPATH="$PYROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c 'import persona_review.validate' 2>/dev/null || {
 	echo "ce-codex-persona: cannot import persona_review.validate from $PYROOT" >&2
 	echo "  Set PERSONA_REVIEW_PYTHONPATH to the directory containing persona_review/." >&2
@@ -123,6 +166,16 @@ list_personas() {
 
 # Accept `ce-adversarial-reviewer`, `adversarial-reviewer`, or `adversarial-reviewer.md`.
 PERSONA="${PERSONA#ce-}"; PERSONA="${PERSONA%.md}"
+# A bare brief name, never a path. The name is interpolated into every artifact path, so
+# `../outside` resolved a findings-capable brief from outside personas/ AND put the run's
+# artifacts outside $RUN_DIR — where the clear-stale-artifacts `rm -f` above would then
+# delete files that were never ours to touch.
+case "$PERSONA" in
+	*/* | "" | .*)
+		echo "ce-codex-persona: persona '$PERSONA' must be a bare brief name, not a path" >&2
+		exit 2
+		;;
+esac
 PERSONA_FILE="$ASSETS/personas/$PERSONA.md"
 [ -f "$PERSONA_FILE" ] || {
 	echo "ce-codex-persona: unknown persona '$PERSONA'. Personas that return findings JSON:" >&2
@@ -195,14 +248,22 @@ build_prompt >"$PROMPT_FILE"
 # findings nobody can check against the code. Better to refuse and let the caller narrow the
 # scope. Exit 78 (EX_CONFIG) so a caller can tell "too big" from "review failed".
 preflight_size() {
-	local bytes budget_tokens tokens
+	local bytes budget_tokens tokens diff_bytes=0
 	bytes=$(wc -c <"$PROMPT_FILE")
+	# Count the DIFF, not just the prompt. The prompt does not contain the change — it
+	# tells the agent to fetch it — so weighing the prompt alone measured a near-constant
+	# ~1.2KB: `-b HEAD~2000` and `-b HEAD~1` produced the same number, the budget could
+	# never fire, and the advice to "narrow with -b" could not have helped. The diff is
+	# the input that actually overruns a context, and it is the one that was unmeasured.
+	if [ -n "$BASE" ]; then
+		diff_bytes=$(git -C "$REPO" diff "$BASE"..HEAD | wc -c | tr -d '[:space:]')
+	fi
 	budget_tokens="${CE_PERSONA_MAX_PROMPT_TOKENS:-80000}"
 	# ~4 chars/token is the same rough conversion CE's own large-diff preflight uses; this
 	# only has to be right enough to catch an order-of-magnitude overrun.
-	tokens=$(( bytes / 4 ))
+	tokens=$(( (bytes + diff_bytes) / 4 ))
 	[ "$tokens" -le "$budget_tokens" ] || {
-		echo "ce-codex-persona: prompt is ~${tokens} tokens (${bytes} bytes), over the ${budget_tokens}-token budget." >&2
+		echo "ce-codex-persona: review is ~${tokens} tokens (${bytes} prompt + ${diff_bytes} diff bytes), over the ${budget_tokens}-token budget." >&2
 		echo "  Narrow the review (-b a nearer base, or a smaller -c context) rather than sending it." >&2
 		echo "  Raise CE_PERSONA_MAX_PROMPT_TOKENS only if the provider can genuinely take it." >&2
 		exit 78
@@ -216,6 +277,16 @@ EVENTS_FILE="$RUN_DIR/$PERSONA-codex-events.jsonl"
 LAST_FILE="$RUN_DIR/$PERSONA-codex-last.json"
 FINDINGS_FILE="$RUN_DIR/$PERSONA-codex.json"
 PROV_FILE="$RUN_DIR/$PERSONA-codex-provenance.json"
+
+# Clear last run's artifacts before this one starts, and $LAST_FILE above all. codex
+# writes that file itself via -o, so this shell never truncates it the way `>` truncates
+# the event stream — which meant `[ -s "$LAST_FILE" ]` below could not tell "this run
+# answered" from "a run last Tuesday did". Any codex exit 0 with no final message (turn
+# ended on tool calls, sandbox denial, clean interrupt) re-validated the PREVIOUS run's
+# answer and rewrote provenance to certify it as this one's. The paths are deterministic
+# and $CE_PERSONA_RUN_DIR is a caller-supplied directory meant to be reused, so a failed
+# run must leave no artifact at all.
+rm -f "$LAST_FILE" "$FINDINGS_FILE" "$PROV_FILE"
 
 # Which brief and which schema this run actually used, by content hash. Two arms are only
 # comparable if they ran the same brief, and the briefs live in a plugin cache that updates
@@ -247,7 +318,7 @@ PROV_ARGS=(
 # force every optional field -- suggested_fix on every finding -- changing what a finding means.
 # The schema stays in the prompt and the gate enforces it after the fact.
 STATUS=0
-codex exec -C "$REPO" -s read-only -m "$MODEL" "${EFFORT_ARGS[@]}" \
+codex exec -C "$REPO" -s read-only -m "$MODEL" ${EFFORT_ARGS[@]+"${EFFORT_ARGS[@]}"} \
 	--ephemeral --color never --json -o "$LAST_FILE" - <"$PROMPT_FILE" >"$EVENTS_FILE" 2>&1 || STATUS=$?
 [ "$STATUS" -eq 0 ] || {
 	echo "ce-codex-persona: codex exited $STATUS" >&2

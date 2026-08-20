@@ -14,7 +14,8 @@ THREE TIERS, AND WHY
 Tier 0 is the wrapper's own summary line plus its exit status: a gating caller — CI, a
 pre-push hook, a loop deciding whether to iterate — branches on that and reads nothing.
 
-Tier 1 is `--list`: severity, file:line, title, confidence, and the ONE quoted line that
+Tier 1 is the default listing (`--list` names it explicitly and changes nothing):
+severity, file:line, title, confidence, and the ONE quoted line that
 motivated the finding. That last field is what makes a title trustworthy without the full
 evidence array, and it is why CE's own subagents return `first_evidence` in their compact
 return while the rest stays in the artifact. Roughly 20 tokens a finding.
@@ -35,6 +36,10 @@ from typing import Any, NoReturn
 
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 DEFAULT_SEVERITIES = ("P0", "P1")
+
+# A literal, not `__doc__`: `python -OO` strips docstrings, and reading `.strip()` off the
+# None that leaves behind turns a missing-argument message into an AttributeError.
+USAGE = "usage: ce-persona-findings <artifact> [--list] [--all] [--show N] [--json]"
 
 # A finding, and the artifact that holds them. Free-form by design: the schema lives in
 # the compound-engineering plugin, is read at run time, and may add fields we do not know
@@ -64,7 +69,7 @@ def ordered(findings: list[Finding]) -> list[tuple[int, Finding]]:
     return sorted(
         numbered,
         key=lambda pair: (
-            SEVERITY_ORDER.get(pair[1].get("severity"), 9),
+            SEVERITY_ORDER.get(str(pair[1].get("severity")), 9),
             str(pair[1].get("file", "")),
             pair[1].get("line") if isinstance(pair[1].get("line"), int) else 0,
         ),
@@ -125,6 +130,11 @@ def main(argv: list[str]) -> int:
         elif arg == "--json":
             as_json = True
             i += 1
+        elif arg == "--list":
+            # The default already IS the tier-1 listing. Accepted as a no-op because the
+            # docstring names `--list` as that tier, and a documented flag that exits 1
+            # with "unknown option" is worse than a redundant one.
+            i += 1
         elif arg.startswith("-"):
             fail(f"unknown option {arg}")
         else:
@@ -132,7 +142,7 @@ def main(argv: list[str]) -> int:
             i += 1
 
     if path is None:
-        sys.exit(__doc__.strip().splitlines()[0])
+        sys.exit(USAGE)
 
     obj = load(path)
     findings = obj["findings"]

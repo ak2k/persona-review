@@ -1,5 +1,5 @@
 {
-  "include": ["bin", "tests"],
+  "include": ["persona_review", "tests"],
   "pythonVersion": "3.13",
   "typeCheckingMode": "strict",
 
@@ -9,8 +9,28 @@
   // there should never be one — if strict ever costs more than it returns, change the
   // mode in the open rather than adding exemptions underneath it.
 
-  // The three executables are loaded by SourceFileLoader in the tests, not imported as
-  // modules, and they have no stubs to resolve against.
+  // `include` must name persona_review/ explicitly: bin/ holds two SHELL scripts, so an
+  // earlier ["bin", "tests"] analysed exactly one file — the test module — and reported
+  // a clean strict run over none of the code that ships.
   "reportMissingImports": "none",
-  "reportMissingModuleSource": "none"
+  "reportMissingModuleSource": "none",
+
+  // The mode change the comment above demands be made in the open, not a baseline.
+  //
+  // Every value in this program originates in `json.load` of a schema file it does not
+  // own, so it is `Any` at the boundary and Unknown everywhere downstream — 61 of the 67
+  // errors from turning strict on the library were that and nothing else. The usual fix
+  // is a TypedDict, and here it would be a lie: `Finding` is free-form ON PURPOSE
+  // because the compound-engineering plugin owns the schema, reads it at run time, and
+  // adds fields without asking. Pinning a shape would assert a contract this package has
+  // no authority to make.
+  //
+  // These four rules are off; every other strict rule stays on, and they still bite —
+  // the same run caught an `__all__` naming three modules the package never imported and
+  // a `__doc__.strip()` that crashes under `python -OO`. The `types` flake check pins
+  // that with a negative control, so a config that checks nothing fails loudly.
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownLambdaType": "none"
 }

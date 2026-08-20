@@ -14,6 +14,8 @@ Three modules, each also runnable as `python -m persona_review.<name>`:
 These are a package rather than loose executables because the type checker must be able
 to import them: hyphenated, suffix-less scripts can only be loaded dynamically, and
 everything a dynamic loader returns is untyped by construction.
-"""
 
-__all__ = ["findings", "flags", "validate"]
+No `__all__`: nothing does `from persona_review import *`, and the version here listed
+three submodules this file never imports, so it declared an export surface that did not
+exist.
+"""

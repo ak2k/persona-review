@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert the grok flags scripts/ce-grok-persona passes are still accepted.
+"""Assert the grok flags bin/ce-grok-persona passes are still accepted.
 
 `grok` arrives via ungated llm-agents digest bumps, so its CLI can move without any
 PR here naming it. That already bit once: the wrapper shipped `--effort max`, which
@@ -56,8 +56,8 @@ def argv_value(argv: list[str], flag: str) -> str:
     """The literal value the wrapper PASSES for `flag`, read from the invocation.
 
     Never from a regex over the whole file: the wrappers explain their flags in comments,
-    so a file-wide search returns whatever the prose says. That read the comment at
-    ce-grok-persona:133 rather than the flag 10 lines below it, and the two agreeing was
+    so a file-wide search returns whatever the prose says. That version read the comment
+    ABOVE the grok invocation rather than the flag inside it, and the two agreeing was
     luck -- retarget the flag while the comment stands and this check would certify the
     documentation.
     """
@@ -68,10 +68,19 @@ def argv_value(argv: list[str], flag: str) -> str:
 
 
 # The invocation ends at the shell, not at the end of the line. Without this the
-# pipeline tail (`| tee "$OUT_FILE" || STATUS=$?`) is tokenised as argv, and a valueless
-# flag in last position takes `|` as its successor -- so it looks value-taking, drops out
-# of coverage, and the probe loop silently becomes a no-op.
+# redirect tail (`>"$EVENTS_FILE" 2>"$ERR_FILE" || STATUS=$?`) is tokenised as argv, and a
+# valueless flag in last position takes the redirect as its successor -- so it looks
+# value-taking, drops out of coverage, and the probe loop silently becomes a no-op.
 SHELL_OPERATORS = frozenset({"|", "||", "&&", ";", ">", ">>", "2>", "&"})
+
+# Set membership is not enough: whitespace tokenisation yields `>"$EVENTS_FILE"` as ONE
+# token, not a bare `>`, so a redirect with its target attached matched nothing and the
+# tail stayed in argv. Anything starting with a redirect (optionally fd-prefixed) ends it.
+REDIRECT = re.compile(r"^\d*[<>]")
+
+
+def is_operator(tok: str) -> bool:
+    return tok in SHELL_OPERATORS or REDIRECT.match(tok) is not None
 
 
 def grok_argv(text: str) -> list[str]:
@@ -86,14 +95,14 @@ def grok_argv(text: str) -> list[str]:
             block.append(lines[i])
         argv = " ".join(b.rstrip().rstrip("\\") for b in block).split()
         for n, tok in enumerate(argv):
-            if tok in SHELL_OPERATORS:
+            if is_operator(tok):
                 return argv[:n]
         return argv
     sys.exit("FAIL: no `grok ...` invocation found in the wrapper.")
 
 
 def _is_terminator(tok: str | None) -> bool:
-    return tok is None or tok.startswith("--") or tok in SHELL_OPERATORS
+    return tok is None or tok.startswith("--") or is_operator(tok)
 
 
 def valueless_flags(argv: list[str]) -> list[str]:
@@ -149,7 +158,12 @@ def accepted_values(flag: str) -> set[str]:
 
 
 def main() -> int:
-    wrapper = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("scripts/ce-grok-persona")
+    # Default to the wrapper next to this package, not a path relative to the caller's
+    # cwd. Run by hand (`python3 -m persona_review.flags [wrapper]`) and not by any flake
+    # check: every probe needs a real `grok` binary, which a Nix build sandbox has no
+    # network or credentials to provide.
+    default = Path(__file__).resolve().parent.parent / "bin" / "ce-grok-persona"
+    wrapper = Path(sys.argv[1]) if len(sys.argv) > 1 else default
     text = wrapper.read_text()
     argv = grok_argv(text)
     wanted = resolve_wanted(text)

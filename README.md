@@ -29,8 +29,17 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it |
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
 
-Exit status is the verdict: `0` valid findings, non-zero when the runner failed or the answer was
-not schema-valid findings, `2` for an unusable persona, `78` for an over-budget prompt.
+Exit status is the verdict:
+
+| Exit | Meaning |
+|------|---------|
+| `0` | schema-valid findings (an empty findings array is a valid answer) |
+| `1` | the runner failed, or the answer was not schema-valid findings |
+| `2` | usage error: no persona, a persona that cannot return findings, a base ref that does not resolve |
+| `78` | the review is over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
+
+The budget counts the prompt **plus** `git diff <base>..HEAD`, because the prompt does not contain
+the diff — it tells the agent to fetch it, and that is the input that overruns a context.
 
 ## How the findings are extracted
 
@@ -52,7 +61,12 @@ A transcript-scanning mode survives as a fallback, with both of its hard-won anc
   package: it uses the subscription you already have rather than an API key of its own.
 - The compound-engineering plugin installed, for the persona briefs and the findings schema. Point
   `$CE_REVIEW_ASSETS` at a `references/` directory to override.
-- `python3`.
+- `python3` 3.11 or newer (the wrappers set `PYTHONSAFEPATH`).
+- `bash` 4.4 or newer. macOS ships 3.2, where expanding an empty array under `set -u` aborts — and
+  with an `EXIT` trap installed, that abort exits **0**. The wrappers refuse to run on it rather
+  than risk reporting success for a review that never happened. The Nix package patches the shebang,
+  so this only affects a source checkout.
+- `git`, for the diff the size preflight weighs.
 
 ## Install
 
@@ -77,12 +91,19 @@ nix flake check   # package build, lint, strict types, unit tests, packaged-wrap
 nix develop
 ```
 
-The unit suite asserts the **authored** wrappers; the process suite drives the **packaged** ones
-against stub runners. Both matter, and they are not the same thing — `makeWrapper` shims carry none
-of the source text the invariants check.
+The unit suite asserts the **authored** wrappers against the **packaged** library; the process suite
+drives the **packaged** wrappers against stub runners. Both matter, and they are not the same thing —
+`makeWrapper` shims carry none of the source text the invariants check. The unit suite asserts which
+library it actually imported, because the earlier version put its own source root ahead of
+`PYTHONPATH` and passed with every packaged module replaced by `raise RuntimeError`.
 
-Type checking is `basedpyright` in **strict** mode with no baseline. If strict ever costs more than
-it returns, change the mode in the open rather than adding exemptions underneath it.
+Type checking is `basedpyright` in **strict** mode with no baseline, over `persona_review/` and
+`tests/`. Four rules are off, in `pyrightconfig.json` and with reasons: every value here originates
+in `json.load` of a schema this package does not own, so `reportUnknown*` fires on the whole program
+and the usual remedy — a `TypedDict` — would assert a shape the compound-engineering plugin is free
+to change. Everything else stays on. The `types` check ends with a **negative control**: it injects
+`return x + None` into `persona_review/validate.py` and fails if the checker accepts it, because
+this check once passed while analysing exactly one file and none of the code that ships.
 
 ## Licence
 

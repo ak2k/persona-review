@@ -51,6 +51,12 @@ WHAT THIS DOES NOT COVER
 A well-formed but EMPTY findings array is schema-valid and stays valid — a model that
 quietly gave up still passes. Distinguishing "found nothing" from "gave up" needs a
 judgement about the transcript that this deliberately does not attempt.
+
+`grok-events` narrows that gap from one side only: schema-constrained decoding means a
+truncated or refused run STILL returns a well-formed empty array, so the run's own
+terminal signals (`is_error`, `subtype`, `stop_reason`) are checked before its answer is
+believed. Those checks are generalised from one observed successful run, and the
+stop_reason half is a denylist — a novel early-stop value would pass.
 """
 
 from __future__ import annotations
@@ -86,8 +92,11 @@ def findings_object(text: str, prompt: str) -> Artifact:
     cut was added. The prompt already demands the object come last, so requiring it is
     not a new constraint on the model.
     """
+    # An empty boundary must not cut: `"abc".rfind("")` is 3, so a blank prompt would
+    # slice the whole output away and every answer would read as "no findings JSON".
+    # `from_object_file` relies on this to reuse the end anchor with no boundary at all.
     boundary = prompt.rstrip().rsplit("\n", 1)[-1]
-    cut = text.rfind(boundary)
+    cut = text.rfind(boundary) if boundary else -1
     if cut != -1:
         text = text[cut + len(boundary) :]
 
@@ -126,27 +135,76 @@ JSON_TYPES: dict[str, tuple[type, ...]] = {
     "boolean": (bool,),
     "array": (list,),
     "object": (dict,),
+    "null": (type(None),),
 }
 
 
+def _type_names(label: str, spec: dict[str, Any]) -> list[str]:
+    """The declared type(s) for one field, normalised to a list of known names.
+
+    JSON Schema lets `type` be a LIST, and the installed plugin schema uses that form:
+    `"suggested_fix": {"type": ["string", "null"]}`. Reading only the `str` case skipped
+    that field's check entirely, silently -- so an unrecognised declaration fails here
+    instead. A gate that cannot understand a rule must not certify against it.
+    """
+    declared: object = spec.get("type")
+    if declared is None:
+        return []
+    raw: list[object] = list(declared) if isinstance(declared, list) else [declared]
+    names = [name for name in raw if isinstance(name, str) and name in JSON_TYPES]
+    if len(names) != len(raw):
+        fail(
+            f"findings schema declares a type this gate cannot check for {label}: "
+            f"{declared!r}. Passing a rule it does not understand is how a validator "
+            f"certifies a shape nobody validated."
+        )
+    return names
+
+
 def _check_type(label: str, value: object, spec: dict[str, Any]) -> None:
-    """Enforce the declared type and array minimum for one field.
+    """Enforce the declared type and the schema's simple bounds for one field.
 
     Presence and enums alone let a model pass `"line": "nope"`, `"pre_existing": "no"`,
     or `"evidence": []` -- shapes the plugin schema rejects and downstream merge tooling
     then trips over, having been told the review was valid.
     """
-    declared = spec.get("type")
-    if isinstance(declared, str) and declared in JSON_TYPES:
-        allowed = JSON_TYPES[declared]
-        ok = isinstance(value, allowed) and not (
-            declared in ("integer", "number") and isinstance(value, bool)
-        )
+    names = _type_names(label, spec)
+    if names:
+        allowed = tuple(t for name in names for t in JSON_TYPES[name])
+        # Only exclude bool when EVERY declared type is numeric; a union that genuinely
+        # admits booleans still should.
+        numeric_only = all(name in ("integer", "number") for name in names)
+        ok = isinstance(value, allowed) and not (numeric_only and isinstance(value, bool))
         if not ok:
-            fail(f"{label} must be {declared}, got {type(value).__name__}")
+            fail(f"{label} must be {' or '.join(names)}, got {type(value).__name__}")
+
     minimum = spec.get("minItems")
     if isinstance(value, list) and isinstance(minimum, int) and len(value) < minimum:
         fail(f"{label} needs at least {minimum} item(s), got {len(value)}")
+
+    # The numeric and string bounds the plugin schema actually declares: `line` carries
+    # `minimum: 1` and `title` carries `maxLength: 100`. Skipping them passed a finding
+    # pointing at line 0 -- no such line -- as a valid citation.
+    lower = spec.get("minimum")
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isinstance(lower, (int, float))
+        and not isinstance(lower, bool)
+        and value < lower
+    ):
+        fail(f"{label} must be >= {lower}, got {value}")
+    cap = spec.get("maxLength")
+    if isinstance(value, str) and isinstance(cap, int) and len(value) > cap:
+        fail(f"{label} is {len(value)} characters, over the schema's maxLength of {cap}")
+
+    # An array's declared element shape. `evidence` is an array of strings, so without
+    # this `"evidence": [{"a": 1}]` satisfied minItems and then got rendered as the
+    # quote-the-line evidence a reader is supposed to be able to check against the code.
+    items = spec.get("items")
+    if isinstance(value, list) and isinstance(items, dict):
+        for n, element in enumerate(value):
+            _check_type(f"{label}[{n}]", element, items)
 
 
 def validate(found: Artifact, schema: dict[str, Any]) -> int:
@@ -200,18 +258,53 @@ def validate(found: Artifact, schema: dict[str, Any]) -> int:
 
 
 def from_object_file(text: str) -> Artifact:
-    """The findings object read straight from a file that IS the object.
+    """The findings object from a file holding the model's FINAL MESSAGE and nothing else.
 
     `codex exec -o FILE` writes only the agent's final message -- 72 bytes against a
-    613-byte transcript on a trivial prompt -- so there is nothing to scan.
+    613-byte transcript on a trivial prompt -- so there is no transcript to scan.
+
+    A bare object is the common case, so try that first. But the prompt asks for the
+    object "at the END of your reply (after any analysis)", and a model that takes that
+    literally -- a paragraph, then the object, often inside a ```json fence -- had a
+    complete review thrown away with "final message is not JSON" after a full high-effort
+    run. Fall back to the same end-anchored scan transcript mode uses, with no boundary to
+    cut: this file is ALREADY only the final message, so "last thing in it" is the same
+    guarantee, and an object the model merely quoted mid-message still loses.
     """
-    try:
-        obj = json.loads(text)
-    except ValueError as exc:
-        fail(f"final message is not JSON: {exc}")
-    if not isinstance(obj, dict) or "findings" not in obj:
-        fail("final message is JSON but carries no findings key")
-    return obj
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+        except ValueError:
+            pass
+        else:
+            if not isinstance(obj, dict) or "findings" not in obj:
+                fail("final message is JSON but carries no findings key")
+            return obj
+    return findings_object(text, "")
+
+
+# `subtype` is a closed vocabulary, so an allowlist is safe: anything else is a run that
+# did not finish normally.
+GOOD_SUBTYPES = frozenset({"success"})
+
+# `stop_reason` is an OPEN vocabulary, so this is a denylist -- an unfamiliar but healthy
+# value must not fail a good review. Deliberately not exhaustive: these are the
+# terminations that yield a truncated or refused answer which schema-constrained decoding
+# would still render as a well-formed empty findings object.
+BAD_STOP_REASONS = frozenset(
+    {
+        "max_tokens",
+        "max_output_tokens",
+        "max_turns",
+        "refusal",
+        "error",
+        "timeout",
+        "aborted",
+        "cancelled",
+        "canceled",
+    }
+)
 
 
 def from_grok_events(text: str) -> Artifact:
@@ -232,12 +325,26 @@ def from_grok_events(text: str) -> Artifact:
             event = json.loads(line)
         except ValueError:
             continue
+        # Last wins, deliberately: the TERMINAL result event is the run's verdict, and a
+        # first-wins read would let an early one certify a run that kept going.
         if isinstance(event, dict) and event.get("type") == "result":
             result = event
     if result is None:
         fail("no `result` event in grok's output stream")
     if result.get("is_error"):
         fail(f"grok reported an error result (stop_reason={result.get('stop_reason')!r})")
+
+    # Beyond is_error, because schema-constrained decoding is what makes this necessary:
+    # a run that hit the token ceiling or refused still hands back a well-formed
+    # `{"findings": []}`, which is indistinguishable from a clean review. These two
+    # checks are asymmetric on purpose, and both are generalised from a single observed
+    # successful run (grok 1.0.4: subtype="success", stop_reason="end_turn").
+    subtype = result.get("subtype")
+    if isinstance(subtype, str) and subtype not in GOOD_SUBTYPES:
+        fail(f"grok's run ended with subtype={subtype!r}, which is not a completed review")
+    stop = result.get("stop_reason")
+    if isinstance(stop, str) and stop in BAD_STOP_REASONS:
+        fail(f"grok stopped early (stop_reason={stop!r}); the answer is truncated or refused")
     obj = result.get("structured_output")
     if isinstance(obj, dict) and "findings" in obj:
         return obj
