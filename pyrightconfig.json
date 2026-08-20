@@ -1,0 +1,16 @@
+{
+  "include": ["bin", "tests"],
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "strict",
+
+  // Strict from the first commit, deliberately. The repo this code came from runs
+  // basic-mode with a baseline of grandfathered files; starting a new package at that
+  // bar would inherit a compromise made for other code. There is no baseline here and
+  // there should never be one — if strict ever costs more than it returns, change the
+  // mode in the open rather than adding exemptions underneath it.
+
+  // The three executables are loaded by SourceFileLoader in the tests, not imported as
+  // modules, and they have no stubs to resolve against.
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}

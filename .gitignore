@@ -1,0 +1,9 @@
+# Tool caches embed absolute paths from whoever ran them. Ruff self-ignores its cache,
+# but relying on a tool to exclude itself from a public repo is not a control.
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+# nix build symlinks
+result
+result-*

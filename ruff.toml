@@ -1,0 +1,18 @@
+# Explicit rule selection, because implicit defaults made a local `ruff check` disagree
+# with the sandboxed one: no config meant each fell back to its own discovery, and a
+# lint that passes on a laptop and fails in CI is worse than either outcome alone.
+target-version = "py313"
+line-length = 100
+
+[lint]
+select = [
+  "E", # pycodestyle errors
+  "F", # pyflakes
+  "I", # import sorting
+  "W", # pycodestyle warnings
+  "UP", # pyupgrade
+  "B", # bugbear
+  "SIM", # simplify
+  "PERF", # performance
+  "EXE", # shebang / executable-bit agreement
+]

@@ -1,0 +1,29 @@
+persona-review
+Copyright 2026 ak2k
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Third-party material
+--------------------------------------------------------------------------------
+
+This software READS, at run time, assets belonging to the compound-engineering
+plugin (https://github.com/EveryInc/compound-engineering-plugin), which is
+licensed MIT, Copyright (c) 2025 Every:
+
+  - reviewer persona briefs  (skills/ce-code-review/references/personas/*.md)
+  - the findings schema      (skills/ce-code-review/references/findings-schema.json)
+  - the subagent template's confidence rubric and schema-conformance blocks
+                             (skills/ce-code-review/references/subagent-template.md)
+
+Those files are NOT redistributed here. They are located on the user's own
+machine, in an installed copy of that plugin, and read at run time. Should any of
+them ever be vendored into this repository, the MIT notice above must travel with
+them and this section must say so explicitly rather than leaving an Apache-2.0
+header over MIT-licensed text.
+
+Two design ideas were taken from nyldn/claude-octopus
+(https://github.com/nyldn/claude-octopus), MIT, Copyright (c) 2026 nyldn: a
+fail-fast prompt-size preflight, and passing prompts by file rather than argv.
+Both were reimplemented rather than copied; no code from that project is
+included.
