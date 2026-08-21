@@ -1,0 +1,26 @@
+[project]
+name = "persona-review"
+version = "0.2.0"
+description = "Run a compound-engineering review persona through grok or codex and get schema-valid findings back, not a transcript"
+readme = "README.md"
+license = "Apache-2.0"
+# 3.12 for PEP 695 `type` statements. The floor is enforced by the interpreter itself
+# rather than by a runtime check: a console entry point is generated against the Python it
+# was installed with, so there is no version to guess at run time.
+requires-python = ">=3.12"
+# No dependencies, by design. `grok` and `codex` are the user's own
+# subscription-authenticated CLIs, resolved from PATH at run time so a review uses the login
+# they already have rather than an API key this package would need to hold.
+dependencies = []
+
+[project.scripts]
+ce-grok-persona = "persona_review.cli:grok_main"
+ce-codex-persona = "persona_review.cli:codex_main"
+ce-persona-findings = "persona_review.findings:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["persona_review"]

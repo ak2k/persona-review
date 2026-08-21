@@ -7,3 +7,8 @@ __pycache__/
 # nix build symlinks
 result
 result-*
+
+# setuptools build products, from a local `pip install -e .` or `python -m build`
+build/
+dist/
+*.egg-info/

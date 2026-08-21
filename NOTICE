@@ -22,8 +22,19 @@ them ever be vendored into this repository, the MIT notice above must travel wit
 them and this section must say so explicitly rather than leaving an Apache-2.0
 header over MIT-licensed text.
 
-Two design ideas were taken from nyldn/claude-octopus
-(https://github.com/nyldn/claude-octopus), MIT, Copyright (c) 2026 nyldn: a
-fail-fast prompt-size preflight, and passing prompts by file rather than argv.
-Both were reimplemented rather than copied; no code from that project is
+Four design ideas were taken from nyldn/claude-octopus
+(https://github.com/nyldn/claude-octopus), MIT, Copyright (c) 2026 nyldn:
+
+  - a fail-fast prompt-size preflight (their `fail` branch only; their default
+    strategy summarizes an oversized prompt, and findings from a summarized diff
+    cannot be checked against the code)
+  - passing prompts by file rather than argv
+  - capturing a provider's stdout to a FILE rather than through a pipe or `tee`.
+    Their comment records why: provider CLIs spawn helpers that outlive the main
+    process while holding the inherited stdout, so a reader waiting for EOF hangs
+    on a run that has already finished
+  - inferring liveness from output growth rather than from parsed events, so the
+    watchdog stays correct across CLI versions that rename their event types
+
+All four were reimplemented rather than copied; no code from that project is
 included.

@@ -8,11 +8,12 @@ Built for a calling agent. One invocation costs the caller a single line of stdo
 
 ```console
 $ ce-grok-persona adversarial-reviewer -b origin/main
-ce-persona: 5 findings (1 P1, 3 P2, 1 P3) -> /tmp/.../adversarial-reviewer-grok.json
+ce-grok-persona: 5 findings (1 P1, 3 P2, 1 P3) -> /tmp/.../adversarial-reviewer-grok.json
 ```
 
-The model's reasoning, its tool calls, and the full event stream go to files. A 1 MB event stream
-and a 100-byte findings artifact is a real measurement from a real run — that ratio is the point.
+The model's reasoning, its tool calls, and the full event stream go to files. A 1.4 MB event
+stream and a 10 KB findings artifact is a real measurement from a real run — that ratio is the
+point.
 
 ## Why this exists
 
@@ -26,34 +27,52 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | Tier | Cost | What you get |
 |------|------|--------------|
 | 0 | one line + exit status | counts by severity, artifact path. A gating caller reads nothing else. |
-| 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it |
+| 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it. P0/P1 only; `--all` for every severity |
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
+| — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
 
-Exit status is the verdict:
+`N` in `--show N` is the number rendered as `#N` in the listing. Numbering follows the
+artifact's own order; the listing is *displayed* most-severe-first, so `#1` is not
+necessarily the top row.
+
+**Exit status is the verdict.** For `ce-grok-persona` / `ce-codex-persona`:
 
 | Exit | Meaning |
 |------|---------|
-| `0` | schema-valid findings (an empty findings array is a valid answer) |
-| `1` | the runner failed, or the answer was not schema-valid findings |
-| `2` | usage error: no persona, a persona that cannot return findings, a base ref that does not resolve |
-| `78` | the review is over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
+| `0` | schema-valid findings (an empty findings array is valid) |
+| `1` | the answer was not schema-valid findings — the gate refused |
+| `2` | usage error: bad arguments, unknown or markdown-only persona, bad `-C`, unresolvable `-b`, malformed `CE_PERSONA_*` value |
+| `3` | environment error: the runner, `git` or the plugin assets are missing, or `CE_PERSONA_RUN_DIR` cannot be created |
+| `4` | the runner itself exited non-zero |
+| `5` | idle or hard timeout; the run was killed and partial output kept |
+| `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
 
-The budget counts the prompt **plus** `git diff <base>..HEAD`, because the prompt does not contain
-the diff — it tells the agent to fetch it, and that is the input that overruns a context.
+`ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
+`1` the file is unreadable or is not a findings artifact, `2` usage error.
+
+Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
+per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
+as *its* input; the fence is what lets the consumer tell data from instructions. `--json` is
+unfenced, because a programmatic caller parses it rather than reading it.
 
 ## How the findings are extracted
 
-Not by scanning prose. That heuristic produced two silent false-passes — the persona brief's own
-example object, echoed back inside a replayed prompt, validating as a completed review.
+Not by scanning prose. That heuristic produced three silent false-passes.
 
 - **grok** — `--json-schema` combined with `--output-format streaming-messages-json`. This composes,
   despite grok's help text saying the schema implies non-streaming JSON: the terminal `result` event
-  carries `structured_output` already parsed, *and* the stream still grows for liveness.
-- **codex** — `-o` writes only the agent's final message. Not `--output-schema`: OpenAI's strict mode
-  rejects the plugin's schema outright and would force every optional field, changing what a finding
-  means.
+  carries `structured_output` already parsed, *and* the stream still grows for liveness. The run's
+  own terminal status (`is_error`, `subtype`, `stop_reason`) is checked before its answer is
+  believed, because schema-constrained decoding means a truncated run still returns a well-formed
+  empty findings array.
+- **codex** — `-o` writes only the agent's final message, and the prompt requires that message to be
+  exactly one JSON object. Not `--output-schema`: OpenAI's strict mode rejects the plugin's schema
+  outright and would force every optional field, changing what a finding means.
 
-A transcript-scanning mode survives as a fallback, with both of its hard-won anchors intact.
+The strictness is load-bearing. When prose is allowed around the answer, a model that gives up can
+append the brief's own schema-valid **example** object and read as a clean review — and a model that
+found real defects can append the same example and have them silently replaced by an empty array.
+Both were demonstrated by independent reviewers against a version that permitted it.
 
 ## Requirements
 
@@ -61,12 +80,8 @@ A transcript-scanning mode survives as a fallback, with both of its hard-won anc
   package: it uses the subscription you already have rather than an API key of its own.
 - The compound-engineering plugin installed, for the persona briefs and the findings schema. Point
   `$CE_REVIEW_ASSETS` at a `references/` directory to override.
-- `python3` 3.11 or newer (the wrappers set `PYTHONSAFEPATH`).
-- `bash` 4.4 or newer. macOS ships 3.2, where expanding an empty array under `set -u` aborts — and
-  with an `EXIT` trap installed, that abort exits **0**. The wrappers refuse to run on it rather
-  than risk reporting success for a review that never happened. The Nix package patches the shebang,
-  so this only affects a source checkout.
-- `git`, for the diff the size preflight weighs.
+- `python3` 3.12 or newer.
+- `git`, only when `-b` is passed.
 
 ## Install
 
@@ -81,29 +96,56 @@ inputs.persona-review.url = "github:ak2k/persona-review";
 |----------|--------|
 | `CE_REVIEW_ASSETS` | the plugin `references/` directory to read briefs and schema from |
 | `CE_PERSONA_RUN_DIR` | where artifacts land; defaults to a fresh temp dir |
-| `CE_PERSONA_MAX_PROMPT_TOKENS` | prompt budget, default 80000. Over it, the run is refused — never summarized, because a review of a summarized diff produces findings nobody can check |
-| `PERSONA_REVIEW_PYTHONPATH` | root containing `persona_review/`; set by the packaged build |
+| `CE_PERSONA_MAX_PROMPT_TOKENS` | budget, default 80000. Counts the prompt **plus** `git diff <base>..HEAD` |
+| `CE_PERSONA_IDLE_SECS` | kill after this long with no output, default 600 |
+| `CE_PERSONA_HARD_SECS` | kill after this long overall, default 2400 |
+
+**The budget only means something with `-b`.** Without a base ref the prompt does not contain the
+change and does not name a range — the model picks its own scope — so there is genuinely nothing to
+weigh, and the budget bounds the prompt alone. That is a real limit, stated rather than papered over
+with a guessed base.
+
+## Breaking changes in 0.2.0
+
+The implementation moved from two shell scripts to one Python package. The commands and their flags
+are unchanged; the exit statuses are not:
+
+- A **missing persona argument** now exits `2` with usage on stderr. It previously printed usage to
+  **stdout and exited 0** — success, for an invocation that reviewed nothing.
+- A **runner failure** is now `4` rather than the runner's own status. Propagating it verbatim
+  collided with the codes reserved for usage (`2`) and over-budget (`78`), so a caller could not
+  tell them apart.
+- New refusals: `3` for a missing runner/git/plugin, `5` for a timeout, `2` for a persona name that
+  is not a bare brief name or a `-b` that does not resolve.
+- `CE_PERSONA_MAX_PROMPT_TOKENS` now counts the diff as well as the prompt, so an existing tuned
+  value bounds more than it used to.
+- `ce-persona-findings` gained `-h`/`--help` and now uses `2` for usage errors rather than `1` for
+  everything, so a caller can tell a bad invocation from an unusable artifact.
+- Both review commands now enforce timeouts. A wedged provider previously hung forever and took the
+  calling agent with it; `CE_PERSONA_IDLE_SECS` and `CE_PERSONA_HARD_SECS` bound that.
 
 ## Development
 
 ```console
-nix flake check   # package build, lint, strict types, unit tests, packaged-wrapper process tests
+nix flake check   # package build, lint, strict types, unit tests, packaged-process tests
 nix develop
 ```
 
-The unit suite asserts the **authored** wrappers against the **packaged** library; the process suite
-drives the **packaged** wrappers against stub runners. Both matter, and they are not the same thing —
-`makeWrapper` shims carry none of the source text the invariants check. The unit suite asserts which
-library it actually imported, because the earlier version put its own source root ahead of
-`PYTHONPATH` and passed with every packaged module replaced by `raise RuntimeError`.
+The unit suite exercises the packaged library and asserts which copy it imported — an earlier
+version put its own source root ahead of `PYTHONPATH` and passed with every packaged module replaced
+by `raise RuntimeError`. The process suite drives the **installed console scripts** against stub
+runners, with a PATH that deliberately cannot reach a real `grok` or `codex`, and every case runs
+for **both** providers: when the two runners were separate scripts, guards were repeatedly added to
+both and tested against only one.
 
-Type checking is `basedpyright` in **strict** mode with no baseline, over `persona_review/` and
-`tests/`. Four rules are off, in `pyrightconfig.json` and with reasons: every value here originates
-in `json.load` of a schema this package does not own, so `reportUnknown*` fires on the whole program
-and the usual remedy — a `TypedDict` — would assert a shape the compound-engineering plugin is free
-to change. Everything else stays on. The `types` check ends with a **negative control**: it injects
-`return x + None` into `persona_review/validate.py` and fails if the checker accepts it, because
-this check once passed while analysing exactly one file and none of the code that ships.
+Type checking is `basedpyright` in **strict** mode, with no baseline and no rule suppressions. The
+JSON boundary is typed (`validate.JSONValue`) rather than silenced. The `types` check ends with a
+negative control that injects `return x + None` into the library and fails if the checker accepts
+it — because this check once passed while analysing exactly one file and none of the code that
+ships.
+
+`python3 -m persona_review.flags` probes the installed `grok` for CLI drift. It needs a real
+authenticated binary, so no flake check runs it.
 
 ## Licence
 
