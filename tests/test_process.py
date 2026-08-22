@@ -96,6 +96,17 @@ if spec.get("stdout"):
 if last is not None and spec.get("last") is not None:
     with open(last, "w") as fh:
         fh.write(spec["last"])
+if spec.get("stubborn_child"):
+    # A helper that ignores SIGTERM, like the real provider CLIs' subprocesses. The parent
+    # dying is not evidence the group did.
+    import signal as _signal
+    _pid = os.fork()
+    if _pid == 0:
+        _signal.signal(_signal.SIGTERM, _signal.SIG_IGN)
+        time.sleep(300)
+        os._exit(0)
+    with open(os.environ["STUB_CHILD"], "w") as fh:
+        fh.write(str(_pid))
 if spec.get("heartbeat"):
     while True:
         sys.stdout.write(".")
@@ -162,6 +173,7 @@ class Harness(unittest.TestCase):
         self.run_dir.mkdir()
         self.spec = self.work / "spec.json"
         self.argv_log = self.work / "argv.json"
+        self.child_pid_file = self.work / "child.pid"
 
         installed = os.environ.get("PERSONA_REVIEW_BIN")
         self.commands: dict[str, Path] = {}
@@ -214,6 +226,7 @@ class Harness(unittest.TestCase):
                 "CE_PERSONA_RUN_DIR": str(self.run_dir),
                 "STUB_SPEC": str(self.spec),
                 "STUB_ARGV": str(self.argv_log),
+                "STUB_CHILD": str(self.child_pid_file),
                 # Generous by default; the watchdog tests override them.
                 "CE_PERSONA_IDLE_SECS": "60",
                 "CE_PERSONA_HARD_SECS": "120",
@@ -223,22 +236,36 @@ class Harness(unittest.TestCase):
         return env
 
     def review(
-        self, provider: str, *args: str, timeout: float = 120, **envextra: str
+        self,
+        provider: str,
+        *args: str,
+        timeout: float = 120,
+        env_extra: dict[str, str] | None = None,
+        **envextra: str,
     ) -> subprocess.CompletedProcess[str]:
+        merged = {**(env_extra or {}), **envextra}
         return subprocess.run(
             [str(self.commands[provider]), *args],
             capture_output=True,
             text=True,
-            env=self.env(**envextra),
+            env=self.env(**merged),
             cwd=self.work,
             timeout=timeout,
             check=False,
         )
 
     def good_answer(self, provider: str) -> None:
-        """Spec a stub that returns a valid review through this provider's own channel."""
+        """Spec a stub that returns a valid review through this provider's own channel.
+
+        BOTH streams carry the leak marker. The grok fixture used to be marker-free, so the
+        "transcript never reaches stdout" assertion could not have failed for the grok arm
+        however the event stream was routed.
+        """
         if provider == "grok":
-            self.set_spec(stdout=grok_stream(ANSWER))
+            self.set_spec(
+                stdout='{"type":"assistant","text":"transcript the caller must never see"}\n'
+                + grok_stream(ANSWER)
+            )
         else:
             self.set_spec(stdout="transcript the caller must never see\n", last=ANSWER)
 
@@ -247,6 +274,17 @@ class Harness(unittest.TestCase):
 
     def provenance(self, provider: str) -> Path:
         return self.run_dir / f"adversarial-reviewer-{provider}-provenance.json"
+
+    def assert_run_dir_clean(self, provider: str) -> None:
+        """No artifact from an earlier run survives.
+
+        Named files are not enough: asserting only `.json` and `-provenance.json` left a
+        stale `-stderr.log` — the one artifact the failure path reads back — sitting in a
+        directory the code promises to have cleared, and the test stayed green.
+        """
+        stem = f"adversarial-reviewer-{provider}"
+        leftovers = sorted(p.name for p in self.run_dir.iterdir() if p.name.startswith(stem))
+        self.assertEqual(leftovers, [], f"stale artifacts left in the run dir: {leftovers}")
 
 
 class TestContract(Harness):
@@ -321,6 +359,11 @@ class TestGate(Harness):
     def test_a_give_up_quoting_the_brief_example_fails(self):
         # The regression two model families found independently: a refusal plus the brief's
         # own empty example used to validate as a clean review.
+        #
+        # For grok this exercises the RAW-TEXT fallback (`result`), not the `structured_output`
+        # channel `--json-schema` actually uses. That distinction is not cosmetic — see
+        # test_an_empty_structured_output_is_the_documented_gap below, which pins what the
+        # production channel really does rather than letting this test imply it is covered.
         text = "I could not inspect the repository. The requested shape is:\n\n" + json.dumps(
             {"reviewer": "adversarial", "findings": [], "residual_risks": [], "testing_gaps": []}
         )
@@ -332,6 +375,22 @@ class TestGate(Harness):
                     self.set_spec(stdout="", last=text)
                 proc = self.review(provider, "adversarial-reviewer")
                 self.assertEqual(proc.returncode, 1, proc.stdout)
+
+    def test_an_empty_structured_output_is_the_documented_gap(self):
+        # Executable documentation of the ONE hole this package does not close, on the exact
+        # channel production uses: a healthy terminal event carrying a schema-valid EMPTY
+        # findings object is accepted, because "found nothing" and "quietly gave up" are
+        # indistinguishable without judging the transcript.
+        #
+        # It is asserted rather than left implicit so that closing it later fails loudly
+        # here, and so no other test can be read as already covering it.
+        empty = json.dumps(
+            {"reviewer": "adversarial", "findings": [], "residual_risks": [], "testing_gaps": []}
+        )
+        self.set_spec(stdout=grok_stream(empty))
+        proc = self.review("grok", "adversarial-reviewer")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("0 findings", proc.stdout)
 
     def test_a_type_invalid_answer_fails(self):
         for provider in PROVIDERS:
@@ -549,7 +608,11 @@ class TestBudget(Harness):
                 self.good_answer(provider)
                 ext_marker.unlink(missing_ok=True)
                 tc_marker.unlink(missing_ok=True)
-                self.review(provider, "adversarial-reviewer", "-C", str(repo), "-b", base)
+                proc = self.review(provider, "adversarial-reviewer", "-C", str(repo), "-b", base)
+                # Assert the run SUCCEEDED first. Without this the markers are also absent
+                # when the guarded git call simply fails before dispatch, so the test would
+                # pass while proving nothing about the mitigation.
+                self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertFalse(ext_marker.exists(), "the repo's diff.external driver executed")
                 self.assertFalse(tc_marker.exists(), "the repo's textconv driver executed")
 
@@ -598,6 +661,50 @@ class TestArtifactLifecycle(Harness):
                 self.assertFalse(self.artifact(provider).exists())
                 self.assertFalse(self.provenance(provider).exists())
 
+    def test_every_early_failure_leaves_no_stale_artifact(self):
+        # Not just the budget refusal. The run dir is cleared as soon as the persona is
+        # known, so a failure at ANY later preflight — a missing binary, an unreadable
+        # context file — cannot leave the previous run's findings at the path a caller reads.
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider, case="missing binary"):
+                self._seed(provider)
+                (self.bindir / provider).unlink()
+                self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 3)
+                self.assert_run_dir_clean(provider)
+                (self.bindir / provider).write_text(STUB, encoding="utf-8")
+                (self.bindir / provider).chmod(0o755)
+
+            with self.subTest(provider=provider, case="unreadable context"):
+                self._seed(provider)
+                proc = self.review(
+                    provider, "adversarial-reviewer", "-c", str(self.work / "no-such-context.md")
+                )
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assert_run_dir_clean(provider)
+
+    def test_a_non_finite_timeout_is_refused_rather_than_disabling_the_watchdog(self):
+        # float() accepts nan and inf, and every deadline is `elapsed >= value`, which is
+        # False forever against either — a typo would silently switch the watchdog off.
+        for provider in PROVIDERS:
+            for name in ("CE_PERSONA_IDLE_SECS", "CE_PERSONA_HARD_SECS"):
+                for value in ("nan", "inf", "-inf"):
+                    with self.subTest(provider=provider, var=name, value=value):
+                        self.good_answer(provider)
+                        proc = self.review(
+                            provider, "adversarial-reviewer", env_extra={name: value}
+                        )
+                        self.assertEqual(proc.returncode, 2, proc.stderr)
+
+    def test_a_non_finite_budget_is_a_usage_error_not_a_crash(self):
+        for provider in PROVIDERS:
+            for value in ("nan", "inf"):
+                with self.subTest(provider=provider, value=value):
+                    self.good_answer(provider)
+                    proc = self.review(
+                        provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS=value
+                    )
+                    self.assertEqual(proc.returncode, 2, proc.stderr)
+
     def test_a_refusal_before_dispatch_leaves_no_stale_artifact(self):
         # A run refused at the budget or for a bad base never reaches the runner, and used to
         # leave the previous run's findings and provenance in place.
@@ -608,8 +715,7 @@ class TestArtifactLifecycle(Harness):
                     provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1"
                 )
                 self.assertEqual(proc.returncode, 78)
-                self.assertFalse(self.artifact(provider).exists())
-                self.assertFalse(self.provenance(provider).exists())
+                self.assert_run_dir_clean(provider)
 
 
 class TestWatchdogs(Harness):
@@ -641,6 +747,77 @@ class TestWatchdogs(Harness):
                 )
                 self.assertEqual(proc.returncode, 5, proc.stderr)
                 self.assertIn("hard timeout", proc.stderr)
+
+    def test_a_timeout_kills_helpers_that_ignore_sigterm(self):
+        # The direct child exiting is not proof the process group did. A parent with default
+        # SIGTERM handling dies at once while a helper that ignores it keeps running, so a
+        # watchdog that waits on the child alone reports a kill it did not perform — and the
+        # provider keeps working, and keeps the artifact descriptors open.
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                self.child_pid_file.unlink(missing_ok=True)
+                self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=120)
+                proc = self.review(
+                    provider, "adversarial-reviewer", timeout=90, CE_PERSONA_IDLE_SECS="3"
+                )
+                self.assertEqual(proc.returncode, 5, proc.stderr)
+                pid = int(self.child_pid_file.read_text(encoding="utf-8").strip())
+                deadline = time.monotonic() + 20
+                alive = True
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except (ProcessLookupError, PermissionError):
+                        alive = False
+                        break
+                    time.sleep(0.2)
+                if alive:
+                    os.kill(pid, 9)  # do not leak a 300s sleeper from a failed test
+                self.assertFalse(alive, f"helper {pid} survived the timeout kill")
+
+    def test_killing_the_wrapper_does_not_orphan_the_provider(self):
+        # `start_new_session=True` is what lets the watchdog signal the provider's whole
+        # group — and it also means the provider does NOT die with this command. Ctrl-C, a
+        # supervising agent's own timeout, or a CI cancel would otherwise leave a
+        # full-effort model run going with nothing watching it and nothing that will read
+        # its output. The shell version had an EXIT trap; this asserts the replacement.
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                self.child_pid_file.unlink(missing_ok=True)
+                self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=300)
+                wrapper = subprocess.Popen(
+                    [str(self.commands[provider]), "adversarial-reviewer"],
+                    env=self.env(),
+                    cwd=self.work,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline and not self.child_pid_file.exists():
+                        time.sleep(0.2)
+                    self.assertTrue(self.child_pid_file.exists(), "the stub never started")
+                    pid = int(self.child_pid_file.read_text(encoding="utf-8").strip())
+
+                    wrapper.terminate()
+                    wrapper.wait(timeout=60)
+
+                    deadline = time.monotonic() + 30
+                    alive = True
+                    while time.monotonic() < deadline:
+                        try:
+                            os.kill(pid, 0)
+                        except (ProcessLookupError, PermissionError):
+                            alive = False
+                            break
+                        time.sleep(0.2)
+                    if alive:
+                        os.kill(pid, 9)
+                    self.assertFalse(alive, f"provider helper {pid} outlived the killed wrapper")
+                finally:
+                    if wrapper.poll() is None:
+                        wrapper.kill()
+                        wrapper.wait(timeout=10)
 
     def test_partial_output_is_kept_after_a_timeout(self):
         self.set_spec(stdout="partial evidence\n", silent_for=90)

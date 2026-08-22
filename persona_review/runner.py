@@ -21,6 +21,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -107,25 +108,39 @@ def diff_bytes(repo: Path, base: str) -> int:
     peeling with `^{commit}` refuses baselines that `git diff` accepts, including a tree
     object (the standard empty-tree baseline for an initial commit) and `:/subject`
     selectors, because appending the suffix changes their grammar.
+
+    STREAMED, never buffered. This runs BEFORE the budget check, so buffering the whole diff
+    to measure it means the guard against an oversized review is itself the thing that an
+    oversized review breaks: a 209 MB diff took peak RSS to roughly 2.4x its size. Only the
+    byte count is wanted, so read and discard in chunks.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             _git_diff_argv(repo, base),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=_git_env(),
-            check=False,
         )
     except FileNotFoundError as exc:
         raise MissingTool(f"git is required to weigh `-b {base}` but is not on PATH") from exc
+
+    total = 0
+    with proc:
+        stdout, stderr = proc.stdout, proc.stderr
+        if stdout is not None:
+            while chunk := stdout.read(1 << 20):
+                total += len(chunk)
+        detail = stderr.read().decode("utf-8", "replace") if stderr is not None else ""
+
     if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-        hint = detail[-1] if detail else "no detail from git"
+        lines = detail.strip().splitlines()
+        hint = lines[-1] if lines else "no detail from git"
         raise RunError(
             f"base ref '{base}' does not resolve in {repo} ({hint}).\n"
             "  An unresolvable base is not a smaller review, it is an unscoped one: the model\n"
             "  would be told to diff a range that does not exist and would review something else."
         )
-    return len(proc.stdout)
+    return total
 
 
 @dataclass(frozen=True)
@@ -161,22 +176,42 @@ def weigh(*, prompt: str, repo: Path, base: str, limit_tokens: int) -> Budget:
     )
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 def _kill_group(proc: subprocess.Popen[bytes]) -> None:
     """Stop the whole process group, then insist.
 
     The group, not the process: provider CLIs spawn helpers, and signalling only the parent
     leaves them running and holding the output file open.
+
+    The direct child exiting is NOT proof the group did. A parent with default SIGTERM
+    handling dies immediately while a helper that ignores SIGTERM keeps running, so waiting
+    on the child and returning leaves provider work alive after the caller has been told the
+    run was killed. Escalate on the GROUP's liveness instead, and poll `proc.poll()` while
+    doing it, because an unreaped zombie is still a group member and would make the probe
+    report members forever.
+
+    `proc.pid` is the group id only because `execute` starts the child with
+    `start_new_session=True`. Without that these signals would reach this process's own
+    group — the calling agent included.
     """
-    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECS), (signal.SIGKILL, 5.0)):
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            return
-        try:
-            proc.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+    pgid = proc.pid
+    for sig, grace in ((signal.SIGTERM, KILL_GRACE_SECS), (signal.SIGKILL, 5.0)):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, sig)
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            proc.poll()
+            if not _group_alive(pgid):
+                return
+            time.sleep(0.2)
+    proc.poll()
 
 
 def execute(
@@ -207,6 +242,48 @@ def execute(
         except FileNotFoundError as exc:
             raise RunError(f"{argv[0]} is not on PATH: {exc}") from exc
 
+    with _stop_child_when_this_process_dies(proc):
+        return _watch(proc, stdout_path, idle_secs, hard_secs)
+
+
+@contextlib.contextmanager
+def _stop_child_when_this_process_dies(proc: subprocess.Popen[bytes]) -> Generator[None]:
+    """Do not orphan a full-effort model run.
+
+    `start_new_session=True` is what makes the watchdog able to signal the provider's whole
+    group — and it also means the provider does NOT die with this process. Ctrl-C at a
+    terminal, a supervising agent's own timeout, a CI job cancel, or a plain `kill` on this
+    wrapper would otherwise leave the run going with nothing watching it and nothing that
+    will ever read its output. The shell version this replaced had an EXIT trap; this is
+    that trap.
+
+    SIGKILL on this process still orphans the child, because nothing can run then.
+    """
+
+    def handler(signum: int, _frame: object) -> None:
+        if proc.poll() is None:
+            _kill_group(proc)
+        raise SystemExit(128 + signum)
+
+    previous: dict[int, object] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(ValueError, OSError):
+            previous[sig] = signal.signal(sig, handler)
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, old)  # pyright: ignore[reportArgumentType]
+        # Covers every non-signal exit too: an exception in the loop, or a return path that
+        # ever stops killing the group itself.
+        if proc.poll() is None:
+            _kill_group(proc)
+
+
+def _watch(
+    proc: subprocess.Popen[bytes], stdout_path: Path, idle_secs: float, hard_secs: float
+) -> ExecResult:
     started = time.monotonic()
     last_change = started
     last_size = -1

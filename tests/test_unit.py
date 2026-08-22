@@ -181,6 +181,33 @@ class TestTranscriptAnchors(unittest.TestCase):
             validate.findings_object(text, self.PROMPT)
         self.assertIn("ambiguous", str(caught.exception))
 
+    def test_a_replayed_boundary_cannot_hide_a_real_answer(self):
+        # The model answers, then replays the boundary line, then pastes the brief's empty
+        # example. Cutting at the LAST boundary slices the real answer out of the ambiguity
+        # anchor's view entirely, and the run reports zero findings for a review that
+        # genuinely happened.
+        text = json.dumps(artifact(finding(severity="P0"))) + f"\n{self.BOUNDARY}\n" + EMPTY_EXAMPLE
+        with self.assertRaises(validate.GateError) as caught:
+            validate.findings_object(text, self.PROMPT)
+        self.assertIn("ambiguous", str(caught.exception))
+
+    def test_the_boundary_quoted_inside_evidence_does_not_cut_the_answer(self):
+        # Reviewing THIS repo makes a finding quote the boundary string verbatim, because
+        # the quote-the-line rule demands it. A substring cut lands inside the real object.
+        answer = artifact(finding(evidence=[f"assets.py:1 -- {self.BOUNDARY}"]))
+        got = validate.findings_object(
+            f"echoed brief\n{self.BOUNDARY}\n" + json.dumps(answer), self.PROMPT
+        )
+        self.assertEqual(len(findings_of(got)), 1)
+
+    def test_the_boundary_must_match_a_whole_line(self):
+        # A line that merely CONTAINS the boundary is not the runner's echo of it.
+        answer = json.dumps(artifact(finding()))
+        got = validate.findings_object(
+            f"note: {self.BOUNDARY} was requested\n{answer}", self.PROMPT
+        )
+        self.assertEqual(len(findings_of(got)), 1)
+
     def test_an_empty_boundary_does_not_slice_the_output_away(self):
         # `"abc".rfind("")` is 3, so a blank prompt would cut everything.
         self.assertEqual(validate.findings_object(EMPTY_EXAMPLE, "   \n")["findings"], [])
@@ -259,6 +286,16 @@ class TestSchemaRules(unittest.TestCase):
             validate.validate({"findings": []}, SCHEMA)
         self.assertIn("missing required keys", str(caught.exception))
 
+    def test_a_finding_missing_required_fields_is_refused(self):
+        # Distinct from the top-level check above: deleting the per-finding required loop
+        # would leave that one green, because it only ever sees an empty findings array.
+        for absent in ("title", "severity", "file", "line", "evidence"):
+            with self.subTest(absent=absent):
+                item = {k: v for k, v in finding().items() if k != absent}
+                with self.assertRaises(validate.GateError) as caught:
+                    validate.validate(artifact(item), SCHEMA)
+                self.assertIn(absent, str(caught.exception))
+
 
 class TestGrokRunGating(unittest.TestCase):
     """grok's terminal event, not just its payload.
@@ -295,7 +332,7 @@ class TestGrokRunGating(unittest.TestCase):
         late = json.dumps({"type": "result", "is_error": True, "stop_reason": "max_tokens"})
         with self.assertRaises(validate.GateError) as caught:
             validate.from_grok_events(early + "\n" + late + "\n")
-        self.assertIn("error result", str(caught.exception))
+        self.assertIn("is_error", str(caught.exception))
 
     def test_a_non_success_subtype_fails(self):
         with self.assertRaises(validate.GateError):
@@ -312,9 +349,33 @@ class TestGrokRunGating(unittest.TestCase):
             self.assertIn(stop, str(caught.exception))
 
     def test_a_mistyped_terminal_field_fails_closed(self):
-        for bad in ({"subtype": 3}, {"stop_reason": ["end_turn"]}):
+        for bad in ({"subtype": 3}, {"stop_reason": ["end_turn"]}, {"is_error": "false"}):
             with self.assertRaises(validate.GateError):
                 validate.from_grok_events(self._events(structured_output=artifact(), **bad))
+
+    def test_an_absent_terminal_field_fails_closed(self):
+        # Absence is not evidence of success. A terminal event carrying none of these plus
+        # the schema-generated empty findings object was accepted as a clean review — the
+        # exact shape this gate exists to reject, since constrained decoding produces that
+        # payload whether or not the run completed.
+        full = {
+            "type": "result",
+            "is_error": False,
+            "subtype": "success",
+            "stop_reason": "end_turn",
+            "structured_output": artifact(),
+        }
+        validate.from_grok_events(json.dumps(full) + "\n")  # control: the full shape passes
+        for missing in ("is_error", "subtype", "stop_reason"):
+            with self.subTest(missing=missing):
+                event = {k: v for k, v in full.items() if k != missing}
+                with self.assertRaises(validate.GateError):
+                    validate.from_grok_events(json.dumps(event) + "\n")
+
+    def test_a_bare_result_event_with_an_empty_answer_is_refused(self):
+        event = {"type": "result", "structured_output": artifact()}
+        with self.assertRaises(validate.GateError):
+            validate.from_grok_events(json.dumps(event) + "\n")
 
     def test_an_unfamiliar_stop_reason_does_not_fail_a_good_run(self):
         got = validate.from_grok_events(

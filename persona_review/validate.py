@@ -41,8 +41,10 @@ cannot be exhaustive.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -79,31 +81,10 @@ def _as_object(value: JSONValue, what: str) -> JSONObject:
     return value
 
 
-def findings_object(text: str, prompt: str) -> Artifact:
-    """The model's own findings object: after the echoed prompt, at the end of the output.
-
-    Three anchors, because each of the first two alone has been bypassed.
-
-    The boundary cut drops the runner's echo of the prompt, where the persona brief's
-    EXAMPLE object lives. An empty boundary must not cut at all — `"abc".rfind("")` is 3,
-    which would slice the whole output away.
-
-    The end anchor drops everything the model merely QUOTED: tool output, a replayed brief.
-
-    The third rejects an at-end EMPTY object when a non-empty one appeared earlier. Last
-    wins, so without it a completed review that also pastes the brief's empty example last
-    returns zero findings and the real defects are discarded — a worse outcome than the
-    false clean, because the review genuinely happened and its result was thrown away.
-    """
-    boundary = prompt.rstrip().rsplit("\n", 1)[-1] if prompt.strip() else ""
-    cut = text.rfind(boundary) if boundary else -1
-    if cut != -1:
-        text = text[cut + len(boundary) :]
-
+def _scan(text: str) -> list[tuple[JSONObject, bool, bool]]:
+    """Every findings object in `text`, as (object, sits-at-the-end, has-any-findings)."""
     decoder = json.JSONDecoder()
-    found: JSONObject | None = None
-    quoted_nonempty = False
-    quoted_any = False
+    out: list[tuple[JSONObject, bool, bool]] = []
     for i, ch in enumerate(text):
         if ch != "{":
             continue
@@ -115,12 +96,56 @@ def findings_object(text: str, prompt: str) -> Artifact:
         if not isinstance(obj, dict) or "findings" not in obj:
             continue
         entries = obj.get("findings")
-        nonempty = isinstance(entries, list) and len(entries) > 0
-        if TRAILING_NOISE.fullmatch(text[i + consumed :]):
+        at_end = TRAILING_NOISE.fullmatch(text[i + consumed :]) is not None
+        out.append((obj, at_end, isinstance(entries, list) and len(entries) > 0))
+    return out
+
+
+def _boundary_lines(text: str, boundary: str) -> list[int]:
+    """Indexes of the lines that ARE the boundary, ignoring surrounding whitespace.
+
+    A whole-line match, never a substring. An unanchored search matches the boundary
+    wherever it appears — including inside a finding's own quoted evidence, which happens
+    the moment this tool reviews itself — and cutting there slices the real answer in half.
+    """
+    return [n for n, line in enumerate(text.split("\n")) if line.strip() == boundary]
+
+
+def findings_object(text: str, prompt: str) -> Artifact:
+    """The model's own findings object: after the echoed prompt, at the end of the output.
+
+    Three anchors, because each of the first two alone has been bypassed.
+
+    The boundary cut drops the runner's echo of the prompt, where the persona brief's
+    EXAMPLE object lives. It cuts at the LAST whole-line boundary, so a runner that echoes
+    more than once still gets past its own replay. An empty boundary must not cut at all —
+    `"abc".rfind("")` is 3, which would slice the whole output away.
+
+    The end anchor drops everything the model merely QUOTED: tool output, a replayed brief.
+
+    The third rejects an at-end EMPTY object when a non-empty one appeared anywhere: taking
+    the last would discard a real review, which is worse than a false clean because the work
+    actually happened. It deliberately scans the UNCUT text. Scoping it to what follows the
+    boundary lets a model answer, replay the boundary line, then paste the brief's empty
+    example — pushing its own answer out of the anchor's view. The cost is a false refusal
+    when a `-c` context brief embeds a non-empty findings object of its own and the review
+    genuinely finds nothing; that fails loudly, with a legible reason, which is the side to
+    err on for a gate.
+    """
+    boundary = prompt.rstrip().rsplit("\n", 1)[-1] if prompt.strip() else ""
+    lines = text.split("\n")
+    marks = _boundary_lines(text, boundary) if boundary else []
+
+    # Extraction reads only what follows the last echo; the ambiguity check reads everything.
+    body = "\n".join(lines[marks[-1] + 1 :]) if marks else text
+
+    found: JSONObject | None = None
+    quoted_any = False
+    for obj, at_end, _ in _scan(body):
+        if at_end:
             found = obj
         else:
             quoted_any = True
-            quoted_nonempty = quoted_nonempty or nonempty
 
     if found is None:
         if quoted_any:
@@ -131,7 +156,7 @@ def findings_object(text: str, prompt: str) -> Artifact:
         fail("no findings JSON object in the model's output")
 
     tail = found.get("findings")
-    if quoted_nonempty and isinstance(tail, list) and not tail:
+    if isinstance(tail, list) and not tail and any(nonempty for _, _, nonempty in _scan(text)):
         fail(
             "the output ends with an EMPTY findings object while a non-empty one appears "
             "earlier — ambiguous, and taking the last would discard a real review"
@@ -390,13 +415,24 @@ def from_grok_events(text: str) -> Artifact:
     if result is None:
         fail("no `result` event in grok's output stream")
 
-    if result.get("is_error"):
-        fail(f"grok reported an error result (stop_reason={result.get('stop_reason')!r})")
+    # PRESENT and healthy, not "absent is fine". A terminal event that carries none of these
+    # is not evidence of a completed run, and schema-constrained decoding means the payload
+    # beside it is a well-formed empty findings array either way — so treating absence as
+    # success accepts exactly the shape this gate exists to reject. Real grok 1.0.4 and
+    # 1.0.5 success events carry all three, so requiring them costs nothing and a future
+    # build that drops one fails loudly rather than silently certifying.
+    if result.get("is_error") is not False:
+        fail(
+            f"grok's result event does not report is_error=false "
+            f"(is_error={result.get('is_error')!r}, stop_reason={result.get('stop_reason')!r})"
+        )
     subtype = result.get("subtype")
-    if subtype is not None and (not isinstance(subtype, str) or subtype not in GOOD_SUBTYPES):
+    if not isinstance(subtype, str) or subtype not in GOOD_SUBTYPES:
         fail(f"grok's run ended with subtype={subtype!r}, which is not a completed review")
     stop = result.get("stop_reason")
-    if stop is not None and (not isinstance(stop, str) or stop in BAD_STOP_REASONS):
+    if not isinstance(stop, str):
+        fail(f"grok's result event carries no stop_reason (got {stop!r})")
+    if stop in BAD_STOP_REASONS:
         fail(f"grok stopped early (stop_reason={stop!r}); the answer is truncated or refused")
 
     obj = result.get("structured_output")
@@ -485,5 +521,17 @@ def gate(
     breakdown = ", ".join(f"{n} {sev}" for sev, n in sorted(tally.items()))
     # stdout is the caller's context: one line, never the transcript. Severity counts first
     # so a caller can triage without opening the artifact at all.
-    print(f"{label}: {count} findings{f' ({breakdown})' if breakdown else ''} -> {findings_out}")
+    #
+    # Flushed here, and a broken pipe swallowed: the one-line contract invites
+    # `ce-grok-persona ... | head -1`, which closes the pipe. The interpreter's shutdown
+    # flush would then raise where no handler can catch it and exit 120 — reporting failure
+    # for a review that succeeded and whose artifacts are already on disk.
+    try:
+        print(
+            f"{label}: {count} findings{f' ({breakdown})' if breakdown else ''} -> {findings_out}"
+        )
+        sys.stdout.flush()
+    except BrokenPipeError:
+        with contextlib.suppress(OSError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import math
 import os
 import shutil
 import sys
@@ -37,6 +38,12 @@ DEFAULT_HARD_SECS = 2400.0
 
 
 def _env_number(name: str, default: float) -> float:
+    """A finite, non-negative number from the environment, or a usage error.
+
+    `float()` happily returns `nan` and `inf`, and every deadline here is checked with
+    `elapsed >= value` — a comparison that is False forever against either. A typo in a
+    timeout would silently disable the watchdog it was meant to set.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -44,6 +51,8 @@ def _env_number(name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise runner.RunError(f"{name}={raw!r} is not a number") from exc
+    if not math.isfinite(value):
+        raise runner.RunError(f"{name}={raw!r} must be a finite number")
     if value < 0:
         raise runner.RunError(f"{name}={raw!r} must not be negative")
     return value
@@ -146,7 +155,16 @@ def _run_dir(persona: str, provider: Provider) -> Path:
     # this run's fresh event stream — the provenance sidecar exists to attest which brief
     # produced these findings, and a stale one attests the wrong run. Cleared here, before
     # the budget preflight, so an early refusal leaves nothing behind either.
-    for suffix in (".json", "-provenance.json", "-last.json", "-events.jsonl", "-prompt.md"):
+    for suffix in (
+        ".json",
+        "-provenance.json",
+        "-last.json",
+        "-events.jsonl",
+        "-prompt.md",
+        # The failure path reads this one back, so a survivor from an earlier run is the
+        # stale artifact most likely to be believed.
+        "-stderr.log",
+    ):
         path = run_dir / f"{persona}-{provider.name}{suffix}"
         if path.parent != run_dir:  # a persona name is a bare brief name; assert it stayed one
             raise runner.RunError(f"refusing to touch {path}, which is outside {run_dir}")
@@ -156,13 +174,6 @@ def _run_dir(persona: str, provider: Provider) -> Path:
 
 def main(provider: Provider, argv: list[str] | None = None) -> int:
     args = _parser(provider).parse_args(argv)
-
-    if shutil.which(provider.binary) is None:
-        print(
-            f"{provider.command}: {provider.binary} not on PATH ({provider.install_hint})",
-            file=sys.stderr,
-        )
-        return EXIT_ENV
 
     repo = Path(args.repo).expanduser()
     if not repo.is_dir():
@@ -183,6 +194,27 @@ def main(provider: Provider, argv: list[str] | None = None) -> int:
         print(f"{provider.command}: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
+    # Clear the run dir the moment the persona is known — before every other fallible
+    # preflight, not just before the budget. The artifact paths are deterministic and the
+    # directory is documented as reusable, so ANY failure that happens after a previous
+    # successful run and before this point would leave that run's findings and provenance
+    # sitting at the path a caller reads. A missing binary is the easiest way to hit it.
+    try:
+        run_dir = _run_dir(persona, provider)
+    except runner.EnvError as exc:
+        print(f"{provider.command}: {exc}", file=sys.stderr)
+        return EXIT_ENV
+    except runner.RunError as exc:
+        print(f"{provider.command}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if shutil.which(provider.binary) is None:
+        print(
+            f"{provider.command}: {provider.binary} not on PATH ({provider.install_hint})",
+            file=sys.stderr,
+        )
+        return EXIT_ENV
+
     try:
         context = _read_context(args.context)
     except assets.UsageError as exc:
@@ -201,7 +233,6 @@ def main(provider: Provider, argv: list[str] | None = None) -> int:
     )
 
     try:
-        run_dir = _run_dir(persona, provider)
         limit = int(_env_number("CE_PERSONA_MAX_PROMPT_TOKENS", DEFAULT_MAX_TOKENS))
         idle = _env_number("CE_PERSONA_IDLE_SECS", DEFAULT_IDLE_SECS)
         hard = _env_number("CE_PERSONA_HARD_SECS", DEFAULT_HARD_SECS)
