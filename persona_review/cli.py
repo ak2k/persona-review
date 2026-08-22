@@ -175,6 +175,24 @@ def _run_dir(persona: str, provider: Provider) -> Path:
 def main(provider: Provider, argv: list[str] | None = None) -> int:
     args = _parser(provider).parse_args(argv)
 
+    # Clear the run dir FIRST, before anything else that can fail. The artifact paths are
+    # deterministic and the directory is documented as reusable, so every fallible step
+    # ahead of the clear is a step that can leave the PREVIOUS run's findings sitting at the
+    # path a caller reads. Only the persona name is needed to know those paths, and
+    # normalising it touches no filesystem — which is why it is split from resolution.
+    try:
+        persona = assets.normalise_persona(args.persona)
+        run_dir = _run_dir(persona, provider)
+    except assets.UsageError as exc:
+        print(f"{provider.command}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except runner.EnvError as exc:
+        print(f"{provider.command}: {exc}", file=sys.stderr)
+        return EXIT_ENV
+    except runner.RunError as exc:
+        print(f"{provider.command}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
     repo = Path(args.repo).expanduser()
     if not repo.is_dir():
         print(f"{provider.command}: -C '{args.repo}' is not a directory", file=sys.stderr)
@@ -191,20 +209,6 @@ def main(provider: Provider, argv: list[str] | None = None) -> int:
         print(f"{provider.command}: {exc}", file=sys.stderr)
         return EXIT_ENV
     except assets.UsageError as exc:
-        print(f"{provider.command}: {exc}", file=sys.stderr)
-        return EXIT_USAGE
-
-    # Clear the run dir the moment the persona is known — before every other fallible
-    # preflight, not just before the budget. The artifact paths are deterministic and the
-    # directory is documented as reusable, so ANY failure that happens after a previous
-    # successful run and before this point would leave that run's findings and provenance
-    # sitting at the path a caller reads. A missing binary is the easiest way to hit it.
-    try:
-        run_dir = _run_dir(persona, provider)
-    except runner.EnvError as exc:
-        print(f"{provider.command}: {exc}", file=sys.stderr)
-        return EXIT_ENV
-    except runner.RunError as exc:
         print(f"{provider.command}: {exc}", file=sys.stderr)
         return EXIT_USAGE
 

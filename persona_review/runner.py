@@ -97,6 +97,12 @@ def _git_diff_argv(repo: Path, base: str) -> list[str]:
         "diff",
         "--no-ext-diff",
         "--no-textconv",
+        # --end-of-options, or an option-shaped base is parsed as an OPTION rather than a
+        # revision. `-b '--output=/some/path'` made git write the diff to that path, exit 0
+        # with empty stdout, and this function then reported a 0-byte diff and a resolved
+        # range — destroying the "proof the range resolves" guarantee AND writing a file of
+        # the caller's choosing.
+        "--end-of-options",
         f"{base}..HEAD",
     ]
 

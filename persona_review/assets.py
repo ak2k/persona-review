@@ -39,15 +39,34 @@ class UsageError(Exception):
     """The caller asked for something that cannot be done. Names what to do instead."""
 
 
-def version_key(path: Path) -> tuple[int, ...]:
-    """Sort plugin roots by version numerically.
+def _component(part: str) -> int:
+    """One version component as a number, never raising.
+
+    `str.isdigit()` is True for characters `int()` refuses — '²' among them — so the obvious
+    `int(p) if p.isdigit() else 0` turns a plugin directory with an exotic name into an
+    uncaught ValueError escaping as a traceback.
+    """
+    return int(part) if part.isascii() and part.isdigit() else 0
+
+
+def version_key(path: Path) -> tuple[tuple[int, ...], int, str]:
+    """Sort plugin roots by version, numerically and TOTALLY.
 
     Lexical order puts 3.9 after 3.13, which silently pins an old brief set while a newer
     plugin is installed — and briefs change: the count of findings-capable ones moved from
     10 to 13 of 16 inside a week.
+
+    The key has three parts because the numeric tuple alone is not a total order. Dropping
+    non-numeric components makes `3.22.0` and `3.22.0-rc1` tie at `(3, 22, 0)`, and
+    `sorted` is stable, so the winner would be whichever `glob` happened to yield last —
+    filesystem order deciding which briefs every review runs against. A release outranks its
+    own pre-release, and the raw name settles anything still equal.
     """
     name = path.parent.parent.parent.name
-    return tuple(int(part) if part.isdigit() else 0 for part in name.split("."))
+    parts = name.split(".")
+    numeric = tuple(_component(part) for part in parts)
+    pure = int(all(part.isascii() and part.isdigit() for part in parts))
+    return (numeric, pure, name)
 
 
 def resolve_assets(override: str | None = None) -> Path:
@@ -85,8 +104,12 @@ def capable_personas(assets: Path) -> list[str]:
     return sorted(p.stem for p in (assets / "personas").glob("*.md") if emits_findings(p))
 
 
-def resolve_persona(assets: Path, name: str) -> tuple[str, Path]:
-    """Normalise a persona name and return it with its brief path.
+def normalise_persona(name: str) -> str:
+    """The bare brief name, with no filesystem access.
+
+    Split out from `resolve_persona` so the run directory can be cleared before anything
+    else that can fail: the artifact paths need this name, and every fallible step that runs
+    before the clear is a step that can leave the previous run's findings behind.
 
     Accepts `ce-adversarial-reviewer`, `adversarial-reviewer`, or `adversarial-reviewer.md`.
     The name is interpolated into every artifact path, so it must be a bare brief name: a
@@ -96,7 +119,12 @@ def resolve_persona(assets: Path, name: str) -> tuple[str, Path]:
     persona = name.removeprefix("ce-").removesuffix(".md")
     if not persona or persona != Path(persona).name or persona.startswith("."):
         raise UsageError(f"persona '{name}' must be a bare brief name, not a path")
+    return persona
 
+
+def resolve_persona(assets: Path, name: str) -> tuple[str, Path]:
+    """The normalised persona name and the brief it names, which must exist and be capable."""
+    persona = normalise_persona(name)
     brief = assets / "personas" / f"{persona}.md"
     if not brief.is_file():
         listing = "\n".join(f"  {p}" for p in capable_personas(assets))

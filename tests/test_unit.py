@@ -277,9 +277,35 @@ class TestSchemaRules(unittest.TestCase):
         schema = schema_with("title", {"type": "string", "description": "the title", "default": ""})
         validate.validate(artifact(finding()), schema)
 
-    def test_a_non_object_property_spec_does_not_crash(self):
+    def test_a_non_object_property_spec_is_refused(self):
+        # It used to be ACCEPTED, on the grounds that it did not crash. Silently skipping a
+        # property spec the gate cannot read is the same silent certification the schema
+        # keyword check exists to prevent.
         schema = schema_with("title", "not-a-spec")  # type: ignore[arg-type]
-        validate.validate(artifact(finding()), schema)
+        with self.assertRaises(validate.GateError) as caught:
+            validate.validate(artifact(finding()), schema)
+        self.assertIn("not a schema object", str(caught.exception))
+
+    def test_rules_this_gate_only_enforces_shallowly_are_refused_when_nested(self):
+        # The accept-list is global but enforcement is positional, so these passed the
+        # keyword check and were then never applied: `evidence: [123, {"a": 1}]` validated
+        # under a tuple-form items, and `{}` validated under a nested required.
+        for spec in (
+            {"type": "array", "items": [{"type": "string"}]},
+            {"type": "object", "required": ["file", "line"]},
+            {"type": "object", "properties": {"file": {"type": "string"}}},
+        ):
+            with self.subTest(spec=spec), self.assertRaises(validate.GateError):
+                validate.validate(artifact(finding()), schema_with("loc", spec))
+
+    def test_additional_properties_is_not_treated_as_an_annotation(self):
+        # It is a constraint, and the likeliest keyword for the plugin to add. Filing it as
+        # metadata would keep this gate returning 0 while enforcing nothing about extra keys.
+        schema: dict[str, Any] = json.loads(json.dumps(SCHEMA))
+        schema["additionalProperties"] = False
+        with self.assertRaises(validate.GateError) as caught:
+            validate.validate(artifact(finding()), schema)
+        self.assertIn("additionalProperties", str(caught.exception))
 
     def test_missing_required_keys(self):
         with self.assertRaises(validate.GateError) as caught:
@@ -443,15 +469,35 @@ class TestAssets(unittest.TestCase):
         self.assertTrue(assets.emits_findings(self.assets / "outside.md"))
         self.assertTrue((self.assets / "personas" / ".." / "outside.md").is_file())
 
+    def _roots(self, *versions: str) -> list[Path]:
+        made: list[Path] = []
+        for v in versions:
+            path = (
+                Path(self.tmp.name) / f"compound-engineering/{v}/skills/ce-code-review/references"
+            )
+            path.mkdir(parents=True, exist_ok=True)
+            made.append(path)
+        return made
+
     def test_plugin_roots_sort_numerically_not_lexically(self):
         # Lexical order puts 3.9 after 3.13, silently pinning an old brief set.
-        made = [
-            Path(self.tmp.name) / f"compound-engineering/{v}/skills/ce-code-review/references"
-            for v in ("3.9.0", "3.13.1", "3.10.0")
-        ]
-        for path in made:
-            path.mkdir(parents=True)
+        made = self._roots("3.9.0", "3.13.1", "3.10.0")
         self.assertEqual(sorted(made, key=assets.version_key)[-1], made[1])
+
+    def test_a_release_outranks_its_own_prerelease_regardless_of_input_order(self):
+        # Dropping non-numeric components makes these tie, and `sorted` is stable — so the
+        # winner would be whichever order the filesystem happened to yield. That decides
+        # which briefs EVERY review runs against.
+        made = self._roots("3.22.0", "3.22.0-rc1")
+        release, prerelease = made[0], made[1]
+        for order in ([release, prerelease], [prerelease, release]):
+            self.assertEqual(sorted(order, key=assets.version_key)[-1], release, order)
+
+    def test_a_digit_like_non_integer_version_does_not_crash(self):
+        # `'²'.isdigit()` is True while `int('²')` raises, so the obvious parse escapes as a
+        # traceback instead of an exit code.
+        (made,) = self._roots("3.²")
+        assets.version_key(made)
 
     def test_the_prompt_carries_brief_rubric_boundary_and_the_strict_output_clause(self):
         prompt = assets.build_prompt(
@@ -540,11 +586,27 @@ class TestFindingsRetrieval(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = str(Path(self.tmp.name) / "artifact.json")
+        # The fixture carries the tier-2 fields. Without them `render_detail` could collapse
+        # into `render_row` — no why_it_matters, no evidence array, no suggested fix, no
+        # routing — and every test here stayed green, which is to say the two tiers that are
+        # this module's entire product were unasserted.
         Path(self.path).write_text(
             json.dumps(
                 artifact(
                     finding(title="a p2", severity="P2", file="b.py", line=2),
-                    finding(title="a p0", severity="P0", file="a.py", line=1, confidence=100),
+                    finding(
+                        title="a p0",
+                        severity="P0",
+                        file="a.py",
+                        line=1,
+                        confidence=100,
+                        first_evidence="a.py:1 -- the motivating line",
+                        evidence=["a.py:1 -- the motivating line", "a.py:9 -- corroboration"],
+                        why_it_matters="Callers read a stale value and bill the wrong account.",
+                        suggested_fix="Guard the lookup the way b.py:2 already does.",
+                        autofix_class="gated_auto",
+                        owner="downstream-resolver",
+                    ),
                 )
             ),
             encoding="utf-8",
@@ -582,6 +644,30 @@ class TestFindingsRetrieval(unittest.TestCase):
             title = row.split(" — ", 1)[1].split(" (confidence")[0]
             _, detail, _ = self._run(self.path, "--show", str(number))
             self.assertIn(title, detail)
+
+    def test_tier_1_carries_the_quoted_line_and_nothing_heavier(self):
+        # The quoted line is what makes a title trustworthy without the evidence array; the
+        # tier is worthless if it renders a bare title, and over-costed if it renders detail.
+        _, out, _ = self._run(self.path, "--all")
+        self.assertIn("a.py:1 -- the motivating line", out)
+        self.assertIn("(confidence 100)", out)
+        self.assertNotIn("why:", out)
+        self.assertNotIn("Guard the lookup", out)
+        self.assertNotIn("a.py:9 -- corroboration", out)
+
+    def test_tier_2_carries_why_evidence_fix_and_routing(self):
+        _, out, _ = self._run(self.path, "--show", "2")
+        self.assertIn("why: Callers read a stale value", out)
+        self.assertIn("fix: Guard the lookup", out)
+        self.assertIn("a.py:9 -- corroboration", out)  # the FULL evidence array, not just [0]
+        self.assertIn("autofix_class=gated_auto", out)
+        self.assertIn("owner=downstream-resolver", out)
+
+    def test_the_listing_is_ordered_most_severe_first(self):
+        _, out, _ = self._run(self.path, "--all")
+        rows = [ln for ln in out.splitlines() if ln.startswith("#")]
+        severities = [ln.split()[1] for ln in rows]
+        self.assertEqual(severities, ["P0", "P2"], out)
 
     def test_rendered_output_is_fenced_as_untrusted(self):
         # Everything rendered here was written by a model and is being handed to another

@@ -85,11 +85,21 @@ last = None
 for i, a in enumerate(argv):
     if a == "-o" and i + 1 < len(argv):
         last = argv[i + 1]
+# Persist what the runner was ACTUALLY given, from whichever channel this provider uses.
+# Without this nothing asserts the model received the brief at all: dispatching codex with
+# no prompt whatsoever left both suites green.
+prompt = ""
+for i, a in enumerate(argv):
+    if a == "--prompt-file" and i + 1 < len(argv):
+        with open(argv[i + 1]) as fh:
+            prompt = fh.read()
 if not sys.stdin.isatty():
     try:
-        sys.stdin.read()
+        prompt = prompt or sys.stdin.read()
     except Exception:
         pass
+with open(os.environ["STUB_PROMPT"], "w") as fh:
+    fh.write(prompt)
 if spec.get("stdout"):
     sys.stdout.write(spec["stdout"])
     sys.stdout.flush()
@@ -174,6 +184,7 @@ class Harness(unittest.TestCase):
         self.spec = self.work / "spec.json"
         self.argv_log = self.work / "argv.json"
         self.child_pid_file = self.work / "child.pid"
+        self.prompt_seen = self.work / "prompt-the-runner-received.md"
 
         installed = os.environ.get("PERSONA_REVIEW_BIN")
         self.commands: dict[str, Path] = {}
@@ -227,6 +238,7 @@ class Harness(unittest.TestCase):
                 "STUB_SPEC": str(self.spec),
                 "STUB_ARGV": str(self.argv_log),
                 "STUB_CHILD": str(self.child_pid_file),
+                "STUB_PROMPT": str(self.prompt_seen),
                 # Generous by default; the watchdog tests override them.
                 "CE_PERSONA_IDLE_SECS": "60",
                 "CE_PERSONA_HARD_SECS": "120",
@@ -324,26 +336,41 @@ class TestContract(Harness):
                 self.assertEqual(record["persona"], "adversarial-reviewer")
                 self.assertEqual(record["runner_status"], "0")
 
-    def test_the_prompt_carries_the_brief_rubric_boundary_and_strict_clause(self):
+    def test_the_prompt_the_RUNNER_RECEIVED_carries_brief_rubric_and_clause(self):
+        # Read from what the stub was handed, NOT from the -prompt.md the CLI wrote. Those
+        # are different claims, and only the first one is the product: dispatching codex
+        # with no prompt at all left the whole suite green when this read the written file.
         for provider in PROVIDERS:
             with self.subTest(provider=provider):
+                self.prompt_seen.unlink(missing_ok=True)
                 self.good_answer(provider)
                 self.review(provider, "adversarial-reviewer")
-                prompt = (self.run_dir / f"adversarial-reviewer-{provider}-prompt.md").read_text(
-                    encoding="utf-8"
-                )
+                prompt = self.prompt_seen.read_text(encoding="utf-8")
                 self.assertIn("Break it. Return findings matching the findings schema.", prompt)
                 self.assertIn("Anchors 0 and 25 mean SUPPRESS", prompt)
                 self.assertIn("exactly one JSON object", prompt)
                 self.assertTrue(prompt.rstrip().endswith(assets.BOUNDARY))
 
-    def test_the_effort_flag_reaches_the_runner(self):
-        for provider, expected in (("grok", "xhigh"), ("codex", 'model_reasoning_effort="xhigh"')):
+    def test_the_model_and_effort_flags_reach_the_runner(self):
+        # NON-DEFAULT sentinels. Asserting `-e xhigh` reaches grok proves nothing, because
+        # xhigh is grok's default: hardcoding the flag and ignoring -e kept the suite green.
+        for provider, expected in (
+            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+        ):
             with self.subTest(provider=provider):
                 self.good_answer(provider)
-                self.review(provider, "adversarial-reviewer", "-e", "xhigh")
+                self.review(
+                    provider,
+                    "adversarial-reviewer",
+                    "-e",
+                    "sentinel-effort",
+                    "-m",
+                    "sentinel-model",
+                )
                 argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
-                self.assertIn(expected, argv)
+                for token in expected:
+                    self.assertIn(token, argv)
 
 
 class TestGate(Harness):
@@ -446,6 +473,52 @@ class TestExitStatus(Harness):
             ):
                 with self.subTest(provider=provider, args=args):
                     self.assertEqual(self.review(provider, *args).returncode, 2)
+
+    def test_a_persona_review_package_in_the_cwd_cannot_replace_the_gate(self):
+        # THE headline P0 this port exists to close, and the bash suite's guard for it was
+        # deleted with no replacement. `python3 -c/-m` put the caller's cwd at sys.path[0],
+        # so a persona_review/ directory inside the repo under review answered for the gate:
+        # a clean review reported for a run that never happened, and planted code executing
+        # outside the read-only sandbox.
+        #
+        # Only meaningful against the INSTALLED console script, whose sys.path[0] is its own
+        # bin directory. The local-dev shim hardcodes sys.path, so it would assert the
+        # property into existence rather than test it.
+        if not os.environ.get("PERSONA_REVIEW_BIN"):
+            self.skipTest("needs the installed console scripts (set PERSONA_REVIEW_BIN)")
+        planted = self.work / "persona_review"
+        planted.mkdir()
+        (planted / "__init__.py").write_text("", encoding="utf-8")
+        (planted / "validate.py").write_text(
+            "import sys\nprint('ce-persona: 0 findings -> HIJACKED')\nsys.exit(0)\n",
+            encoding="utf-8",
+        )
+        # The planted package must shadow the module the entry point actually imports.
+        # Planting only validate.py crashes on `import persona_review.cli` and looks like a
+        # pass; planting cli.py is what silently answers for the run.
+        (planted / "cli.py").write_text(
+            "def grok_main() -> int:\n"
+            "    print('ce-persona: 0 findings -> HIJACKED')\n"
+            "    return 0\n"
+            "def codex_main() -> int:\n"
+            "    return grok_main()\n",
+            encoding="utf-8",
+        )
+        # BOTH doors: sys.path[0] (cwd), and a caller-set PYTHONPATH, which the packaging
+        # wrapper appends behind rather than in front of. `PYTHONPATH=.` is routine under
+        # direnv, tox and CI images — and this repo's own devShell sets it.
+        for provider in PROVIDERS:
+            for pythonpath in (None, ".", "./"):
+                with self.subTest(provider=provider, pythonpath=pythonpath):
+                    # A runner that categorically did not review, so a clean result can only
+                    # have come from the planted module.
+                    self.set_spec(stdout=grok_stream(ANSWER, is_error=True))
+                    if provider == "codex":
+                        self.set_spec(stdout="", last="I could not review.")
+                    extra = {} if pythonpath is None else {"PYTHONPATH": pythonpath}
+                    proc = self.review(provider, "adversarial-reviewer", env_extra=extra)
+                    self.assertNotIn("HIJACKED", proc.stdout)
+                    self.assertNotEqual(proc.returncode, 0, "the planted gate answered for the run")
 
     def test_a_traversal_persona_name_is_refused_even_though_it_would_resolve(self):
         # The fixture deliberately places a findings-capable brief at assets/outside.md, so
@@ -574,6 +647,40 @@ class TestBudget(Harness):
                 )
                 self.assertEqual(proc.returncode, 78)
                 self.assertFalse(self.argv_log.exists())
+
+    def test_an_option_shaped_base_is_refused_not_parsed_as_an_option(self):
+        # `git diff` parses an option-shaped base as an OPTION: `--output=<path>` makes git
+        # write the diff to that path and exit 0 with empty stdout, so the "proof the range
+        # resolves" reports a 0-byte diff for a range it never resolved — a CLEAN REVIEW of
+        # nothing — while writing a file of the caller's choosing.
+        #
+        # Two details this test previously got wrong, both of which made it vacuous:
+        #   * `--base=VALUE`, not `-b VALUE`. argparse rejects a `-b` value that starts with
+        #     a dash, so the space form never reaches git and the test passed for that
+        #     reason alone.
+        #   * git writes `<path>..HEAD`, not `<path>`, because the whole range string is
+        #     taken as the option's value.
+        repo, _ = self._repo()
+        target = self.work / "SHOULD_NOT_BE_WRITTEN"
+        written = Path(f"{target}..HEAD")
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                self.good_answer(provider)
+                written.unlink(missing_ok=True)
+                proc = self.review(
+                    provider, "adversarial-reviewer", "-C", str(repo), f"--base=--output={target}"
+                )
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertFalse(written.exists(), "git took the base as an option and wrote it")
+
+    def test_a_dash_prefixed_base_is_rejected_by_argument_parsing(self):
+        # The space form is blocked one layer earlier. Asserted so the two mechanisms stay
+        # distinguishable: if argparse ever accepted it, the test above is the net.
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                self.good_answer(provider)
+                proc = self.review(provider, "adversarial-reviewer", "-b", "--output=/tmp/x")
+                self.assertEqual(proc.returncode, 2, proc.stderr)
 
     def test_a_non_numeric_budget_is_a_usage_error(self):
         for provider in PROVIDERS:

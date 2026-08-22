@@ -205,7 +205,11 @@ IGNORED_KEYWORDS = frozenset(
         "description",
         "default",
         "examples",
-        "additionalProperties",
+        # NOT additionalProperties. It is a constraint, not an annotation, and it is the
+        # likeliest keyword for the plugin to add — the day it does, filing it here would
+        # keep this gate returning 0 while enforcing nothing about extra keys, which is
+        # precisely the silent certification the mechanism exists to prevent. Left out of
+        # BOTH sets so it hard-fails on arrival rather than passing unchecked.
         "deprecated",
         "readOnly",
         "writeOnly",
@@ -222,14 +226,35 @@ def check_schema_supported(spec: JSONObject, label: str = "schema") -> None:
             f"{', '.join(unknown)}. Passing a rule it cannot check is how a validator "
             f"certifies a shape nobody validated."
         )
+    # Positional, not just global membership. The accept-list says WHICH keywords exist;
+    # enforcement happens at specific positions, and the two disagreeing is how a schema
+    # passes the gate and is then never checked. Two shapes did exactly that: tuple-form
+    # `items` (a list of per-element schemas) and object rules nested inside a property.
+    items = spec.get("items")
+    if items is not None and not isinstance(items, dict):
+        fail(
+            f"{label}.items is not a single schema object. Tuple-form items is a rule this "
+            f"gate does not implement, and accepting it would check nothing."
+        )
+    if isinstance(items, dict):
+        check_schema_supported(items, f"{label}.items")
+
     properties = spec.get("properties")
     if isinstance(properties, dict):
         for key, sub in properties.items():
-            if isinstance(sub, dict):
-                check_schema_supported(sub, f"{label}.{key}")
-    items = spec.get("items")
-    if isinstance(items, dict):
-        check_schema_supported(items, f"{label}.items")
+            if not isinstance(sub, dict):
+                fail(f"{label}.properties.{key} is not a schema object")
+            # Only the top level and a finding's items carry rules this gate enforces.
+            # Anything deeper declaring `required` or `properties` would be silently
+            # ignored, so refuse it by name instead.
+            for deeper in ("required", "properties"):
+                if deeper in sub:
+                    fail(
+                        f"{label}.properties.{key} declares `{deeper}`, which this gate "
+                        f"enforces only at the top level and on a finding. Accepting it "
+                        f"would certify against a rule nobody checked."
+                    )
+            check_schema_supported(sub, f"{label}.{key}")
 
 
 def _type_names(label: str, spec: JSONObject) -> list[str]:
@@ -532,6 +557,12 @@ def gate(
         )
         sys.stdout.flush()
     except BrokenPipeError:
+        # Point the interpreter's shutdown flush at /dev/null, closing the fd we opened to
+        # do it: dup2 duplicates, it does not consume.
         with contextlib.suppress(OSError):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, sys.stdout.fileno())
+            finally:
+                os.close(devnull)
     return 0
