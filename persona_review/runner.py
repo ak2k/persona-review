@@ -17,14 +17,16 @@ correct across CLI versions that rename their events.
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, cast
 
 # How often the watchdog looks at the growing output file. Small enough to notice a stall
 # promptly, large enough that a long review costs a negligible number of stat() calls.
@@ -37,6 +39,11 @@ KILL_GRACE_SECS = 10.0
 # ~4 chars/token, the same rough conversion the plugin's own large-diff preflight uses. It
 # only has to be right to an order of magnitude.
 CHARS_PER_TOKEN = 4
+
+# The budget preflight runs before `execute`, so the idle and hard watchdogs do not cover
+# it. Measuring a diff is local work on an already-checked-out tree; a minute is generous
+# for anything legitimate and bounds a repository that tries to wedge the measurement.
+DIFF_TIMEOUT_SECS = 60.0
 
 
 class RunError(Exception):
@@ -120,23 +127,50 @@ def diff_bytes(repo: Path, base: str) -> int:
     oversized review breaks: a 209 MB diff took peak RSS to roughly 2.4x its size. Only the
     byte count is wanted, so read and discard in chunks.
     """
-    try:
-        proc = subprocess.Popen(
-            _git_diff_argv(repo, base),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_git_env(),
-        )
-    except FileNotFoundError as exc:
-        raise MissingTool(f"git is required to weigh `-b {base}` but is not on PATH") from exc
+    # stderr goes to a FILE, not a second pipe. Draining stdout to EOF while stderr is a
+    # pipe deadlocks: git fills the ~64 KiB stderr buffer, blocks in write(), and never
+    # closes stdout, so this waits for an EOF that cannot come. A committed .gitattributes
+    # of a few thousand malformed lines produces half a megabyte of stderr, which makes the
+    # hang repo-controlled — and this runs in the budget preflight, before the watchdogs in
+    # `execute` exist, so nothing else bounds it.
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(
+                _git_diff_argv(repo, base),
+                stdout=subprocess.PIPE,
+                stderr=err,
+                env=_git_env(),
+            )
+        except FileNotFoundError as exc:
+            raise MissingTool(f"git is required to weigh `-b {base}` but is not on PATH") from exc
 
-    total = 0
-    with proc:
-        stdout, stderr = proc.stdout, proc.stderr
-        if stdout is not None:
-            while chunk := stdout.read(1 << 20):
-                total += len(chunk)
-        detail = stderr.read().decode("utf-8", "replace") if stderr is not None else ""
+        total = 0
+        deadline = time.monotonic() + DIFF_TIMEOUT_SECS
+        with proc:
+            # BufferedReader, which is what Popen(stdout=PIPE) yields; `IO[bytes]` does
+            # not declare read1.
+            stdout = cast("io.BufferedReader | None", proc.stdout)
+            if stdout is not None:
+                # read1, not read: it returns as soon as any bytes are available, so the
+                # deadline below is actually checked rather than sat behind a blocking read.
+                while chunk := stdout.read1(1 << 20):
+                    total += len(chunk)
+                    if time.monotonic() > deadline:
+                        proc.kill()
+                        raise RunError(
+                            f"`git diff {base}..HEAD` in {repo} exceeded "
+                            f"{int(DIFF_TIMEOUT_SECS)}s while being measured"
+                        )
+            try:
+                proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise RunError(
+                    f"`git diff {base}..HEAD` in {repo} did not finish within "
+                    f"{int(DIFF_TIMEOUT_SECS)}s"
+                ) from None
+        err.seek(0)
+        detail = err.read().decode("utf-8", "replace")
 
     if proc.returncode != 0:
         lines = detail.strip().splitlines()

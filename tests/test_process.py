@@ -723,6 +723,30 @@ class TestBudget(Harness):
                 self.assertFalse(ext_marker.exists(), "the repo's diff.external driver executed")
                 self.assertFalse(tc_marker.exists(), "the repo's textconv driver executed")
 
+    def test_a_repo_cannot_wedge_the_budget_preflight_with_stderr(self):
+        # The measurement drains stdout to EOF. If stderr is a second PIPE, a git that fills
+        # the ~64 KiB stderr buffer blocks in write() and never closes stdout — the reader
+        # waits for an EOF that cannot come. A committed .gitattributes of a few thousand
+        # malformed lines produces half a megabyte of stderr, so the hang is repo-controlled,
+        # and this runs BEFORE the watchdogs in `execute` exist.
+        #
+        # A real .gitattributes rather than a stub git: it needs no fixture to be believed,
+        # and it is how the reviewer found it.
+        repo, base = self._repo()
+        (repo / ".gitattributes").write_text('f.txt "bad00000\n' * 4000, encoding="utf-8")
+        self._git(repo, "add", ".gitattributes")
+        self._git(repo, "commit", "-qm", "malformed attributes")
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                self.good_answer(provider)
+                started = time.monotonic()
+                proc = self.review(
+                    provider, "adversarial-reviewer", "-C", str(repo), "-b", base, timeout=90
+                )
+                elapsed = time.monotonic() - started
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertLess(elapsed, 60, "the budget preflight wedged on git's stderr")
+
     def test_the_hostile_repo_fixture_actually_arms_both_drivers(self):
         # A control for the test above. Without it, a fixture that fails to configure the
         # drivers would make that test pass no matter what the code does — which is exactly

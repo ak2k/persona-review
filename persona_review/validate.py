@@ -155,12 +155,23 @@ def findings_object(text: str, prompt: str) -> Artifact:
             )
         fail("no findings JSON object in the model's output")
 
-    tail = found.get("findings")
-    if isinstance(tail, list) and not tail and any(nonempty for _, _, nonempty in _scan(text)):
-        fail(
-            "the output ends with an EMPTY findings object while a non-empty one appears "
-            "earlier — ambiguous, and taking the last would discard a real review"
-        )
+    # SYMMETRIC. The first version of this only fired when the at-end object was EMPTY,
+    # which tests the wrong half: a NON-EMPTY object at the end wins silently over the
+    # model's real answer, and this gate reads untrusted repositories — a file containing a
+    # schema-valid findings object, quoted last, becomes the artifact and the real defects
+    # vanish. Comparing against every non-empty object in the UNCUT text catches both, and
+    # a boundary replayed after the real answer cannot hide it.
+    #
+    # Non-empty ones only, deliberately: the persona brief's echoed EXAMPLE is empty, so
+    # including empties would make a normal run — echoed example, then a real answer —
+    # disagree with itself and fail every time.
+    for other, _, nonempty in _scan(text):
+        if nonempty and other != found:
+            fail(
+                "two different findings objects appear in the output — ambiguous, and this "
+                "gate cannot tell which is the model's answer: taking the last would "
+                "discard a real review, or adopt one the repository supplied"
+            )
     return found
 
 
