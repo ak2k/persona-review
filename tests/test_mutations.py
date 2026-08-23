@@ -13,12 +13,24 @@ value was the default. Each was found by a reviewer running mutations by hand.
 So the harness lives in the repository and runs as a check. Every entry below is a
 one-line reversion of a real fix; the suite fails if the unit tests survive any of them.
 
-Two properties make this trustworthy rather than decorative:
+THREE controls make this trustworthy rather than decorative, and it needs all three because
+the first version of this file had none of them and was worthless in a way that read as a
+perfect score — 23 kills in three seconds, every one a ModuleNotFoundError, because the
+suite was copied to a path its own import bootstrap could not resolve. Two independent
+reviewers found it. A harness that cannot fail is the exact defect it exists to catch, so:
 
-  * Each mutation asserts its own pattern applied EXACTLY once. A probe that silently stops
-    matching would otherwise report a false "killed" — which happened twice while this was
-    still a scratch script, and once produced a survivor that was really a broken probe.
-  * The reverted line is quoted in the table, so a reader can see what is being undone.
+  * **The scratch suite must PASS unmutated** before any kill is believed
+    (`test_the_scratch_suite_runs_before_any_mutation_is_believed`). Without this, anything
+    that stops the suite from running at all counts as every guard working.
+  * **A mutation that merely breaks the code is not a kill**
+    (`test_a_mutation_that_merely_breaks_the_code_is_not_counted_as_a_kill`). A syntax error
+    exits non-zero without any guard firing; counting that would let a table of garbage
+    report a perfect score. A run is a kill only if it actually executed tests and failed.
+  * **Each probe must match EXACTLY once.** A pattern that silently stops matching reports a
+    false kill; that happened twice while this was a scratch script, and once produced a
+    "survivor" that was really a broken probe.
+
+The reverted line is quoted in each entry, so a reader can see what is being undone.
 
 Only mutations the UNIT suite can kill live here, so the check stays seconds rather than
 hours. Guards that need the process suite — watchdogs, artifact lifecycle, the gate
@@ -200,20 +212,76 @@ MUTATIONS: list[Mutation] = [
 ]
 
 
+@dataclass(frozen=True)
+class Run:
+    """What happened when the scratch suite ran."""
+
+    code: int
+    output: str
+
+    @property
+    def executed_tests(self) -> bool:
+        """The suite got as far as running tests, rather than dying on import or syntax."""
+        return "Ran " in self.output and " test" in self.output
+
+    @property
+    def passed(self) -> bool:
+        return self.code == 0 and self.executed_tests
+
+
+def _scratch_tree(tmp: Path) -> Path:
+    """A runnable copy of the package and its unit suite.
+
+    The suite bootstraps its import with `Path(__file__).resolve().parent.parent`, so it
+    MUST sit at `<root>/tests/test_unit.py` for that to land on the scratch tree. Copying it
+    flat to `<root>/test_unit.py` pointed the bootstrap one directory too high, every run
+    died with ModuleNotFoundError, and every mutation was recorded as killed — the harness
+    built to catch guards that cannot fail could not itself fail.
+    """
+    shutil.copytree(SRC / "persona_review", tmp / "persona_review")
+    (tmp / "tests").mkdir()
+    shutil.copy(SRC / "tests" / "test_unit.py", tmp / "tests" / "test_unit.py")
+    # The source may be a read-only Nix store path, and copytree preserves mode.
+    for path in tmp.rglob("*"):
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    return tmp
+
+
+def _run_suite(root: Path) -> Run:
+    proc = subprocess.run(
+        [sys.executable, "tests/test_unit.py"],
+        cwd=root,
+        capture_output=True,
+        # No PYTHONSAFEPATH here. The scratch tree is ours, not a repository under review,
+        # and dropping sys.path[0] is what broke the import bootstrap.
+        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        check=False,
+    )
+    return Run(proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace"))
+
+
 class TestGuardsCanFail(unittest.TestCase):
+    def test_the_scratch_suite_runs_before_any_mutation_is_believed(self):
+        """The control. Without it every 'kill' could be an import error.
+
+        This is not ceremony: the first version of this harness failed exactly here and
+        reported 23 kills that were all ModuleNotFoundError.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            control = _run_suite(_scratch_tree(Path(tmp)))
+        self.assertTrue(
+            control.passed,
+            "the unmutated scratch suite does not pass, so no kill below means anything:\n"
+            + control.output[-2000:],
+        )
+
     def test_every_reverted_fix_kills_a_test(self):
         survivors: list[str] = []
         broken: list[str] = []
         for mutation in MUTATIONS:
             with self.subTest(mutation=mutation.name), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                shutil.copytree(SRC / "persona_review", root / "persona_review")
-                shutil.copy(SRC / "tests" / "test_unit.py", root / "test_unit.py")
-                # The source may be a read-only Nix store path, and copytree preserves mode.
-                for path in root.rglob("*"):
-                    path.chmod(path.stat().st_mode | stat.S_IWUSR)
-
-                target = root / mutation.path.replace("persona_review/", "persona_review/")
+                root = _scratch_tree(Path(tmp))
+                target = root / mutation.path
                 text = target.read_text(encoding="utf-8")
                 mutated, count = re.subn(
                     mutation.pattern, mutation.replacement, text, count=1, flags=re.M
@@ -221,27 +289,40 @@ class TestGuardsCanFail(unittest.TestCase):
                 if count != 1:
                     # A probe that stopped matching reports a false "killed", which is the
                     # same class of lie this whole file exists to catch.
-                    broken.append(mutation.name)
+                    broken.append(f"{mutation.name} (pattern matched {count} times)")
                     continue
                 target.write_text(mutated, encoding="utf-8")
 
-                proc = subprocess.run(
-                    [sys.executable, "test_unit.py"],
-                    cwd=root,
-                    capture_output=True,
-                    env={"PATH": "/usr/bin:/bin", "HOME": str(root), "PYTHONSAFEPATH": "1"},
-                    check=False,
-                )
-                if proc.returncode == 0:
+                run = _run_suite(root)
+                if run.code == 0:
                     survivors.append(mutation.name)
+                elif not run.executed_tests:
+                    # Non-zero, but the suite never ran a test — a syntax error or a broken
+                    # import, not a guard firing. Counting that as a kill is how a harness
+                    # flatters itself.
+                    broken.append(f"{mutation.name} (suite did not run: no test executed)")
 
-        self.assertEqual(broken, [], f"mutation probes stopped matching the source: {broken}")
+        self.assertEqual(broken, [], f"mutations that proved nothing: {broken}")
         self.assertEqual(
             survivors,
             [],
             "the unit suite survived these reverted fixes, so nothing guards them: "
             + "; ".join(survivors),
         )
+
+    def test_a_mutation_that_merely_breaks_the_code_is_not_counted_as_a_kill(self):
+        """The classifier's own control.
+
+        A syntax error makes the suite exit non-zero without any guard firing. If that
+        counted, a mutation table full of garbage would report a perfect score.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _scratch_tree(Path(tmp))
+            target = root / "persona_review/validate.py"
+            target.write_text(target.read_text(encoding="utf-8") + "\nthis is not python(\n")
+            run = _run_suite(root)
+        self.assertNotEqual(run.code, 0, "a syntax error should stop the suite")
+        self.assertFalse(run.executed_tests, "a syntax error must not be classified as a kill")
 
 
 if __name__ == "__main__":
