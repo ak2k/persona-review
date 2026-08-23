@@ -290,6 +290,43 @@ class Harness:
     def provenance(self, provider: str) -> Path:
         return self.run_dir / f"adversarial-reviewer-{provider}-provenance.json"
 
+    # A real git repository, on Harness rather than on one test class: the size
+    # preflight and the provenance record both need one, and duplicating the fixture is
+    # how two copies of a guard end up tested in only one place.
+    def _git_env(self) -> dict[str, str]:
+        return dict(
+            os.environ,
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_AUTHOR_NAME="t",
+            GIT_AUTHOR_EMAIL="t@example.invalid",
+            GIT_COMMITTER_NAME="t",
+            GIT_COMMITTER_EMAIL="t@example.invalid",
+        )
+
+    def _git(self, repo: Path, *args: str) -> str:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            env=self._git_env(),
+            check=True,
+        )
+        return proc.stdout.strip()
+
+    def _repo(self) -> tuple[Path, str]:
+        repo = self.work / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        (repo / "f.txt").write_text("one\n", encoding="utf-8")
+        self._git(repo, "add", "f.txt")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD")
+        (repo / "f.txt").write_text("x" * 40000 + "\n", encoding="utf-8")
+        self._git(repo, "add", "f.txt")
+        self._git(repo, "commit", "-qm", "big")
+        return repo, base
+
     def assert_run_dir_clean(self, provider: str) -> None:
         """No artifact from an earlier run survives.
 
@@ -298,7 +335,16 @@ class Harness:
         directory the code promises to have cleared, and the test stayed green.
         """
         stem = f"adversarial-reviewer-{provider}"
-        leftovers = sorted(p.name for p in self.run_dir.iterdir() if p.name.startswith(stem))
+        # The `.lock` file is coordination, not an artifact: it holds no run output, it is
+        # created before the clear rather than by it, and unlinking it would race a waiter
+        # that had already opened the path. Excluded BY EXACT NAME rather than by extension,
+        # so this stays a whitelist of one and a new leftover cannot slip through it.
+        allowed = {f"{stem}.lock"}
+        leftovers = sorted(
+            p.name
+            for p in self.run_dir.iterdir()
+            if p.name.startswith(stem) and p.name not in allowed
+        )
         assert leftovers == [], f"stale artifacts left in the run dir: {leftovers}"
 
 
@@ -333,6 +379,29 @@ class TestContract(Harness):
         assert record["provider"] == provider
         assert record["persona"] == "adversarial-reviewer"
         assert record["runner_status"] == "0"
+        # A non-repo target is legitimate — the model reads files, not history — but the
+        # record must SAY that rather than omit the field, so a consumer can tell "no commit"
+        # from "this field was never written".
+        assert record["repo"] == str(self.work.resolve())
+        assert record["head_sha"].startswith("unresolved:"), record["head_sha"]
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_provenance_records_the_commit_that_was_reviewed(self, provider: str):
+        # `base_ref` is the CALLER's string: `HEAD~1` names a different commit every day, so
+        # on its own it cannot tie a finding at f.py:42 to the code it was about. Two runs of
+        # the same command a week apart were indistinguishable in the record.
+        repo, base = self._repo()
+        head = self._git(repo, "rev-parse", "HEAD").strip()
+        base_sha = self._git(repo, "rev-parse", base).strip()
+        assert head != base_sha, "the fixture must have two commits or this proves nothing"
+
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer", "-C", str(repo), "-b", base)
+        assert proc.returncode == 0, proc.stderr
+        record = json.loads(self.provenance(provider).read_text(encoding="utf-8"))
+        assert record["head_sha"] == head
+        assert record["base_sha"] == base_sha
+        assert record["base_ref"] == base
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_prompt_the_RUNNER_RECEIVED_carries_brief_rubric_and_clause(self, provider: str):
@@ -554,40 +623,6 @@ class TestExitStatus(Harness):
 
 
 class TestBudget(Harness):
-    def _git_env(self) -> dict[str, str]:
-        return dict(
-            os.environ,
-            GIT_CONFIG_GLOBAL=os.devnull,
-            GIT_CONFIG_SYSTEM=os.devnull,
-            GIT_AUTHOR_NAME="t",
-            GIT_AUTHOR_EMAIL="t@example.invalid",
-            GIT_COMMITTER_NAME="t",
-            GIT_COMMITTER_EMAIL="t@example.invalid",
-        )
-
-    def _git(self, repo: Path, *args: str) -> str:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            capture_output=True,
-            text=True,
-            env=self._git_env(),
-            check=True,
-        )
-        return proc.stdout.strip()
-
-    def _repo(self) -> tuple[Path, str]:
-        repo = self.work / "repo"
-        repo.mkdir()
-        self._git(repo, "init", "-q", "-b", "main")
-        (repo / "f.txt").write_text("one\n", encoding="utf-8")
-        self._git(repo, "add", "f.txt")
-        self._git(repo, "commit", "-qm", "base")
-        base = self._git(repo, "rev-parse", "HEAD")
-        (repo / "f.txt").write_text("x" * 40000 + "\n", encoding="utf-8")
-        self._git(repo, "add", "f.txt")
-        self._git(repo, "commit", "-qm", "big")
-        return repo, base
-
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_large_diff_trips_a_budget_the_prompt_alone_never_could(self, provider: str):
         repo, base = self._repo()
@@ -849,6 +884,48 @@ class TestArtifactLifecycle(Harness):
         )
         assert by_env.returncode == 2, by_env.stderr
         assert "Traceback" not in by_env.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_second_concurrent_run_is_refused_rather_than_interleaved(self, provider: str):
+        # Artifact paths are deterministic and CE_PERSONA_RUN_DIR is documented as reusable,
+        # so two runs of the same persona through the same provider address the same files.
+        # What happened then was not a lost race but a silently wrong answer: the second
+        # run's CLEAR unlinks the first's event stream while its provider is still writing,
+        # both append to one -events.jsonl, and the gate validates an interleaving of two
+        # transcripts. Refusing is the only fail-closed option.
+        self.set_spec(stdout="starting\n", silent_for=30)
+        with subprocess.Popen(
+            [str(self.commands[provider]), "adversarial-reviewer"],
+            env=self.env(),
+            cwd=self.work,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as first:
+            try:
+                events = self.run_dir / f"adversarial-reviewer-{provider}-events.jsonl"
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and not events.exists():
+                    time.sleep(0.2)
+                assert events.exists(), "the first run never reached the runner"
+
+                second = self.review(provider, "adversarial-reviewer", timeout=60)
+                assert second.returncode == 2, second.stderr
+                assert "already running" in second.stderr
+                # The refusal must not have cleared the running run's stream on its way out.
+                assert events.exists(), "the refused run deleted the live run's event stream"
+            finally:
+                first.kill()
+                first.wait(timeout=10)
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_sequential_rerun_is_not_blocked_by_a_released_lock(self, provider: str):
+        # The control. A lock that is never released would satisfy the test above while
+        # breaking every ordinary repeated invocation — and the run directory is documented
+        # as reusable, so repeated invocation is the normal case.
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        again = self.review(provider, "adversarial-reviewer")
+        assert again.returncode == 0, again.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_refusal_before_dispatch_leaves_no_stale_artifact(self, provider: str):

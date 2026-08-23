@@ -202,14 +202,21 @@
             mutations =
               pkgs.runCommand "persona-review-mutations"
                 {
-                  nativeBuildInputs = [ pythonEnv ];
+                  nativeBuildInputs = [
+                    pythonEnv
+                    pkgs.coreutils
+                    # The PROCESS tier of the harness runs tests/test_process.py, which
+                    # symlinks a real git into its stub directory to exercise the size
+                    # preflight. The unit tier needs none of this.
+                    pkgs.git
+                  ];
                   PYTHONDONTWRITEBYTECODE = "1";
                 }
                 ''
                   export HOME=$(mktemp -d)
                   # --no-cov: the harness spawns a suite per mutation, so the parent covers
-                  # nothing. It also mutates a scratch COPY, which is why it runs against the
-                  # source tree rather than the built package.
+                  # nothing. It mutates a scratch COPY of the package, which is why it runs
+                  # against the source tree rather than the built output.
                   python3 -m pytest ${self}/tests/test_mutations.py \
                     -p no:cacheprovider --no-cov --no-header -q
                   touch $out

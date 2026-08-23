@@ -32,9 +32,25 @@ reviewers found it. A harness that cannot fail is the exact defect it exists to 
 
 The reverted line is quoted in each entry, so a reader can see what is being undone.
 
-Only mutations the UNIT suite can kill live here, so the check stays seconds rather than
-hours. Guards that need the process suite — watchdogs, artifact lifecycle, the gate
-replacement doors — are exercised by `tests/test_process.py` itself and swept manually.
+TWO TIERS, because one tier was quietly covering two thirds of the package.
+
+This file used to hold only mutations the UNIT suite could kill, and said the rest were
+"swept manually". That left `cli.py` and `runner.py` — the run lock, the artifact clear,
+both watchdogs, the process-group kill — with ZERO entries between them, backed by a
+sentence in a docstring. A claim about coverage, in the one file whose whole job is to
+replace claims about coverage with checks. Four modules had no entry at all.
+
+  * **unit** — the whole unit suite per mutation, seconds each, run serially.
+  * **process** — `tests/test_process.py` for the tests named in the entry's `selector`.
+    Slower, because these mutations disable the very watchdogs whose tests then wait out
+    their own timeouts, so the tier runs concurrently: it is bounded by stub sleeps rather
+    than by CPU, and the mutations are fully independent. A selector matching nothing makes
+    pytest exit 5, which `executed_tests` classifies as proving nothing rather than as a
+    kill.
+
+`test_every_module_is_represented_or_explicitly_exempt` closes the gap for good: a module
+with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails the suite. Two
+modules are exempt and say why.
 """
 
 from __future__ import annotations
@@ -46,6 +62,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +75,24 @@ class Mutation:
     path: str
     pattern: str
     replacement: str
+    # Which suite is expected to kill it, and — for the process tier — the `-k` expression
+    # naming the tests that should. A process mutation runs the whole process suite only for
+    # the selected tests, because running all 85 per mutation would take hours.
+    suite: str = "unit"
+    selector: str = ""
+
+
+# Modules with no mutation entry, and why. Checked by `test_every_module_is_represented`, so
+# "swept manually" stops being a claim in a docstring and becomes a list someone had to
+# write down. A new module with no entries fails that test until it is covered or listed.
+UNMUTATED_MODULES: dict[str, str] = {
+    # Probes a real authenticated `grok` binary for CLI drift. No automated check drives it —
+    # the same reason it is omitted from the coverage gate — so there is no test to kill.
+    "flags.py": "manual CLI-drift probe; no automated check exercises it",
+    # Pure data: the Provider dataclass and its argv builders, with no guard to revert. Its
+    # argv shape IS asserted, by test_process.py's model/effort tests and by flags.py.
+    "providers.py": "declarative provider table; no branch that can fail open",
+}
 
 
 MUTATIONS: list[Mutation] = [
@@ -296,6 +331,86 @@ MUTATIONS: list[Mutation] = [
         r' "findings schema"\)',
         '            schema = cast(JSONObject, loads(schema_path.read_text(encoding="utf-8")))',
     ),
+    # ----------------------------------------------------------------------------------
+    # PROCESS TIER. cli.py and runner.py had no entries at all, because the unit suite
+    # cannot reach them: both are driven through subprocesses by tests/test_process.py. That
+    # made the module docstring's "swept manually" the only thing standing behind four
+    # modules — which is a claim, not a mechanism, and this file exists because claims about
+    # coverage are exactly what keeps turning out to be false here.
+    #
+    # Each entry names the tests that should kill it, so one mutation runs a handful of
+    # process tests rather than all 85. The selector is itself checked: a mutation whose
+    # tests all pass is a survivor, and a selector matching NOTHING is reported as broken.
+    Mutation(
+        # Two concurrent runs of one persona through one provider address the same files.
+        # Not a lost race — a silently wrong answer, which is the failure this package is for.
+        "concurrent runs are allowed to interleave again",
+        "persona_review/runner.py",
+        r"            fcntl\.flock\(handle\.fileno\(\), fcntl\.LOCK_EX \| fcntl\.LOCK_NB\)",
+        "            pass",
+        suite="process",
+        selector="(concurrent or sequential_rerun) and grok",
+    ),
+    Mutation(
+        # Ordering, not presence: locking after the clear still lets the second run delete
+        # the first run's event stream out from under a provider still writing to it.
+        "the run lock is taken after the clear instead of before",
+        "persona_review/cli.py",
+        r"    with runner\.exclusive_run\(stem\):\n        _clear_run_dir\(run_dir, stem\)",
+        "    _clear_run_dir(run_dir, stem)\n"
+        "    with runner.exclusive_run(stem):\n        pass\n"
+        "    if True:",
+        suite="process",
+        selector="(concurrent or sequential_rerun) and grok",
+    ),
+    Mutation(
+        "the run directory is never cleared, so stale findings survive a refusal",
+        "persona_review/cli.py",
+        r"    for suffix in ARTIFACT_SUFFIXES:",
+        "    for suffix in ():",
+        suite="process",
+        selector="refusal_before_dispatch and grok",
+    ),
+    Mutation(
+        # The idle watchdog. Its `if secs > 0` guard is gone because config makes the value
+        # positive, so what remains to revert is the comparison itself.
+        "the idle watchdog never fires",
+        "persona_review/runner.py",
+        r"        if now - last_change >= idle_secs:",
+        "        if False:",
+        suite="process",
+        selector="silent_runner_is_killed and grok",
+    ),
+    Mutation(
+        "the hard deadline never fires",
+        "persona_review/runner.py",
+        r"        if now - started >= hard_secs:",
+        "        if False:",
+        suite="process",
+        selector="chatty_runner and grok",
+    ),
+    Mutation(
+        # Provenance recorded WHICH brief ran but never WHAT IT RAN AGAINST, so a finding at
+        # f.py:42 could not be tied to the code it was about.
+        "provenance stops recording the commit that was reviewed",
+        "persona_review/cli.py",
+        r"^            f\"head_sha=\{runner\.resolve_revision\(repo, 'HEAD'\)\}\",$",
+        '            f"head_sha=",',
+        suite="process",
+        selector="provenance and grok",
+    ),
+    Mutation(
+        # start_new_session is what lets the watchdog signal the provider's whole group. A
+        # provider CLI spawns helpers that ignore SIGTERM; killing only the parent leaves a
+        # full-effort model run going with nothing watching it.
+        "the provider is no longer run in its own process group",
+        "persona_review/runner.py",
+        # Anchored to the CODE line. Unanchored, this matched the docstring above it first.
+        r"^                start_new_session=True,$",
+        "                start_new_session=False,",
+        suite="process",
+        selector="ignore_sigterm and grok",
+    ),
 ]
 
 
@@ -323,54 +438,93 @@ class Run:
         return self.code == 0
 
 
-def _scratch_tree(tmp: Path) -> Path:
-    """A runnable copy of the package and its unit suite.
+SUITE_FILE = {"unit": "test_unit.py", "process": "test_process.py"}
+
+# Generous: a mutation that disables a watchdog makes that watchdog's own tests wait out
+# their own timeouts, which is the slowest legitimate case here and lands around 90s.
+RUN_TIMEOUT_SECS = 300.0
+
+# Not a pytest status. pytest uses 0-5, so this cannot be mistaken for one, and
+# `executed_tests` (which admits only 0 and 1) classifies it as proving nothing.
+TIMED_OUT = -1
+
+# The process tier is bounded by wall clock, not CPU: nearly all of it is spent waiting for
+# stub runners to sleep. The mutations are fully independent — separate scratch trees,
+# separate temp dirs, separate processes — so running them concurrently turns the sum of
+# their timeouts into the slowest single one. Four at a time, because each spawns a pytest
+# that itself spawns review subprocesses that fork helpers.
+PROCESS_WORKERS = 4
+
+
+def _scratch_tree(tmp: Path, suite: str = "unit") -> Path:
+    """A runnable copy of the package and one of its suites.
 
     The suite bootstraps its import with `Path(__file__).resolve().parent.parent`, so it
-    MUST sit at `<root>/tests/test_unit.py` for that to land on the scratch tree. Copying it
+    MUST sit at `<root>/tests/<file>` for that to land on the scratch tree. Copying it
     flat to `<root>/test_unit.py` pointed the bootstrap one directory too high, every run
     died with ModuleNotFoundError, and every mutation was recorded as killed — the harness
     built to catch guards that cannot fail could not itself fail.
     """
     shutil.copytree(SRC / "persona_review", tmp / "persona_review")
     (tmp / "tests").mkdir()
-    shutil.copy(SRC / "tests" / "test_unit.py", tmp / "tests" / "test_unit.py")
+    name = SUITE_FILE[suite]
+    shutil.copy(SRC / "tests" / name, tmp / "tests" / name)
     # The source may be a read-only Nix store path, and copytree preserves mode.
     for path in tmp.rglob("*"):
         path.chmod(path.stat().st_mode | stat.S_IWUSR)
     return tmp
 
 
-def _run_suite(root: Path) -> Run:
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(root)}
-    # Inherited so `-m pytest` resolves the same pytest this harness is running under; the
-    # scratch tree deliberately carries no pyproject.toml, so nothing else supplies it.
-    for passthrough in ("PYTHONPATH", "VIRTUAL_ENV"):
-        if passthrough in os.environ:
-            env[passthrough] = os.environ[passthrough]
-    proc = subprocess.run(
-        # -p no:cacheprovider so parallel scratch trees never contend over a cache dir, and
-        # --no-header -q to keep a 24-mutation sweep's captured output small.
-        # No PYTHONSAFEPATH here. The scratch tree is ours, not a repository under review,
-        # and dropping sys.path[0] is what broke the import bootstrap.
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_unit.py",
-            "-x",
-            "-q",
-            "--no-header",
-            "-p",
-            "no:cacheprovider",
-            "-p",
-            "no:cov",
-        ],
-        cwd=root,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+def _run_suite(root: Path, suite: str = "unit", selector: str = "") -> Run:
+    if suite == "unit":
+        # A closed environment: the unit suite touches no binary, so nothing needs to leak in.
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(root)}
+        # Inherited so `-m pytest` resolves the same pytest this harness is running under;
+        # the scratch tree deliberately carries no pyproject.toml, so nothing else supplies it.
+        for passthrough in ("PYTHONPATH", "VIRTUAL_ENV"):
+            if passthrough in os.environ:
+                env[passthrough] = os.environ[passthrough]
+    else:
+        # The process suite builds its own restricted PATH for every review it launches, and
+        # symlinks a real `git` into its stub directory — so it needs to find one here. It
+        # never reaches a real `grok` or `codex`: the PATH it hands each subprocess contains
+        # only its stubs, which is what stops a unit test starting a billed model run.
+        env = {**os.environ, "HOME": str(root)}
+        env.pop("PERSONA_REVIEW_BIN", None)  # drive the local shim, not an installed build
+
+    argv = [
+        sys.executable,
+        "-m",
+        "pytest",
+        f"tests/{SUITE_FILE[suite]}",
+        "-q",
+        "--no-header",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "no:cov",
+    ]
+    # -x only for the unit tier. In the process tier a selector picks a handful of tests and
+    # the run is short, while stopping at the first failure would hide which of them died.
+    if suite == "unit":
+        # -x only for the unit tier: it runs the whole suite, and the first failure is a
+        # kill. The process tier already runs a handful of selected tests.
+        argv.append("-x")
+    if selector:
+        argv += ["-k", selector]
+    # No PYTHONSAFEPATH here. The scratch tree is ours, not a repository under review, and
+    # dropping sys.path[0] is what broke the import bootstrap.
+    #
+    # The timeout is reported as its own outcome rather than raised. Disabling a watchdog
+    # makes that watchdog's own tests run to THEIR timeouts, so slowness here is expected;
+    # what must not happen is a hang being silently counted either way. A run that does not
+    # finish is neither a kill nor a survivor — it is a probe nobody can conclude from.
+    try:
+        proc = subprocess.run(
+            argv, cwd=root, capture_output=True, env=env, check=False, timeout=RUN_TIMEOUT_SECS
+        )
+    except subprocess.TimeoutExpired:
+        return Run(TIMED_OUT, f"the scratch suite did not finish within {RUN_TIMEOUT_SECS}s")
     return Run(proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace"))
 
 
@@ -388,38 +542,105 @@ class TestGuardsCanFail:
             + control.output[-2000:]
         )
 
-    def test_every_reverted_fix_kills_a_test(self):
-        survivors: list[str] = []
-        broken: list[str] = []
-        for mutation in MUTATIONS:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = _scratch_tree(Path(tmp))
-                target = root / mutation.path
-                text = target.read_text(encoding="utf-8")
-                mutated, count = re.subn(
-                    mutation.pattern, mutation.replacement, text, count=1, flags=re.M
+    @staticmethod
+    def _verdict(mutation: Mutation, suite: str) -> tuple[str, str] | None:
+        """Revert one fix and classify the result. Returns (kind, detail) or None for a kill."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _scratch_tree(Path(tmp), suite)
+            target = root / mutation.path
+            text = target.read_text(encoding="utf-8")
+            # COUNT FIRST, with findall. `subn(..., count=1)` can never report more than one,
+            # so the "exactly once" rule this file claims to enforce was never enforced at
+            # all: a pattern matching five places substituted the first and reported 1.
+            #
+            # That is not hypothetical. The `start_new_session=True` probe matched the
+            # DOCSTRING three dozen lines above the code, mutated a sentence, changed no
+            # behaviour, and was duly reported as a surviving guard. The finding was a
+            # harness defect wearing the costume of a code defect.
+            matches = len(re.findall(mutation.pattern, text, flags=re.M))
+            if matches != 1:
+                # A probe that stopped matching reports a false "killed"; one that matches
+                # several places mutates whichever came first. Both are the same class of lie
+                # this whole file exists to catch.
+                return (
+                    "broken",
+                    f"{mutation.name} (pattern matched {matches} times, want exactly 1)",
                 )
-                if count != 1:
-                    # A probe that stopped matching reports a false "killed", which is the
-                    # same class of lie this whole file exists to catch.
-                    broken.append(f"{mutation.name} (pattern matched {count} times)")
-                    continue
-                target.write_text(mutated, encoding="utf-8")
+            mutated = re.sub(mutation.pattern, mutation.replacement, text, count=1, flags=re.M)
+            assert mutated != text, f"{mutation.name}: substitution changed nothing"
+            target.write_text(mutated, encoding="utf-8")
 
-                run = _run_suite(root)
-                if run.code == 0:
-                    survivors.append(mutation.name)
-                elif not run.executed_tests:
-                    # Non-zero, but the suite never ran a test — a syntax error or a broken
-                    # import, not a guard firing. Counting that as a kill is how a harness
-                    # flatters itself.
-                    broken.append(f"{mutation.name} (suite did not run: no test executed)")
+            run = _run_suite(root, suite, mutation.selector)
+            if run.code == 0:
+                return ("survivor", mutation.name)
+            if not run.executed_tests:
+                # Non-zero, but the suite never reached a verdict — a syntax error, a broken
+                # import, a selector matching nothing (pytest exits 5), or a timeout.
+                # Counting any of those as a kill is how a harness flatters itself.
+                return ("broken", f"{mutation.name} (suite reached no verdict: {run.code})")
+            return None
 
+    def _sweep(self, suite: str) -> tuple[list[str], list[str]]:
+        """Revert each fix in this tier and report (survivors, broken)."""
+        entries = [m for m in MUTATIONS if m.suite == suite]
+        assert entries, f"no mutations in the {suite!r} tier, so this sweep proves nothing"
+
+        def verdict(mutation: Mutation) -> tuple[str, str] | None:
+            """A named function, not a lambda: strict mode cannot infer a lambda's parameter."""
+            return self._verdict(mutation, suite)
+
+        if suite == "unit":
+            results = [verdict(m) for m in entries]
+        else:
+            with ThreadPoolExecutor(max_workers=PROCESS_WORKERS) as pool:
+                results = list(pool.map(verdict, entries))
+
+        survivors = [d for kind, d in filter(None, results) if kind == "survivor"]
+        broken = [d for kind, d in filter(None, results) if kind == "broken"]
+        return survivors, broken
+
+    def test_every_reverted_fix_kills_a_unit_test(self):
+        survivors, broken = self._sweep("unit")
         assert broken == [], f"mutations that proved nothing: {broken}"
         assert survivors == [], (
             "the unit suite survived these reverted fixes, so nothing guards them: "
             + "; ".join(survivors)
         )
+
+    def test_every_reverted_fix_kills_a_process_test(self):
+        """cli.py and runner.py, which the unit suite cannot reach.
+
+        Both are driven through subprocesses, so before this tier existed they had ZERO
+        entries between them while the module docstring said their guards were "swept
+        manually" — a claim, not a mechanism, in the one file whose entire job is to replace
+        claims about coverage with checks.
+        """
+        survivors, broken = self._sweep("process")
+        assert broken == [], f"mutations that proved nothing: {broken}"
+        assert survivors == [], (
+            "the process suite survived these reverted fixes, so nothing guards them: "
+            + "; ".join(survivors)
+        )
+
+    def test_every_module_is_represented_or_explicitly_exempt(self):
+        """No module may quietly have no entries.
+
+        Four did: cli.py, runner.py, providers.py and flags.py. Two now have a tier, and two
+        are listed in UNMUTATED_MODULES with a written reason. The point is that adding a
+        module with guards and no entries fails HERE rather than going unnoticed for a
+        release, which is how the first four accumulated.
+        """
+        covered = {m.path.split("/")[-1] for m in MUTATIONS}
+        modules = {p.name for p in (SRC / "persona_review").glob("*.py")} - {"__init__.py"}
+        unexplained = sorted(modules - covered - set(UNMUTATED_MODULES))
+        assert unexplained == [], (
+            f"modules with no mutation entry and no stated exemption: {unexplained}. "
+            "Add an entry, or add the module to UNMUTATED_MODULES with the reason."
+        )
+        stale = sorted(set(UNMUTATED_MODULES) - modules)
+        assert stale == [], f"UNMUTATED_MODULES names modules that no longer exist: {stale}"
+        both = sorted(covered & set(UNMUTATED_MODULES))
+        assert both == [], f"listed as exempt but also mutated: {both}"
 
     def test_a_mutation_that_merely_breaks_the_code_is_not_counted_as_a_kill(self):
         """The classifier's own control.

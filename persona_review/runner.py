@@ -17,6 +17,7 @@ correct across CLI versions that rename their events.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import signal
 import subprocess
@@ -53,6 +54,53 @@ DIFF_TIMEOUT_SECS = 60.0
 RunError = errors.UsageError
 EnvError = errors.EnvError
 MissingTool = errors.MissingTool
+
+
+@contextlib.contextmanager
+def exclusive_run(stem: Path) -> Generator[None]:
+    """Hold an exclusive lock on one artifact stem for the whole run, or refuse to start.
+
+    Artifact paths are DETERMINISTIC — `<persona>-<provider>.json` and its siblings — and
+    `CE_PERSONA_RUN_DIR` is documented as reusable. Those two properties are good ones and
+    are kept; together they also mean two concurrent runs of the same persona through the
+    same provider address the same files. What happened then was not a lost race but a
+    silently wrong answer, in three overlapping ways:
+
+      * the second run's directory CLEAR unlinks the first run's event stream while the
+        first provider is still writing to it;
+      * both providers append to one `-events.jsonl`, so the gate reads an interleaving of
+        two transcripts and validates whichever terminal event it finds;
+      * the provenance sidecar attests one run's brief beside the other run's findings.
+
+    Every one of those reports a clean review of something nobody reviewed, which is the
+    single failure this package exists to prevent. So the lock is taken BEFORE the clear and
+    held through the gate, and a second run refuses rather than interleaving.
+
+    The lockfile is deliberately left behind on release. Unlinking it races: a waiter that
+    already opened the file would lock an inode no longer at that path and both runs would
+    proceed. It is empty, it is not an artifact, and `assert_run_dir_clean` excludes it by
+    name for that reason.
+    """
+    lock_path = Path(f"{stem}.lock")
+    try:
+        handle = lock_path.open("w")
+    except OSError as exc:
+        raise errors.EnvError(f"cannot create the run lock {lock_path}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise errors.UsageError(
+                f"another review is already running for these artifacts ({stem}.*).\n"
+                "  Two runs of the same persona and provider in one run directory would "
+                "overwrite each other's\n"
+                "  event stream and produce findings attested to the wrong run, so this one "
+                "is refused.\n"
+                "  Wait for it to finish, or set CE_PERSONA_RUN_DIR to a different directory."
+            ) from exc
+        yield
+    finally:
+        handle.close()  # releases the flock
 
 
 @dataclass(frozen=True)
@@ -178,6 +226,45 @@ def diff_bytes(repo: Path, base: str) -> int:
             "  would be told to diff a range that does not exist and would review something else."
         )
     return total
+
+
+def resolve_revision(repo: Path, rev: str) -> str:
+    """The object id `rev` names, or a legible `unresolved:` marker. Never raises.
+
+    Provenance recorded WHICH BRIEF ran but never WHAT IT RAN AGAINST: `base_ref=HEAD~1` is
+    the caller's string, not a tree state, so a finding reading `f.py:42` could not be tied
+    to the code it was about, and two runs of the same command a week apart were
+    indistinguishable in the record.
+
+    Never raises, and never fails the run, because provenance is a record rather than a
+    gate — and reviewing a directory that is not a git repository at all is legitimate, since
+    the model reads files rather than history. A marker string says so plainly instead.
+
+    No `^{commit}` suffix, deliberately. It changes the grammar for exactly the baselines
+    `git diff` accepts and this would reject: a bare tree object (the standard empty-tree
+    baseline for an initial commit) and `:/subject` selectors.
+    """
+    argv = ["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", rev]
+    # Temp files, not pipes. `subprocess.PIPE` is greppably absent from this module and the
+    # suite asserts it: both ways of breaking that rule have already cost a defect here.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(argv, stdout=out, stderr=err, env=_git_env())
+        except (FileNotFoundError, OSError) as exc:
+            return f"unresolved: git could not be run ({exc})"
+        with proc:
+            try:
+                proc.wait(timeout=DIFF_TIMEOUT_SECS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=KILL_GRACE_SECS)
+                return "unresolved: git rev-parse did not finish"
+        out.seek(0)
+        text = out.read().decode("utf-8", "replace").strip()
+    if proc.returncode != 0 or not text:
+        return f"unresolved: {rev}"
+    return text
 
 
 @dataclass(frozen=True)

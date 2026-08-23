@@ -151,29 +151,34 @@ def _expand_repo(spec: str) -> Path:
         raise errors.UsageError(f"-C '{spec}' names a home directory that does not exist") from exc
 
 
-def _run_dir(persona: str, provider: Provider, settings: Settings) -> Path:
-    run_dir = settings.resolved_run_dir()
+# Everything a run writes, relative to its stem. `.lock` is NOT here: it is coordination,
+# not an artifact, it is created before the clear, and unlinking it would race a waiter.
+ARTIFACT_SUFFIXES = (
+    ".json",
+    "-provenance.json",
+    "-last.json",
+    "-events.jsonl",
+    "-prompt.md",
+    # The failure path reads this one back, so a survivor from an earlier run is the stale
+    # artifact most likely to be believed.
+    "-stderr.log",
+)
 
-    # Artifact paths are deterministic and the run dir is documented as reusable, so a run
-    # that fails before the gate must not leave the PREVIOUS run's findings sitting next to
-    # this run's fresh event stream — the provenance sidecar exists to attest which brief
-    # produced these findings, and a stale one attests the wrong run. Cleared here, before
-    # the budget preflight, so an early refusal leaves nothing behind either.
-    for suffix in (
-        ".json",
-        "-provenance.json",
-        "-last.json",
-        "-events.jsonl",
-        "-prompt.md",
-        # The failure path reads this one back, so a survivor from an earlier run is the
-        # stale artifact most likely to be believed.
-        "-stderr.log",
-    ):
-        path = run_dir / f"{persona}-{provider.name}{suffix}"
+
+def _clear_run_dir(run_dir: Path, stem: Path) -> None:
+    """Remove this stem's artifacts. Call only while holding the stem's exclusive lock.
+
+    Artifact paths are deterministic and the run dir is documented as reusable, so a run that
+    fails before the gate must not leave the PREVIOUS run's findings sitting next to this
+    run's fresh event stream — the provenance sidecar exists to attest which brief produced
+    these findings, and a stale one attests the wrong run. Cleared before the budget
+    preflight, so an early refusal leaves nothing behind either.
+    """
+    for suffix in ARTIFACT_SUFFIXES:
+        path = Path(f"{stem}{suffix}")
         if path.parent != run_dir:  # a persona name is a bare brief name; assert it stayed one
             raise errors.UsageError(f"refusing to touch {path}, which is outside {run_dir}")
         path.unlink(missing_ok=True)
-    return run_dir
 
 
 def main(provider: Provider, argv: list[str] | None = None) -> int:
@@ -206,14 +211,28 @@ def _review(provider: Provider, args: argparse.Namespace) -> int:
     # run directory had been cleared and the prompt built.
     settings = Settings.from_env()
 
-    # Clear the run dir next, before anything else that can fail. The artifact paths are
-    # deterministic and the directory is documented as reusable, so every fallible step
-    # ahead of the clear is a step that can leave the PREVIOUS run's findings sitting at the
-    # path a caller reads. Only the persona name is needed to know those paths, and
-    # normalising it touches no filesystem — which is why it is split from resolution.
+    # Only the persona name is needed to know the artifact paths, and normalising it touches
+    # no filesystem — which is why it is split from resolution.
     persona = assets.normalise_persona(args.persona)
-    run_dir = _run_dir(persona, provider, settings)
+    run_dir = settings.resolved_run_dir()
+    stem = run_dir / f"{persona}-{provider.name}"
 
+    # The lock is taken BEFORE the clear and held through the gate. Taken after, a second
+    # concurrent run would already have deleted the first run's event stream out from under
+    # a provider still writing to it.
+    with runner.exclusive_run(stem):
+        _clear_run_dir(run_dir, stem)
+        return _review_locked(provider, args, settings, persona, stem)
+
+
+def _review_locked(
+    provider: Provider,
+    args: argparse.Namespace,
+    settings: Settings,
+    persona: str,
+    stem: Path,
+) -> int:
+    """The run itself. Every path under `stem` is this process's alone for the duration."""
     repo = _expand_repo(args.repo)
     if not repo.is_dir():
         raise errors.UsageError(f"-C '{args.repo}' is not a directory")
@@ -223,7 +242,16 @@ def _review(provider: Provider, args: argparse.Namespace) -> int:
     schema_file = asset_dir / "findings-schema.json"
     if not schema_file.is_file():
         raise errors.EnvError(f"missing findings schema at {schema_file}")
-    persona, brief = assets.resolve_persona(asset_dir, args.persona)
+    resolved, brief = assets.resolve_persona(asset_dir, args.persona)
+    if resolved != persona:
+        # The lock and the clear were taken against the NORMALISED name, before any
+        # filesystem access; the artifacts are written under the RESOLVED one. Both call
+        # `normalise_persona`, so they agree — but if they ever stopped agreeing, this run
+        # would write to paths it does not hold the lock on, and a concurrent run would
+        # overwrite them. Assert it rather than rely on it.
+        raise errors.UsageError(
+            f"persona resolved to '{resolved}' but the run is locked as '{persona}'"
+        )
 
     if shutil.which(provider.binary) is None:
         raise errors.MissingTool(f"{provider.binary} not on PATH ({provider.install_hint})")
@@ -252,7 +280,6 @@ def _review(provider: Provider, args: argparse.Namespace) -> int:
             "  Raise CE_PERSONA_MAX_PROMPT_TOKENS only if the provider can genuinely take it."
         )
 
-    stem = run_dir / f"{persona}-{provider.name}"
     prompt_file = Path(f"{stem}-prompt.md")
     events_file = Path(f"{stem}-events.jsonl")
     err_file = Path(f"{stem}-stderr.log")
@@ -308,6 +335,16 @@ def _review(provider: Provider, args: argparse.Namespace) -> int:
             f"base_ref={args.base}",
             f"started_at={started_at}",
             f"runner_status={result.status}",
+            # WHAT WAS REVIEWED, not just that a review happened. `base_ref` is the caller's
+            # string — `HEAD~1` names a different commit every day — so without these a
+            # finding reading `f.py:42` cannot be tied back to the code it was about, and
+            # two runs a week apart are indistinguishable in the record. Resolved after the
+            # run rather than before, so the recorded state is the one the model saw for the
+            # whole of it. `unresolved:` when the target is not a git repository, which is
+            # legitimate: the model reads files, not history.
+            f"repo={repo}",
+            f"head_sha={runner.resolve_revision(repo, 'HEAD')}",
+            f"base_sha={runner.resolve_revision(repo, args.base) if args.base else ''}",
         ],
         prov_files={"persona": str(brief), "schema": str(schema_file)},
         label=provider.command,
