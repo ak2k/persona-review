@@ -346,7 +346,16 @@ def _review_locked(
             f"head_sha={runner.resolve_revision(repo, 'HEAD')}",
             f"base_sha={runner.resolve_revision(repo, args.base) if args.base else ''}",
         ],
-        prov_files={"persona": str(brief), "schema": str(schema_file)},
+        # The PROMPT, not just its ingredients. Hashing the brief and the schema attests two
+        # of the inputs; what the model was actually told also carries the rubric — read from
+        # a plugin file that updates underneath us — the -c context, and the diff instruction.
+        # Without this, "what exactly was this model asked?" is unanswerable from the record,
+        # and -prompt.md is no substitute: the next run's clear deletes it.
+        prov_files={
+            "persona": str(brief),
+            "schema": str(schema_file),
+            "prompt": str(prompt_file),
+        },
         label=provider.command,
     )
 

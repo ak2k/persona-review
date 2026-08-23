@@ -215,10 +215,17 @@
                 ''
                   export HOME=$(mktemp -d)
                   # --no-cov: the harness spawns a suite per mutation, so the parent covers
-                  # nothing. It mutates a scratch COPY of the package, which is why it runs
-                  # against the source tree rather than the built output.
-                  python3 -m pytest ${self}/tests/test_mutations.py \
-                    -p no:cacheprovider --no-cov --no-header -q
+                  # nothing.
+                  #
+                  # PERSONA_REVIEW_PKG makes it mutate a scratch copy of the BUILT package
+                  # rather than the source tree, so the guards it proves can fail are the
+                  # ones that ship. The unit and process checks already run the built output;
+                  # a harness measuring a different copy is the same defect their own
+                  # negative controls exist to catch. The suite asserts this variable is
+                  # honoured, so the source-tree fallback cannot silently apply here.
+                  PERSONA_REVIEW_PKG=${persona-review}/${python.sitePackages} \
+                    python3 -m pytest ${self}/tests/test_mutations.py \
+                      -p no:cacheprovider --no-cov --no-header -q
                   touch $out
                 '';
 

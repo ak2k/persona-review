@@ -48,9 +48,16 @@ replace claims about coverage with checks. Four modules had no entry at all.
     pytest exit 5, which `executed_tests` classifies as proving nothing rather than as a
     kill.
 
-`test_every_module_is_represented_or_explicitly_exempt` closes the gap for good: a module
-with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails the suite. Two
-modules are exempt and say why.
+`test_every_module_is_represented_or_explicitly_exempt` stops a module having no entries
+unnoticed: one with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails
+the suite. Two modules are exempt and say why.
+
+WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py has
+3 entries against a dozen raise sites; validate.py has 15 against three dozen. So "every
+module is represented" is enforced, and "every guard can fail" is not — the table is a
+growing floor, not a proof of completeness, and the honest way to extend it is still to ask
+which guard has no entry and write one. Saying otherwise here would be the same
+coverage-shaped claim this file exists to disbelieve.
 """
 
 from __future__ import annotations
@@ -66,7 +73,21 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 SRC = Path(__file__).resolve().parent.parent
+
+# Which copy of the library gets mutated. The unit and process checks both run the BUILT
+# package, so a harness that mutates the source tree proves the source's guards can fail —
+# a claim about a different set of files from the ones that ship. They are the same modulo
+# packaging, which is why this was only a P3, but "modulo packaging" is an assumption and
+# this file is where assumptions go to be checked.
+#
+# PERSONA_REVIEW_PKG points at the installed site-packages; the flake checks set it. Falling
+# back to the source tree keeps a bare `pytest` working in a checkout, and
+# `test_the_mutated_library_is_the_one_that_ships` asserts the flake's copy is in use
+# whenever the variable is set, so the fallback cannot silently become the default in CI.
+PACKAGE_ROOT = Path(os.environ.get("PERSONA_REVIEW_PKG") or SRC)
 
 
 @dataclass(frozen=True)
@@ -465,7 +486,9 @@ def _scratch_tree(tmp: Path, suite: str = "unit") -> Path:
     died with ModuleNotFoundError, and every mutation was recorded as killed — the harness
     built to catch guards that cannot fail could not itself fail.
     """
-    shutil.copytree(SRC / "persona_review", tmp / "persona_review")
+    # The LIBRARY comes from PACKAGE_ROOT (the built package under the flake checks); the
+    # SUITE always comes from the source tree, because the package does not ship its tests.
+    shutil.copytree(PACKAGE_ROOT / "persona_review", tmp / "persona_review")
     (tmp / "tests").mkdir()
     name = SUITE_FILE[suite]
     shutil.copy(SRC / "tests" / name, tmp / "tests" / name)
@@ -622,6 +645,22 @@ class TestGuardsCanFail:
             + "; ".join(survivors)
         )
 
+    def test_the_mutated_library_is_the_one_that_ships(self):
+        """When the flake sets PERSONA_REVIEW_PKG, the built package must be what is mutated.
+
+        Otherwise this harness proves the SOURCE tree's guards can fail while the unit and
+        process checks run the built package — the same "tested a different copy from the one
+        that ships" defect the unit check's own negative control exists to catch. The
+        source-tree fallback is for a bare `pytest` in a checkout, and this makes it
+        impossible for that fallback to be silently in force under CI.
+        """
+        declared = os.environ.get("PERSONA_REVIEW_PKG")
+        if not declared:
+            pytest.skip("no PERSONA_REVIEW_PKG; running against the source tree")
+        assert Path(declared) == PACKAGE_ROOT
+        assert (PACKAGE_ROOT / "persona_review" / "validate.py").is_file()
+        assert PACKAGE_ROOT != SRC, "PERSONA_REVIEW_PKG points back at the source tree"
+
     def test_every_module_is_represented_or_explicitly_exempt(self):
         """No module may quietly have no entries.
 
@@ -631,7 +670,7 @@ class TestGuardsCanFail:
         release, which is how the first four accumulated.
         """
         covered = {m.path.split("/")[-1] for m in MUTATIONS}
-        modules = {p.name for p in (SRC / "persona_review").glob("*.py")} - {"__init__.py"}
+        modules = {p.name for p in (PACKAGE_ROOT / "persona_review").glob("*.py")} - {"__init__.py"}
         unexplained = sorted(modules - covered - set(UNMUTATED_MODULES))
         assert unexplained == [], (
             f"modules with no mutation entry and no stated exemption: {unexplained}. "
