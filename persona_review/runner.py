@@ -121,10 +121,15 @@ def diff_bytes(repo: Path, base: str) -> int:
     object (the standard empty-tree baseline for an initial commit) and `:/subject`
     selectors, because appending the suffix changes their grammar.
 
-    STREAMED, never buffered. This runs BEFORE the budget check, so buffering the whole diff
-    to measure it means the guard against an oversized review is itself the thing that an
-    oversized review breaks: a 209 MB diff took peak RSS to roughly 2.4x its size. Only the
-    byte count is wanted, so read and discard in chunks.
+    The diff goes to a temp file and the count is an `fstat`, so peak memory is independent
+    of diff size — buffering it in the parent took RSS to roughly 2.4x a 209 MB diff, and
+    this runs BEFORE the budget check, which made the guard against an oversized review the
+    thing an oversized review broke.
+
+    It is NOT free, and the cost moved rather than vanished: the whole diff lands in TMPDIR
+    for the duration of the call (26 MB of diff, 26 MB of TMPDIR, measured). That is the
+    deliberate trade — bounded memory, temporary disk — and it is why a write failure below
+    is reported as an environment problem rather than a bad base ref.
     """
     # NEITHER stream is a pipe. That is the invariant this module runs on, and the reason
     # is that both ways of breaking it have already cost a defect: reading the runner's
@@ -140,14 +145,24 @@ def diff_bytes(repo: Path, base: str) -> int:
         except FileNotFoundError as exc:
             raise MissingTool(f"git is required to weigh `-b {base}` but is not on PATH") from exc
 
-        try:
-            proc.wait(timeout=DIFF_TIMEOUT_SECS)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            raise RunError(
-                f"`git diff {base}..HEAD` in {repo} did not finish within {int(DIFF_TIMEOUT_SECS)}s"
-            ) from None
+        # `with proc:` reaps on EVERY exit path, including the ones not enumerated here.
+        # Without it, an exception raised DURING the wait — KeyboardInterrupt is the
+        # realistic one, since the budget preflight runs before any signal handling is
+        # installed — leaves git running, unreaped, still filling a temp file.
+        with proc:
+            try:
+                proc.wait(timeout=DIFF_TIMEOUT_SECS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                # Bounded. SIGKILL is uncatchable, but a child wedged in uninterruptible
+                # sleep on a hung filesystem would otherwise block forever here — in the
+                # one preflight that exists precisely to be time-bounded.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=KILL_GRACE_SECS)
+                raise RunError(
+                    f"`git diff {base}..HEAD` in {repo} did not finish within "
+                    f"{int(DIFF_TIMEOUT_SECS)}s"
+                ) from None
 
         total = os.fstat(out.fileno()).st_size
         err.seek(0)
@@ -156,6 +171,14 @@ def diff_bytes(repo: Path, base: str) -> int:
     if proc.returncode != 0:
         lines = detail.strip().splitlines()
         hint = lines[-1] if lines else "no detail from git"
+        # git can now fail for OUTPUT-side reasons, because the diff goes to TMPDIR. Telling
+        # a caller its base ref is bad when the disk is full is a false diagnosis, and it
+        # crosses the type boundary this module keeps: RunError is the caller's mistake,
+        # EnvError is the machine's.
+        if "No space left on device" in detail or "write error" in detail:
+            raise EnvError(
+                f"could not write `git diff {base}..HEAD` output to {tempfile.gettempdir()}: {hint}"
+            )
         raise RunError(
             f"base ref '{base}' does not resolve in {repo} ({hint}).\n"
             "  An unresolvable base is not a smaller review, it is an unscoped one: the model\n"

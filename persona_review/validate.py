@@ -376,8 +376,20 @@ def from_grok_events(text: str) -> Artifact:
         fail(f"grok stopped early (stop_reason={stop!r}); the answer is truncated or refused")
 
     obj = result.get("structured_output")
-    if isinstance(obj, dict) and "findings" in obj:
+    if obj is not None:
+        # PRESENT but wrong is a failure, not a reason to look elsewhere. Falling through to
+        # the raw text when `--json-schema` was in force means the schema-constrained channel
+        # produced something unexpected and the gate quietly used a different one instead —
+        # the answer it returns is then from a channel nobody asked for.
+        if not isinstance(obj, dict) or "findings" not in obj:
+            fail(
+                "grok's result event carries a structured_output that is not a findings "
+                f"object ({type(obj).__name__}); --json-schema was requested, so this is a "
+                "malformed answer rather than a reason to read the raw text"
+            )
         return obj
+    # No structured output at all: the run was not schema-constrained, so the final text is
+    # the only channel left. Strict, like codex's.
     raw = result.get("result")
     if isinstance(raw, str) and raw.strip():
         return from_object_file(raw)

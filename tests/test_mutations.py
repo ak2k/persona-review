@@ -142,6 +142,20 @@ MUTATIONS: list[Mutation] = [
         "\n            result = result or event",
     ),
     Mutation(
+        # Found by asking which guards had no entry here: mutating this left all 64 unit
+        # tests green. An unguarded guard is exactly what this table exists to surface.
+        "unknown extraction mode falls through to a real mode",
+        "persona_review/validate.py",
+        r'    fail\(f"unknown extraction mode \{mode!r\}"\)',
+        "    return from_object_file(text)",
+    ),
+    Mutation(
+        "a malformed structured_output falls through to the raw text",
+        "persona_review/validate.py",
+        r'        if not isinstance\(obj, dict\) or "findings" not in obj:',
+        "        if False:",
+    ),
+    Mutation(
         "persona name may be a path again",
         "persona_review/assets.py",
         r'    if not persona or persona != Path\(persona\)\.name or persona\.startswith\("\."\):',

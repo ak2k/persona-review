@@ -343,6 +343,42 @@ class TestGrokRunGating(unittest.TestCase):
         )
         self.assertEqual(got["findings"], [])
 
+    def test_a_structured_output_that_is_not_findings_fails_rather_than_falling_through(self):
+        # PRESENT but wrong is a malformed answer, not a reason to read a different channel.
+        # Falling back to the raw text when --json-schema was in force means the gate quietly
+        # answered from a channel nobody asked for.
+        real = json.dumps(artifact(finding(title="from the raw text")))
+        bad_shapes: list[Any] = [{"oops": 1}, [], "a string", 7]
+        for bad in bad_shapes:
+            with self.subTest(bad=bad):
+                with self.assertRaises(validate.GateError) as caught:
+                    validate.from_grok_events(self._events(structured_output=bad, result=real))
+                self.assertIn("not a findings object", str(caught.exception))
+
+    def test_no_structured_output_at_all_still_reads_the_raw_text_strictly(self):
+        # The unconstrained case: no schema was in force, so the final text is all there is.
+        got = validate.from_grok_events(self._events(result=EMPTY_EXAMPLE))
+        self.assertEqual(got["findings"], [])
+        with self.assertRaises(validate.GateError):
+            validate.from_grok_events(self._events(result="I gave up. " + EMPTY_EXAMPLE))
+
+    def test_an_unknown_extraction_mode_is_refused(self):
+        # Mutating this guard to `return from_object_file(text)` left the whole unit suite
+        # green — an unguarded guard found by asking which ones had no mutation entry.
+        with self.assertRaises(validate.GateError) as caught:
+            validate.extract("transcript", EMPTY_EXAMPLE)
+        self.assertIn("unknown extraction mode", str(caught.exception))
+        for mode in ("", "grok", "OBJECT"):
+            with self.subTest(mode=mode), self.assertRaises(validate.GateError):
+                validate.extract(mode, EMPTY_EXAMPLE)
+
+    def test_the_two_real_modes_dispatch_correctly(self):
+        self.assertEqual(validate.extract("object", EMPTY_EXAMPLE)["findings"], [])
+        self.assertEqual(
+            validate.extract("grok-events", self._events(structured_output=artifact()))["findings"],
+            [],
+        )
+
     def test_no_result_event_fails(self):
         with self.assertRaises(validate.GateError):
             validate.from_grok_events('{"type":"system"}\n')
