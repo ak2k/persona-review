@@ -60,22 +60,59 @@ one line, and a person reading one error.
 
 `tests/test_process.py` asserts the one-line contract directly.
 
-### 3. argparse, not typer + rich
+### 3. No rich
 
-**Template says:** typer + rich for Profile A.
+**Template says:** rich for Profile A.
 
-**Status: open, not settled.** argparse is what the bash-to-Python port carried over. rich is
-a clear no — this output is read by agents and by CI, where colour and boxes are noise. typer
-is a genuine question: it would remove hand-rolled argument handling, and the flags are
-already stable and simple (`<persona> [-C dir] [-b ref] [-m model] [-e effort] [-c file]`).
+**Why — measured, not assumed** (rich 15.0.0, Python 3.14):
 
-Two things have to survive any switch, and they are why it has not happened yet:
+The obvious objection, colour, is **not** the reason: rich auto-detects a non-TTY and emits
+no ANSI when piped. Two real ones replace it.
 
-- **The exit table in `--help` is generated from `errors.EXIT_TABLE`**, not restated beside
-  it. Two lists of the same numbers are one edit from disagreeing, and these numbers are a
-  published contract a gating caller branches on.
-- **A missing option value must exit 2**, not 1. That specific collision is a bug this
-  package already shipped once, in bash, via `shift 2` under `set -e`.
+**It wraps the payload.** Rich falls back to **80 columns** when it cannot detect a terminal.
+The real stdout line is 137 characters, so writing it through a `Console` to a pipe produces
+three lines with the artifact path split mid-token:
+
+```
+'ce-grok-persona: 3 findings (1 P0, 2 P1) -> '
+'/nix/store/143mqb7h2n08nrw4nlqnlxjn80qaabby-persona-review-run/adversarial-revie'
+'wer-grok.json'
+```
+
+That breaks the one-line contract *and* corrupts the one field the caller has to use. A path
+is data, not prose, and rich has no way to know the difference.
+
+**TTY detection is defeatable by the environment.** With `FORCE_COLOR=1`, which plenty of CI
+images set, rich emits ANSI even when piped. The caller does not control that variable.
+
+### 4. argparse, not typer
+
+**Template says:** typer for Profile A.
+
+**Status: open, and deprioritised — not blocked.** Two objections previously recorded here
+were wrong, and are corrected rather than deleted so they are not re-derived:
+
+- ~~A missing option value would exit 1, not 2.~~ **False.** `click.UsageError.exit_code`
+  is 2, verified end to end for both a missing option value and a missing required argument.
+  That fear was the bash `shift 2` bug projected onto a library that does not have it.
+- ~~Help formatting would destroy the generated exit table.~~ **Real by default, but
+  solvable.** Typer rewraps an epilog into a paragraph and loses the indented continuation
+  lines. Click's documented `\b` preformat marker preserves the structure exactly, modulo two
+  spaces of added indent.
+
+What actually remains, and it is weaker than the above:
+
+1. **Consistency with the pydantic decision.** typer pulls click, and its default help path
+   pulls rich — a larger closure than pydantic, for a smaller win, in a package where
+   argparse already covers five stable flags.
+2. **Rich is typer's default** (`rich_markup_mode="rich"`), so `--help` renders boxes that
+   agents read and pay tokens for. Disabling it removes typer's main advantage and leaves
+   parameter parsing that already exists.
+3. **It would create a second exit frame.** Click exits internally in standalone mode, so
+   parse errors would leave through click while every `AppError` leaves through `main`'s one
+   handler. That partly undoes the invariant `errors.py` was built to establish.
+
+None of these is a reason typer is wrong; together they are a reason it is not next.
 
 ### 4. `unittest` → pytest: done, no divergence
 
