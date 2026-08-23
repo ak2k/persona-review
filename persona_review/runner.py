@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from . import errors
+
 # How often the watchdog looks at the growing output file. Small enough to notice a stall
 # promptly, large enough that a long review costs a negligible number of stat() calls.
 POLL_SECS = 2.0
@@ -45,21 +47,12 @@ CHARS_PER_TOKEN = 4
 DIFF_TIMEOUT_SECS = 60.0
 
 
-class RunError(Exception):
-    """The request is wrong in a way the caller can act on. Maps to a usage exit."""
-
-
-class EnvError(RunError):
-    """The machine is wrong, not the invocation. Maps to the environment exit.
-
-    A distinct type rather than a message the caller greps: deciding an exit status by
-    matching on prose means a reworded error silently changes the status a gating caller
-    branches on.
-    """
-
-
-class MissingTool(EnvError):
-    """A required binary is absent."""
+# Re-exported from errors.py, where each one's exit status lives. Distinct TYPES rather than
+# messages the caller greps: deciding an exit status by matching on prose means a reworded
+# error silently changes the status a gating caller branches on.
+RunError = errors.UsageError
+EnvError = errors.EnvError
+MissingTool = errors.MissingTool
 
 
 @dataclass(frozen=True)
@@ -345,7 +338,11 @@ def _watch(
         if size != last_size:
             last_size, last_change = size, now
 
-        if hard_secs > 0 and now - started >= hard_secs:
+        # No `> 0` guard on either deadline. config.Settings parses both as strictly
+        # positive, so "the watchdog is armed" is a property of the type rather than a branch
+        # that can be false — `CE_PERSONA_IDLE_SECS=0` used to switch it off silently, which
+        # left a full-effort model run with nothing watching it.
+        if now - started >= hard_secs:
             _kill_group(proc)
             return ExecResult(
                 status=proc.returncode or -1,
@@ -355,7 +352,7 @@ def _watch(
                     f"(CE_PERSONA_HARD_SECS={int(hard_secs)})"
                 ),
             )
-        if idle_secs > 0 and now - last_change >= idle_secs:
+        if now - last_change >= idle_secs:
             _kill_group(proc)
             return ExecResult(
                 status=proc.returncode or -1,

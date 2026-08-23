@@ -52,6 +52,8 @@ import sys
 from pathlib import Path
 from typing import NoReturn, cast
 
+from . import errors
+
 # Parsed JSON, spelled out. The schema is owned by the compound-engineering plugin, read at
 # run time, and free to grow fields this package has never heard of — so the value type is
 # "some JSON", narrowed by isinstance where it is used, rather than a TypedDict asserting a
@@ -61,8 +63,9 @@ JSONObject = dict[str, JSONValue]
 Artifact = JSONObject
 
 
-class GateError(Exception):
-    """The answer is not a valid findings artifact, with a legible reason."""
+# Re-exported from errors.py, where its exit status lives. `validate.GateError` is the name
+# every raise site and every test already uses, and it reads correctly here.
+GateError = errors.GateError
 
 
 def fail(message: str) -> NoReturn:

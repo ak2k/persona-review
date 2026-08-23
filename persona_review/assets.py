@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 
+from . import errors
 from .providers import Provider
 
 # The plugin's own name for the assets directory, under a versioned plugin root.
@@ -30,12 +31,11 @@ _FINDINGS_CONTRACT = re.compile(r"findings[ .-]schema", re.IGNORECASE)
 BOUNDARY = "Return the findings object now."
 
 
-class AssetError(Exception):
-    """The plugin assets are missing or unusable. Not the user's argument error."""
-
-
-class UsageError(Exception):
-    """The caller asked for something that cannot be done. Names what to do instead."""
+# Re-exported from errors.py, which is where the exit status each one maps to lives. Kept
+# under these names because they read correctly at the raise sites here, and because
+# `assets.UsageError` is what the suite and the CLI already catch.
+AssetError = errors.EnvError
+UsageError = errors.UsageError
 
 
 def _component(part: str) -> int:

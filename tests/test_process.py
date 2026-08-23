@@ -662,10 +662,15 @@ class TestBudget(Harness):
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_non_numeric_budget_is_a_usage_error(self, provider: str):
+        # Asserts the status and that the message NAMES the variable, not its exact prose.
+        # The wording is not the contract and changed once already (the budget is parsed as a
+        # whole number of tokens now, so "is not a number" became "is not a whole number");
+        # the status a gating caller branches on, and an error a human can act on, are.
         self.good_answer(provider)
         proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="abc")
-        assert proc.returncode == 2
-        assert "is not a number" in proc.stderr
+        assert proc.returncode == 2, proc.stderr
+        assert "CE_PERSONA_MAX_PROMPT_TOKENS" in proc.stderr
+        assert "abc" in proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reviewed_repo_cannot_execute_code_through_git_diff(self, provider: str):
@@ -801,6 +806,49 @@ class TestArtifactLifecycle(Harness):
             self.good_answer(provider)
             proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS=value)
             assert proc.returncode == 2, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize("name", ["CE_PERSONA_IDLE_SECS", "CE_PERSONA_HARD_SECS"])
+    def test_a_zero_timeout_is_refused_because_it_switched_the_watchdog_off(
+        self, provider: str, name: str
+    ):
+        # `0` used to be ACCEPTED — the parser refused only negatives, and each deadline was
+        # guarded by `if secs > 0`. A typo therefore left a full-effort model run with
+        # nothing watching it and nothing that would ever read its output. Now the seconds
+        # are strictly positive by construction and `_watch` has no guard left to fail.
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer", env_extra={name: "0"})
+        assert proc.returncode == 2, proc.stderr
+        assert name in proc.stderr
+        assert "greater than zero" in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_misspelled_setting_is_an_error_rather_than_a_silent_default(self, provider: str):
+        # The one idea taken from pydantic-settings' extra="forbid". Setting
+        # CE_PERSONA_IDEL_SECS used to leave the real idle timeout at 600s and say nothing:
+        # a silent misconfiguration, in a package whose whole argument is that silence is the
+        # failure mode.
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_IDEL_SECS="30")
+        assert proc.returncode == 2, proc.stderr
+        assert "CE_PERSONA_IDEL_SECS" in proc.stderr
+        assert "CE_PERSONA_IDLE_SECS" in proc.stderr, "the message should name the real setting"
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_an_unknown_home_directory_is_a_usage_error_not_a_traceback(self, provider: str):
+        # `Path('~nobody/x').expanduser()` raises RuntimeError — not OSError, and not a type
+        # any caller would think to catch — so it escaped to the top of the process as a
+        # traceback with an unmapped exit status. Both paths that expand `~` are covered.
+        self.good_answer(provider)
+        by_flag = self.review(provider, "adversarial-reviewer", "-C", "~nosuchuser0987/repo")
+        assert by_flag.returncode == 2, by_flag.stderr
+        assert "Traceback" not in by_flag.stderr
+
+        by_env = self.review(
+            provider, "adversarial-reviewer", CE_PERSONA_RUN_DIR="~nosuchuser0987/run"
+        )
+        assert by_env.returncode == 2, by_env.stderr
+        assert "Traceback" not in by_env.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_refusal_before_dispatch_leaves_no_stale_artifact(self, provider: str):

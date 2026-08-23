@@ -224,6 +224,68 @@ MUTATIONS: list[Mutation] = [
         '    nonce = ""\n    return "" + (',
     ),
     Mutation(
+        # `0` was accepted, and `_watch` guarded each deadline with `if secs > 0`, so a typo
+        # left a full-effort model run with nothing watching it and nothing to read it.
+        "a zero timeout is accepted again, switching the watchdog off",
+        "persona_review/config.py",
+        r"    if value <= 0:\n        raise UsageError\(\n"
+        r"            f\"\{name\}=\{text!r\} must be greater than zero",
+        "    if value < 0:\n        raise UsageError(\n"
+        '            f"{name}={text!r} must be greater than zero',
+    ),
+    Mutation(
+        "a non-finite timeout is accepted again",
+        "persona_review/config.py",
+        r"    if not math\.isfinite\(value\):",
+        "    if False:",
+    ),
+    Mutation(
+        # The idea taken from pydantic-settings' extra="forbid". Without it a misspelled
+        # variable is ignored and the setting it was meant to change keeps its default.
+        "a misspelled CE_PERSONA_* setting is silently ignored again",
+        "persona_review/config.py",
+        r"        unknown = sorted\(k for k in source "
+        r"if k\.startswith\(PREFIX\) and k not in KNOWN_VARS\)",
+        "        unknown = []",
+    ),
+    Mutation(
+        # RuntimeError, not OSError: `~nosuchuser` reached the top of the process as a
+        # traceback with an unmapped exit status instead of a usage error.
+        "an unknown home directory escapes as a traceback again",
+        "persona_review/config.py",
+        r"    except RuntimeError as exc:\n"
+        r"        raise UsageError\(f\"\{name\}=\{raw!r\} names a home directory "
+        r"that does not exist\"\) from exc",
+        "    except ValueError as exc:\n"
+        '        raise UsageError(f"{name}={raw!r} names a home directory that does not exist")'
+        " from exc",
+    ),
+    Mutation(
+        # The exit status lives on the exception so the mapping cannot drift. Collapsing two
+        # kinds onto one code is what made "codex exited 2" indistinguishable from "you
+        # called this wrongly".
+        "two error kinds collapse onto one exit status",
+        "persona_review/errors.py",
+        r"^    exit_code = 3$",
+        "    exit_code = 2",
+    ),
+    Mutation(
+        # --help renders this table rather than restating it. A stale second copy is how a
+        # published contract and its documentation come apart.
+        "the documented exit table drifts from the classes",
+        "persona_review/errors.py",
+        r'    \(RunnerError\.exit_code, \("\{runner\} itself exited non-zero",\)\),',
+        '    (RunnerError.exit_code, ("{runner} exited with some other status",)),',
+    ),
+    Mutation(
+        # Without substitution the table still lists every number, so only a control that
+        # looks for the provider name catches it.
+        "the provider name is never substituted into the exit table",
+        "persona_review/errors.py",
+        r"\{head\.format\(runner=runner\)\}",
+        "{head}",
+    ),
+    Mutation(
         # findings-schema.json is the plugin's file, read fresh every run, so its top-level
         # shape is an input. Dropping this guard turns a schema that is an array or null into
         # an AttributeError traceback and an unmapped exit status instead of a refusal.

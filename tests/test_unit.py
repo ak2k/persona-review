@@ -31,7 +31,17 @@ from hypothesis import strategies as st
 # silently tests the source tree instead.
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from persona_review import assets, findings, flags, providers, runner, validate  # noqa: E402
+from persona_review import (  # noqa: E402
+    assets,
+    cli,
+    config,
+    errors,
+    findings,
+    flags,
+    providers,
+    runner,
+    validate,
+)
 
 # Which copy did we import? Only this process knows, so the flake check asserts it here
 # rather than trusting the environment it set up.
@@ -103,6 +113,30 @@ def findings_of(art: validate.Artifact) -> list[Any]:
     items = art["findings"]
     assert isinstance(items, list)
     return items
+
+
+def _app_error_classes() -> list[type[errors.AppError]]:
+    """Every AppError subclass defined in errors.py, found by walking the module.
+
+    Enumerated by reflection rather than by a hand-written list: a list is exactly the second
+    copy these tests exist to make impossible, and a new class added without a status would
+    simply be absent from it.
+    """
+    found = [
+        value
+        for value in vars(errors).values()
+        if isinstance(value, type) and issubclass(value, errors.AppError)
+        if value is not errors.AppError
+    ]
+    assert found, "reflection found no error classes, so every assertion below is vacuous"
+    return found
+
+
+def _help_text() -> str:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
+        cli.main(providers.GROK, ["--help"])
+    return out.getvalue()
 
 
 EMPTY_EXAMPLE = json.dumps(artifact())
@@ -780,6 +814,177 @@ class TestProvenance:
             validate.write_provenance(out, [], {"schema": str(Path(tmp) / "gone.json")})
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["schema_sha256"].startswith("unreadable:")
+
+
+class TestSettings:
+    """The environment boundary. Parsed once, validated wholly, frozen."""
+
+    def test_the_defaults_stand_when_nothing_is_set(self):
+        s = config.Settings.from_env({})
+        assert s.idle_secs == config.DEFAULT_IDLE_SECS
+        assert s.hard_secs == config.DEFAULT_HARD_SECS
+        assert s.max_prompt_tokens == config.DEFAULT_MAX_TOKENS
+        assert s.run_dir is None
+        assert s.assets_override is None
+
+    @pytest.mark.parametrize("name", ["CE_PERSONA_IDLE_SECS", "CE_PERSONA_HARD_SECS"])
+    @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "abc", ""])
+    def test_a_timeout_is_strictly_positive_and_finite(self, name: str, value: str):
+        # "" is in the table as a CONTROL that is expected to pass: an unset variable takes
+        # the default, and a parser that refused everything would satisfy every other row
+        # here while breaking every real invocation.
+        if value == "":
+            assert config.Settings.from_env({name: value}).idle_secs > 0
+            return
+        with pytest.raises(errors.UsageError) as caught:
+            config.Settings.from_env({name: value})
+        assert name in str(caught.value), "the message must name the variable to be actionable"
+
+    def test_zero_is_refused_with_the_reason_spelled_out(self):
+        # Singled out because it is the one value a person types on purpose, meaning "do not
+        # wait", and it used to mean "do not watch".
+        with pytest.raises(errors.UsageError) as caught:
+            config.Settings.from_env({"CE_PERSONA_IDLE_SECS": "0"})
+        assert "greater than zero" in str(caught.value)
+
+    def test_an_unrecognised_setting_under_the_prefix_is_refused(self):
+        with pytest.raises(errors.UsageError) as caught:
+            config.Settings.from_env({"CE_PERSONA_IDEL_SECS": "30"})
+        assert "CE_PERSONA_IDEL_SECS" in str(caught.value)
+        assert "CE_PERSONA_IDLE_SECS" in str(caught.value)
+
+    def test_a_variable_outside_the_prefix_is_none_of_this_module_s_business(self):
+        # The control for the check above. Forbidding everything unknown would break every
+        # real environment, which carries PATH, HOME and hundreds of others.
+        config.Settings.from_env({"PATH": "/usr/bin", "EDITOR": "vi", "CE_REVIEW_ASSETS": "/a"})
+
+    def test_an_unknown_home_directory_is_a_usage_error(self):
+        with pytest.raises(errors.UsageError):
+            config.Settings.from_env({"CE_PERSONA_RUN_DIR": "~nosuchuser0987/run"})
+
+    def test_settings_are_frozen(self):
+        s = config.Settings.from_env({})
+        with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError is not public
+            s.idle_secs = 1.0  # type: ignore[misc]
+
+
+class TestErrorVocabulary:
+    def test_every_error_class_carries_an_exit_code(self):
+        # The point of the hierarchy: a class cannot be added without choosing a status, so
+        # `main`'s mapping is total by construction rather than by six except-blocks.
+        for cls in _app_error_classes():
+            assert isinstance(getattr(cls, "exit_code", None), int), f"{cls.__name__} has none"
+
+    def test_no_two_error_kinds_share_a_status(self):
+        # MissingTool deliberately shares EnvError's, so compare the classes that DEFINE one.
+        defined = [c for c in _app_error_classes() if "exit_code" in c.__dict__]
+        codes = [c.exit_code for c in defined]
+        assert len(set(codes)) == len(codes), sorted((c.__name__, c.exit_code) for c in defined)
+
+    def test_the_base_class_has_no_code_of_its_own(self):
+        # So a subclass that forgets to set one fails where it is used rather than silently
+        # reporting whatever the base happened to say.
+        assert "exit_code" not in errors.AppError.__dict__
+
+    def test_the_help_exit_table_is_rendered_from_the_error_classes(self):
+        # Not "the numbers appear somewhere in --help", which a hand-written table also
+        # satisfies. The rendered block must be present VERBATIM, so the help text cannot
+        # carry a second copy that drifts.
+        rendered = errors.render_exit_table(providers.GROK.binary)
+        assert rendered in _help_text(), rendered
+
+    def test_the_rendered_table_names_every_status_the_cli_can_return(self):
+        rendered = errors.render_exit_table("grok")
+        for code in (0, *(c.exit_code for c in _app_error_classes())):
+            assert f"  {code} " in rendered or f"  {code}  " in rendered, f"exit {code} missing"
+
+    def test_the_table_substitutes_the_provider_binary(self):
+        # The control for the {runner} placeholder: an unsubstituted table would still
+        # contain every number and pass the two checks above.
+        assert "{runner}" not in errors.render_exit_table("codex")
+        assert "codex itself exited non-zero" in errors.render_exit_table("codex")
+
+    def test_the_cli_constants_are_the_class_attributes(self):
+        assert errors.GateError.exit_code == cli.EXIT_GATE
+        assert errors.UsageError.exit_code == cli.EXIT_USAGE
+        assert errors.EnvError.exit_code == cli.EXIT_ENV
+        assert errors.RunnerError.exit_code == cli.EXIT_RUNNER
+        assert errors.RunTimeout.exit_code == cli.EXIT_TIMEOUT
+        assert errors.BudgetError.exit_code == cli.EXIT_BUDGET
+        # LITERALS, because the codes are the published contract. An assertion written only
+        # against the module's own constants moves with them: mutation testing caught exactly
+        # that elsewhere, where redefining EXIT_USAGE to 1 left the suite green.
+        assert (cli.EXIT_GATE, cli.EXIT_USAGE, cli.EXIT_ENV) == (1, 2, 3)
+        assert (cli.EXIT_RUNNER, cli.EXIT_TIMEOUT, cli.EXIT_BUDGET) == (4, 5, 78)
+
+
+class TestTheEnvironmentIsReadInOnePlace:
+    """A rule you can check with one command beats a rule you have to remember.
+
+    The same structural move that keeps `subprocess.PIPE` greppably absent from runner.py.
+    Scattered `os.environ.get` calls meant a malformed timeout was discovered three quarters
+    of the way through `main`, and that a variable read twice could be validated once.
+    """
+
+    ALLOWED = {
+        "config.py",  # the boundary itself
+        # Runs before argument parsing and therefore before Settings exists — if the gate is
+        # not this package's gate, nothing it goes on to report means anything.
+        "cli.py",
+        # expanduser("~") for the plugin cache location, which is not a setting.
+        "assets.py",
+        # Builds the child environment for the provider CLI; reads no setting of its own.
+        "runner.py",
+    }
+
+    def test_no_module_outside_the_boundary_reads_the_environment(self):
+        package = Path(validate.__file__).parent
+        offenders: dict[str, list[str]] = {}
+        for path in sorted(package.glob("*.py")):
+            if path.name in self.ALLOWED:
+                continue
+            hits = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if "os.environ" in line or "getenv" in line
+            ]
+            if hits:
+                offenders[path.name] = hits
+        assert offenders == {}, f"read the environment outside config.py: {offenders}"
+
+    @staticmethod
+    def _setting_reads(text: str) -> list[str]:
+        """Lines that both name a CE_PERSONA_* setting and read the environment.
+
+        Naming one is fine and often required — runner.py puts CE_PERSONA_IDLE_SECS in its
+        timeout message precisely so the error is actionable, and the process suite asserts
+        that it does. READING one outside the boundary is the regression.
+        """
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if ("os.environ" in line or "getenv" in line)
+            and any(var in line for var in config.KNOWN_VARS)
+        ]
+
+    def test_the_detector_matches_the_boundary_itself(self):
+        # The control, and it is not ceremony: a grep-shaped test whose pattern matches
+        # nothing passes over any codebase at all, which is the exact defect this repo keeps
+        # finding. config.py is where settings ARE read, so the detector must fire on it —
+        # otherwise the test below is green for every file for the wrong reason.
+        boundary = (Path(validate.__file__).parent / "config.py").read_text(encoding="utf-8")
+        hits = self._setting_reads(boundary + '\nos.environ.get("CE_PERSONA_IDLE_SECS")\n')
+        assert hits, "the detector finds no setting read even in an explicit one"
+
+    def test_no_module_outside_the_boundary_reads_a_CE_PERSONA_SETTING(self):
+        package = Path(validate.__file__).parent
+        offenders = {
+            path.name: hits
+            for path in sorted(package.glob("*.py"))
+            if path.name != "config.py"
+            and (hits := self._setting_reads(path.read_text(encoding="utf-8")))
+        }
+        assert offenders == {}, f"read a CE_PERSONA_* setting outside config.py: {offenders}"
 
 
 class TestGateReadsItsSchemaDefensively:

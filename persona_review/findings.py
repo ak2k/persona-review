@@ -42,6 +42,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
+from . import errors
 from .validate import JSONObject, JSONValue
 
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -82,8 +83,16 @@ exit status
 Finding = JSONObject
 
 
-class FindingsError(Exception):
-    pass
+class FindingsError(errors.AppError):
+    """The file is unreadable or is not a findings artifact.
+
+    Under AppError so the package has ONE error hierarchy rather than two, and so this class
+    carries its status like every other. The status matches by meaning, not by coincidence:
+    the review commands' exit 1 is "the answer was not schema-valid findings", and this is
+    the same judgement applied to an artifact on disk.
+    """
+
+    exit_code = EXIT_DATA
 
 
 def load(path: str) -> JSONObject:
