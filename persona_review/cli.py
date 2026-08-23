@@ -37,6 +37,36 @@ DEFAULT_IDLE_SECS = 600.0
 DEFAULT_HARD_SECS = 2400.0
 
 
+def _assert_running_the_installed_library() -> str | None:
+    """The gate must be the code that was installed, whatever put something else first.
+
+    This replaces an enumeration that was losing. The hole is one mechanism — anything that
+    lands earlier on `sys.path` shadows `persona_review`, because the packaging wrapper
+    APPENDS its own site-packages — and the caller's working directory, `PYTHONPATH` and
+    `PYTHONHOME` are three instances of it, not the set. Two of those were closed one at a
+    time, in a commit whose comment said "TWO doors, and both have to be shut"; a reviewer
+    then found the third. Enumerating instances of a mechanism loses to the next instance.
+
+    So assert the property instead: the module that is running came from where the build put
+    it. `PERSONA_REVIEW_LIB` is set by the packaging wrapper, so a repository under review
+    cannot clear it; when it is absent — a source checkout, a developer — there is nothing to
+    compare against and the check stands down rather than guessing.
+    """
+    expected = os.environ.get("PERSONA_REVIEW_LIB", "").strip()
+    if not expected:
+        return None
+    actual = Path(validate.__file__).resolve()
+    if actual.is_relative_to(Path(expected).resolve()):
+        return None
+    return (
+        f"refusing to run: the findings gate was loaded from {actual}, not from the "
+        f"installed library at {expected}.\n"
+        "  Something placed another `persona_review` earlier on sys.path — the repository "
+        "under review is the one that matters.\n"
+        "  A gate that is not this package's gate can report any verdict it likes."
+    )
+
+
 def _env_number(name: str, default: float) -> float:
     """A finite, non-negative number from the environment, or a usage error.
 
@@ -173,6 +203,13 @@ def _run_dir(persona: str, provider: Provider) -> Path:
 
 
 def main(provider: Provider, argv: list[str] | None = None) -> int:
+    # Before anything else, including argument parsing: if the gate is not this package's
+    # gate, nothing it goes on to report means anything.
+    wrong_library = _assert_running_the_installed_library()
+    if wrong_library:
+        print(f"{provider.command}: {wrong_library}", file=sys.stderr)
+        return EXIT_ENV
+
     args = _parser(provider).parse_args(argv)
 
     # Clear the run dir FIRST, before anything else that can fail. The artifact paths are

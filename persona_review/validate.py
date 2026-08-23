@@ -339,7 +339,7 @@ def from_grok_events(text: str) -> Artifact:
     well-formed `{"findings": []}`, which is indistinguishable from a clean review by
     looking at the payload alone.
     """
-    result: JSONObject | None = None
+    results: list[JSONObject] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -348,12 +348,23 @@ def from_grok_events(text: str) -> Artifact:
             event = loads(line)
         except ValueError:
             continue
-        # Last wins: the TERMINAL result event is the run's verdict, and a first-wins read
-        # would let an early one certify a run that kept going and then failed.
         if isinstance(event, dict) and event.get("type") == "result":
-            result = event
-    if result is None:
+            results.append(event)
+
+    if not results:
         fail("no `result` event in grok's output stream")
+    if len(results) > 1:
+        # REFUSE, rather than preferring either end. "Last wins" looks safe — a late failure
+        # should not be certified by an early success — but it is only safe when the extra
+        # events are unhealthy. Two HEALTHY terminal events silently hand the run to the
+        # second: a stream carrying a real P0 review followed by `findings: []` exits 0 and
+        # reports clean, and every terminal-status check passes because the surviving event
+        # genuinely is healthy. A run has one verdict; more than one is not a verdict.
+        fail(
+            f"grok's output stream carries {len(results)} `result` events; a run has one "
+            "verdict, and choosing among them would let a second event overwrite the answer"
+        )
+    result = results[0]
 
     # PRESENT and healthy, not "absent is fine". A terminal event that carries none of these
     # is not evidence of a completed run, and schema-constrained decoding means the payload

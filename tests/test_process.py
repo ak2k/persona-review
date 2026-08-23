@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Process-level tests: the installed commands, driven against stub runners.
 
-Run: python3 tests/test_process.py   (set PERSONA_REVIEW_BIN to test a built package)
+Run: pytest tests/test_process.py   (set PERSONA_REVIEW_BIN to test a built package)
 
 The unit suite exercises the library. This runs what actually ships — entry-point
 generation, wrapper environment, argument parsing, artifact lifecycle, watchdogs, and the
@@ -23,9 +23,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import unittest
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 SRC = Path(__file__).resolve().parent.parent
 sys.path.append(str(SRC))
@@ -141,12 +142,11 @@ def grok_stream(payload: str | None = None, **result: Any) -> str:
     return '{"type":"system","subtype":"init"}\n' + json.dumps(event) + "\n"
 
 
-class Harness(unittest.TestCase):
+class Harness:
     """Fixture assets, stub runners on PATH, and one entry point per provider."""
 
-    def setUp(self) -> None:
+    def setup_method(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
 
         self.assets = self.work / "assets"
@@ -222,6 +222,9 @@ class Harness(unittest.TestCase):
             ]
         )
 
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
     def set_spec(self, **spec: Any) -> None:
         self.spec.write_text(json.dumps(spec), encoding="utf-8")
 
@@ -296,94 +299,85 @@ class Harness(unittest.TestCase):
         """
         stem = f"adversarial-reviewer-{provider}"
         leftovers = sorted(p.name for p in self.run_dir.iterdir() if p.name.startswith(stem))
-        self.assertEqual(leftovers, [], f"stale artifacts left in the run dir: {leftovers}")
+        assert leftovers == [], f"stale artifacts left in the run dir: {leftovers}"
 
 
 class TestContract(Harness):
-    def test_a_valid_review_exits_zero_with_one_stdout_line(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(provider, "adversarial-reviewer")
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(len(proc.stdout.strip().splitlines()), 1, proc.stdout)
-                self.assertIn("1 P1", proc.stdout)
-                self.assertTrue(self.artifact(provider).is_file())
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_valid_review_exits_zero_with_one_stdout_line(self, provider: str):
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer")
+        assert proc.returncode == 0, proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1, proc.stdout
+        assert "1 P1" in proc.stdout
+        assert self.artifact(provider).is_file()
 
-    def test_the_transcript_never_reaches_stdout(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_transcript_never_reaches_stdout(self, provider: str):
         # A calling agent pays for every token of stdout; the event stream is ~1 MB.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(provider, "adversarial-reviewer")
-                self.assertNotIn("must never see", proc.stdout)
-                self.assertTrue(
-                    (self.run_dir / f"adversarial-reviewer-{provider}-events.jsonl").is_file()
-                )
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer")
+        assert "must never see" not in proc.stdout
+        assert (self.run_dir / f"adversarial-reviewer-{provider}-events.jsonl").is_file()
 
-    def test_provenance_attests_this_run_s_brief_by_hash(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_provenance_attests_this_run_s_brief_by_hash(self, provider: str):
         import hashlib
 
         brief = self.assets / "personas" / "adversarial-reviewer.md"
         want = hashlib.sha256(brief.read_bytes()).hexdigest()
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                self.review(provider, "adversarial-reviewer")
-                record = json.loads(self.provenance(provider).read_text(encoding="utf-8"))
-                self.assertEqual(record["persona_sha256"], want)
-                self.assertEqual(record["provider"], provider)
-                self.assertEqual(record["persona"], "adversarial-reviewer")
-                self.assertEqual(record["runner_status"], "0")
+        self.good_answer(provider)
+        self.review(provider, "adversarial-reviewer")
+        record = json.loads(self.provenance(provider).read_text(encoding="utf-8"))
+        assert record["persona_sha256"] == want
+        assert record["provider"] == provider
+        assert record["persona"] == "adversarial-reviewer"
+        assert record["runner_status"] == "0"
 
-    def test_the_prompt_the_RUNNER_RECEIVED_carries_brief_rubric_and_clause(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_prompt_the_RUNNER_RECEIVED_carries_brief_rubric_and_clause(self, provider: str):
         # Read from what the stub was handed, NOT from the -prompt.md the CLI wrote. Those
         # are different claims, and only the first one is the product: dispatching codex
         # with no prompt at all left the whole suite green when this read the written file.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.prompt_seen.unlink(missing_ok=True)
-                self.good_answer(provider)
-                self.review(provider, "adversarial-reviewer")
-                prompt = self.prompt_seen.read_text(encoding="utf-8")
-                self.assertIn("Break it. Return findings matching the findings schema.", prompt)
-                self.assertIn("Anchors 0 and 25 mean SUPPRESS", prompt)
-                self.assertIn("exactly one JSON object", prompt)
-                self.assertTrue(prompt.rstrip().endswith(assets.BOUNDARY))
+        self.prompt_seen.unlink(missing_ok=True)
+        self.good_answer(provider)
+        self.review(provider, "adversarial-reviewer")
+        prompt = self.prompt_seen.read_text(encoding="utf-8")
+        assert "Break it. Return findings matching the findings schema." in prompt
+        assert "Anchors 0 and 25 mean SUPPRESS" in prompt
+        assert "exactly one JSON object" in prompt
+        assert prompt.rstrip().endswith(assets.BOUNDARY)
 
-    def test_the_model_and_effort_flags_reach_the_runner(self):
-        # NON-DEFAULT sentinels. Asserting `-e xhigh` reaches grok proves nothing, because
-        # xhigh is grok's default: hardcoding the flag and ignoring -e kept the suite green.
-        for provider, expected in (
+    # NON-DEFAULT sentinels. Asserting `-e xhigh` reaches grok proves nothing, because xhigh
+    # is grok's default: hardcoding the flag and ignoring -e kept the suite green.
+    @pytest.mark.parametrize(
+        ("provider", "expected"),
+        [
             ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
             ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
-        ):
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                self.review(
-                    provider,
-                    "adversarial-reviewer",
-                    "-e",
-                    "sentinel-effort",
-                    "-m",
-                    "sentinel-model",
-                )
-                argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
-                for token in expected:
-                    self.assertIn(token, argv)
+        ],
+    )
+    def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
+        self.good_answer(provider)
+        self.review(
+            provider, "adversarial-reviewer", "-e", "sentinel-effort", "-m", "sentinel-model"
+        )
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        for token in expected:
+            assert token in argv, argv
 
 
 class TestGate(Harness):
-    def test_prose_instead_of_findings_fails(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                if provider == "grok":
-                    self.set_spec(stdout=grok_stream(result="I gave up."))
-                else:
-                    self.set_spec(stdout="", last="I gave up.")
-                self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 1)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_prose_instead_of_findings_fails(self, provider: str):
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(result="I gave up."))
+        else:
+            self.set_spec(stdout="", last="I gave up.")
+        assert self.review(provider, "adversarial-reviewer").returncode == 1
 
-    def test_a_give_up_quoting_the_brief_example_fails(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_give_up_quoting_the_brief_example_fails(self, provider: str):
         # The regression two model families found independently: a refusal plus the brief's
         # own empty example used to validate as a clean review.
         #
@@ -394,14 +388,12 @@ class TestGate(Harness):
         text = "I could not inspect the repository. The requested shape is:\n\n" + json.dumps(
             {"reviewer": "adversarial", "findings": [], "residual_risks": [], "testing_gaps": []}
         )
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                if provider == "grok":
-                    self.set_spec(stdout=grok_stream(result=text))
-                else:
-                    self.set_spec(stdout="", last=text)
-                proc = self.review(provider, "adversarial-reviewer")
-                self.assertEqual(proc.returncode, 1, proc.stdout)
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(result=text))
+        else:
+            self.set_spec(stdout="", last=text)
+        proc = self.review(provider, "adversarial-reviewer")
+        assert proc.returncode == 1, proc.stdout
 
     def test_an_empty_structured_output_is_the_documented_gap(self):
         # Executable documentation of the ONE hole this package does not close, on the exact
@@ -416,65 +408,65 @@ class TestGate(Harness):
         )
         self.set_spec(stdout=grok_stream(empty))
         proc = self.review("grok", "adversarial-reviewer")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("0 findings", proc.stdout)
+        assert proc.returncode == 0, proc.stderr
+        assert "0 findings" in proc.stdout
 
-    def test_a_type_invalid_answer_fails(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                if provider == "grok":
-                    self.set_spec(stdout=grok_stream(TYPE_INVALID))
-                else:
-                    self.set_spec(stdout="", last=TYPE_INVALID)
-                self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 1)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_type_invalid_answer_fails(self, provider: str):
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(TYPE_INVALID))
+        else:
+            self.set_spec(stdout="", last=TYPE_INVALID)
+        assert self.review(provider, "adversarial-reviewer").returncode == 1
 
-    def test_grok_terminal_status_is_checked_not_just_the_payload(self):
-        for bad in (
+    @pytest.mark.parametrize(
+        "bad",
+        [
             {"stop_reason": "max_tokens"},
             {"subtype": "error_max_turns"},
             {"is_error": True},
-        ):
-            with self.subTest(bad=bad):
-                self.set_spec(stdout=grok_stream(ANSWER, **bad))
-                self.assertEqual(self.review("grok", "adversarial-reviewer").returncode, 1)
+        ],
+    )
+    def test_grok_terminal_status_is_checked_not_just_the_payload(self, bad: dict[str, Any]):
+        self.set_spec(stdout=grok_stream(ANSWER, **bad))
+        assert self.review("grok", "adversarial-reviewer").returncode == 1
 
     def test_codex_with_no_final_message_fails(self):
         # And must not re-validate whatever a previous run left at the same path.
         self.good_answer("codex")
-        self.assertEqual(self.review("codex", "adversarial-reviewer").returncode, 0)
+        assert self.review("codex", "adversarial-reviewer").returncode == 0
         self.set_spec(stdout="no final message this time\n")
         proc = self.review("codex", "adversarial-reviewer")
-        self.assertEqual(proc.returncode, 1, proc.stdout)
-        self.assertFalse(self.artifact("codex").exists())
+        assert proc.returncode == 1, proc.stdout
+        assert not self.artifact("codex").exists()
 
 
 class TestExitStatus(Harness):
-    def test_a_runner_failure_is_reported_as_4_not_propagated(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_runner_failure_is_reported_as_4_not_propagated(self, provider: str):
         # Propagating the runner's own status verbatim collides with the codes reserved for
         # usage (2) and over-budget (78), so a caller cannot tell them apart.
-        for provider in PROVIDERS:
-            for runner_exit in (1, 2, 3, 78):
-                with self.subTest(provider=provider, runner_exit=runner_exit):
-                    self.set_spec(stdout="boom\n", exit=runner_exit)
-                    proc = self.review(provider, "adversarial-reviewer")
-                    self.assertEqual(proc.returncode, 4, proc.stderr)
+        for runner_exit in (1, 2, 3, 78):
+            self.set_spec(stdout="boom\n", exit=runner_exit)
+            proc = self.review(provider, "adversarial-reviewer")
+            assert proc.returncode == 4, (runner_exit, proc.stderr)
 
-    def test_usage_errors_exit_2(self):
-        for provider in PROVIDERS:
-            self.good_answer(provider)
-            for args in (
-                [],  # no persona
-                ["no-such-persona"],
-                ["agent-native-reviewer"],  # markdown-only brief
-                ["../outside"],  # not a bare brief name
-                ["adversarial-reviewer", "-C", str(self.work / "nope")],
-                ["adversarial-reviewer", "-b", "no-such-ref"],
-                ["adversarial-reviewer", "-m"],  # option missing its value
-            ):
-                with self.subTest(provider=provider, args=args):
-                    self.assertEqual(self.review(provider, *args).returncode, 2)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_usage_errors_exit_2(self, provider: str):
+        self.good_answer(provider)
+        for args in (
+            [],  # no persona
+            ["no-such-persona"],
+            ["agent-native-reviewer"],  # markdown-only brief
+            ["../outside"],  # not a bare brief name
+            ["adversarial-reviewer", "-C", str(self.work / "nope")],
+            ["adversarial-reviewer", "-b", "no-such-ref"],
+            ["adversarial-reviewer", "-m"],  # option missing its value
+        ):
+            assert self.review(provider, *args).returncode == 2, args
 
-    def test_a_persona_review_package_in_the_cwd_cannot_replace_the_gate(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_persona_review_package_in_the_cwd_cannot_replace_the_gate(self, provider: str):
         # THE headline P0 this port exists to close, and the bash suite's guard for it was
         # deleted with no replacement. `python3 -c/-m` put the caller's cwd at sys.path[0],
         # so a persona_review/ directory inside the repo under review answered for the gate:
@@ -485,7 +477,7 @@ class TestExitStatus(Harness):
         # bin directory. The local-dev shim hardcodes sys.path, so it would assert the
         # property into existence rather than test it.
         if not os.environ.get("PERSONA_REVIEW_BIN"):
-            self.skipTest("needs the installed console scripts (set PERSONA_REVIEW_BIN)")
+            pytest.skip("needs the installed console scripts (set PERSONA_REVIEW_BIN)")
         planted = self.work / "persona_review"
         planted.mkdir()
         (planted / "__init__.py").write_text("", encoding="utf-8")
@@ -507,65 +499,58 @@ class TestExitStatus(Harness):
         # BOTH doors: sys.path[0] (cwd), and a caller-set PYTHONPATH, which the packaging
         # wrapper appends behind rather than in front of. `PYTHONPATH=.` is routine under
         # direnv, tox and CI images — and this repo's own devShell sets it.
-        for provider in PROVIDERS:
-            for pythonpath in (None, ".", "./"):
-                with self.subTest(provider=provider, pythonpath=pythonpath):
-                    # A runner that categorically did not review, so a clean result can only
-                    # have come from the planted module.
-                    self.set_spec(stdout=grok_stream(ANSWER, is_error=True))
-                    if provider == "codex":
-                        self.set_spec(stdout="", last="I could not review.")
-                    extra = {} if pythonpath is None else {"PYTHONPATH": pythonpath}
-                    proc = self.review(provider, "adversarial-reviewer", env_extra=extra)
-                    self.assertNotIn("HIJACKED", proc.stdout)
-                    self.assertNotEqual(proc.returncode, 0, "the planted gate answered for the run")
+        for pythonpath in (None, ".", "./"):
+            # A runner that categorically did not review, so a clean result can only
+            # have come from the planted module.
+            self.set_spec(stdout=grok_stream(ANSWER, is_error=True))
+            if provider == "codex":
+                self.set_spec(stdout="", last="I could not review.")
+            extra = {} if pythonpath is None else {"PYTHONPATH": pythonpath}
+            proc = self.review(provider, "adversarial-reviewer", env_extra=extra)
+            assert "HIJACKED" not in proc.stdout, pythonpath
+            assert proc.returncode != 0, f"the planted gate answered, PYTHONPATH={pythonpath!r}"
 
-    def test_a_traversal_persona_name_is_refused_even_though_it_would_resolve(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_traversal_persona_name_is_refused_even_though_it_would_resolve(self, provider: str):
         # The fixture deliberately places a findings-capable brief at assets/outside.md, so
         # `../outside` WOULD resolve if the name were not validated — and every artifact path
         # would then be built outside the run directory.
         escaped = self.work / "outside-{}.json"
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(provider, "../outside")
-                self.assertEqual(proc.returncode, 2, proc.stderr)
-                self.assertIn("bare brief name", proc.stderr)
-                self.assertFalse(
-                    Path(str(escaped).format(provider)).exists(),
-                    "an artifact was written outside the run directory",
-                )
+        self.good_answer(provider)
+        proc = self.review(provider, "../outside")
+        assert proc.returncode == 2, proc.stderr
+        assert "bare brief name" in proc.stderr
+        assert not Path(str(escaped).format(provider)).exists(), (
+            "an artifact was written outside the run directory"
+        )
 
-    def test_help_exits_zero_and_documents_the_exit_table(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                proc = self.review(provider, "--help")
-                self.assertEqual(proc.returncode, 0)
-                for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "78 "):
-                    self.assertIn(code, proc.stdout)
-                self.assertIn("CE_PERSONA_IDLE_SECS", proc.stdout)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_help_exits_zero_and_documents_the_exit_table(self, provider: str):
+        proc = self.review(provider, "--help")
+        assert proc.returncode == 0
+        for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "78 "):
+            assert code in proc.stdout
+        assert "CE_PERSONA_IDLE_SECS" in proc.stdout
 
-    def test_an_unusable_run_dir_is_an_environment_error_not_a_usage_one(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_an_unusable_run_dir_is_an_environment_error_not_a_usage_one(self, provider: str):
         # A caller retrying with different arguments cannot fix an unwritable directory, so
         # it belongs with the missing-binary class, not with bad arguments.
         blocker = self.work / "not-a-dir"
         blocker.write_text("", encoding="utf-8")
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(
-                    provider, "adversarial-reviewer", CE_PERSONA_RUN_DIR=str(blocker / "sub")
-                )
-                self.assertEqual(proc.returncode, 3, proc.stderr)
-                self.assertIn("CE_PERSONA_RUN_DIR", proc.stderr)
+        self.good_answer(provider)
+        proc = self.review(
+            provider, "adversarial-reviewer", CE_PERSONA_RUN_DIR=str(blocker / "sub")
+        )
+        assert proc.returncode == 3, proc.stderr
+        assert "CE_PERSONA_RUN_DIR" in proc.stderr
 
-    def test_a_missing_runner_is_an_environment_error(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                (self.bindir / provider).unlink()
-                proc = self.review(provider, "adversarial-reviewer")
-                self.assertEqual(proc.returncode, 3)
-                self.assertIn("not on PATH", proc.stderr)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_missing_runner_is_an_environment_error(self, provider: str):
+        (self.bindir / provider).unlink()
+        proc = self.review(provider, "adversarial-reviewer")
+        assert proc.returncode == 3
+        assert "not on PATH" in proc.stderr
 
 
 class TestBudget(Harness):
@@ -603,52 +588,48 @@ class TestBudget(Harness):
         self._git(repo, "commit", "-qm", "big")
         return repo, base
 
-    def test_a_large_diff_trips_a_budget_the_prompt_alone_never_could(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_large_diff_trips_a_budget_the_prompt_alone_never_could(self, provider: str):
         repo, base = self._repo()
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.set_spec(stdout="the model must never be called\n")
-                proc = self.review(
-                    provider,
-                    "adversarial-reviewer",
-                    "-C",
-                    str(repo),
-                    "-b",
-                    base,
-                    CE_PERSONA_MAX_PROMPT_TOKENS="2000",
-                )
-                self.assertEqual(proc.returncode, 78, proc.stderr)
-                self.assertIn("diff bytes", proc.stderr)
-                self.assertFalse(self.argv_log.exists(), "the runner must not be called")
+        self.set_spec(stdout="the model must never be called\n")
+        proc = self.review(
+            provider,
+            "adversarial-reviewer",
+            "-C",
+            str(repo),
+            "-b",
+            base,
+            CE_PERSONA_MAX_PROMPT_TOKENS="2000",
+        )
+        assert proc.returncode == 78, proc.stderr
+        assert "diff bytes" in proc.stderr
+        assert not self.argv_log.exists(), "the runner must not be called"
 
-    def test_the_same_budget_with_an_empty_diff_is_not_refused(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_same_budget_with_an_empty_diff_is_not_refused(self, provider: str):
         # Control: without it the test above could pass for the wrong reason.
         repo, _ = self._repo()
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(
-                    provider,
-                    "adversarial-reviewer",
-                    "-C",
-                    str(repo),
-                    "-b",
-                    "HEAD",
-                    CE_PERSONA_MAX_PROMPT_TOKENS="2000",
-                )
-                self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.good_answer(provider)
+        proc = self.review(
+            provider,
+            "adversarial-reviewer",
+            "-C",
+            str(repo),
+            "-b",
+            "HEAD",
+            CE_PERSONA_MAX_PROMPT_TOKENS="2000",
+        )
+        assert proc.returncode == 0, proc.stderr
 
-    def test_a_tiny_budget_refuses_before_the_runner_is_called(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.set_spec(stdout="the model must never be called\n")
-                proc = self.review(
-                    provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1"
-                )
-                self.assertEqual(proc.returncode, 78)
-                self.assertFalse(self.argv_log.exists())
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_tiny_budget_refuses_before_the_runner_is_called(self, provider: str):
+        self.set_spec(stdout="the model must never be called\n")
+        proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1")
+        assert proc.returncode == 78
+        assert not self.argv_log.exists()
 
-    def test_an_option_shaped_base_is_refused_not_parsed_as_an_option(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_an_option_shaped_base_is_refused_not_parsed_as_an_option(self, provider: str):
         # `git diff` parses an option-shaped base as an OPTION: `--output=<path>` makes git
         # write the diff to that path and exit 0 with empty stdout, so the "proof the range
         # resolves" reports a 0-byte diff for a range it never resolved — a CLEAN REVIEW of
@@ -663,36 +644,31 @@ class TestBudget(Harness):
         repo, _ = self._repo()
         target = self.work / "SHOULD_NOT_BE_WRITTEN"
         written = Path(f"{target}..HEAD")
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                written.unlink(missing_ok=True)
-                proc = self.review(
-                    provider, "adversarial-reviewer", "-C", str(repo), f"--base=--output={target}"
-                )
-                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-                self.assertFalse(written.exists(), "git took the base as an option and wrote it")
+        self.good_answer(provider)
+        written.unlink(missing_ok=True)
+        proc = self.review(
+            provider, "adversarial-reviewer", "-C", str(repo), f"--base=--output={target}"
+        )
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert not written.exists(), "git took the base as an option and wrote it"
 
-    def test_a_dash_prefixed_base_is_rejected_by_argument_parsing(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_dash_prefixed_base_is_rejected_by_argument_parsing(self, provider: str):
         # The space form is blocked one layer earlier. Asserted so the two mechanisms stay
         # distinguishable: if argparse ever accepted it, the test above is the net.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(provider, "adversarial-reviewer", "-b", "--output=/tmp/x")
-                self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer", "-b", "--output=/tmp/x")
+        assert proc.returncode == 2, proc.stderr
 
-    def test_a_non_numeric_budget_is_a_usage_error(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                proc = self.review(
-                    provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="abc"
-                )
-                self.assertEqual(proc.returncode, 2)
-                self.assertIn("is not a number", proc.stderr)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_non_numeric_budget_is_a_usage_error(self, provider: str):
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="abc")
+        assert proc.returncode == 2
+        assert "is not a number" in proc.stderr
 
-    def test_the_reviewed_repo_cannot_execute_code_through_git_diff(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reviewed_repo_cannot_execute_code_through_git_diff(self, provider: str):
         # `git diff` runs commands named by the repository's own configuration, and this
         # preflight runs OUTSIDE the read-only sandbox the review itself gets. Both vectors
         # are covered because they are disabled by different flags.
@@ -710,20 +686,19 @@ class TestBudget(Harness):
         self._git(repo, "add", ".gitattributes")
         self._git(repo, "commit", "-qm", "attrs")
 
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                ext_marker.unlink(missing_ok=True)
-                tc_marker.unlink(missing_ok=True)
-                proc = self.review(provider, "adversarial-reviewer", "-C", str(repo), "-b", base)
-                # Assert the run SUCCEEDED first. Without this the markers are also absent
-                # when the guarded git call simply fails before dispatch, so the test would
-                # pass while proving nothing about the mitigation.
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertFalse(ext_marker.exists(), "the repo's diff.external driver executed")
-                self.assertFalse(tc_marker.exists(), "the repo's textconv driver executed")
+        self.good_answer(provider)
+        ext_marker.unlink(missing_ok=True)
+        tc_marker.unlink(missing_ok=True)
+        proc = self.review(provider, "adversarial-reviewer", "-C", str(repo), "-b", base)
+        # Assert the run SUCCEEDED first. Without this the markers are also absent
+        # when the guarded git call simply fails before dispatch, so the test would
+        # pass while proving nothing about the mitigation.
+        assert proc.returncode == 0, proc.stderr
+        assert not ext_marker.exists(), "the repo's diff.external driver executed"
+        assert not tc_marker.exists(), "the repo's textconv driver executed"
 
-    def test_a_repo_cannot_wedge_the_budget_preflight_with_stderr(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_repo_cannot_wedge_the_budget_preflight_with_stderr(self, provider: str):
         # The measurement drains stdout to EOF. If stderr is a second PIPE, a git that fills
         # the ~64 KiB stderr buffer blocks in write() and never closes stdout — the reader
         # waits for an EOF that cannot come. A committed .gitattributes of a few thousand
@@ -736,16 +711,14 @@ class TestBudget(Harness):
         (repo / ".gitattributes").write_text('f.txt "bad00000\n' * 4000, encoding="utf-8")
         self._git(repo, "add", ".gitattributes")
         self._git(repo, "commit", "-qm", "malformed attributes")
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.good_answer(provider)
-                started = time.monotonic()
-                proc = self.review(
-                    provider, "adversarial-reviewer", "-C", str(repo), "-b", base, timeout=90
-                )
-                elapsed = time.monotonic() - started
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertLess(elapsed, 60, "the budget preflight wedged on git's stderr")
+        self.good_answer(provider)
+        started = time.monotonic()
+        proc = self.review(
+            provider, "adversarial-reviewer", "-C", str(repo), "-b", base, timeout=90
+        )
+        elapsed = time.monotonic() - started
+        assert proc.returncode == 0, proc.stderr
+        assert elapsed < 60, "the budget preflight wedged on git's stderr"
 
     def test_the_hostile_repo_fixture_actually_arms_both_drivers(self):
         # A control for the test above. Without it, a fixture that fails to configure the
@@ -761,7 +734,7 @@ class TestBudget(Harness):
             env=self._git_env(),
             check=True,
         )
-        self.assertTrue(ext_marker.exists(), "fixture did not arm diff.external")
+        assert ext_marker.exists(), "fixture did not arm diff.external"
 
         self._git(repo, "config", "--unset", "diff.external")
         (repo / ".gitattributes").write_text("f.txt diff=pwn\n", encoding="utf-8")
@@ -774,126 +747,155 @@ class TestBudget(Harness):
             env=self._git_env(),
             check=True,
         )
-        self.assertTrue(tc_marker.exists(), "fixture did not arm textconv")
+        assert tc_marker.exists(), "fixture did not arm textconv"
 
 
 class TestArtifactLifecycle(Harness):
     def _seed(self, provider: str) -> None:
         self.good_answer(provider)
-        self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 0)
-        self.assertTrue(self.artifact(provider).is_file())
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        assert self.artifact(provider).is_file()
 
-    def test_a_failed_run_leaves_no_stale_artifact(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self._seed(provider)
-                self.set_spec(stdout="boom\n", exit=9)
-                self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 4)
-                self.assertFalse(self.artifact(provider).exists())
-                self.assertFalse(self.provenance(provider).exists())
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_failed_run_leaves_no_stale_artifact(self, provider: str):
+        self._seed(provider)
+        self.set_spec(stdout="boom\n", exit=9)
+        assert self.review(provider, "adversarial-reviewer").returncode == 4
+        assert not self.artifact(provider).exists()
+        assert not self.provenance(provider).exists()
 
-    def test_every_early_failure_leaves_no_stale_artifact(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_every_early_failure_leaves_no_stale_artifact(self, provider: str):
         # Not just the budget refusal. The run dir is cleared as soon as the persona is
         # known, so a failure at ANY later preflight — a missing binary, an unreadable
         # context file — cannot leave the previous run's findings at the path a caller reads.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider, case="missing binary"):
-                self._seed(provider)
-                (self.bindir / provider).unlink()
-                self.assertEqual(self.review(provider, "adversarial-reviewer").returncode, 3)
-                self.assert_run_dir_clean(provider)
-                (self.bindir / provider).write_text(STUB, encoding="utf-8")
-                (self.bindir / provider).chmod(0o755)
+        self._seed(provider)
+        (self.bindir / provider).unlink()
+        assert self.review(provider, "adversarial-reviewer").returncode == 3
+        self.assert_run_dir_clean(provider)
+        (self.bindir / provider).write_text(STUB, encoding="utf-8")
+        (self.bindir / provider).chmod(0o755)
 
-            with self.subTest(provider=provider, case="unreadable context"):
-                self._seed(provider)
-                proc = self.review(
-                    provider, "adversarial-reviewer", "-c", str(self.work / "no-such-context.md")
-                )
-                self.assertEqual(proc.returncode, 2, proc.stderr)
-                self.assert_run_dir_clean(provider)
+        self._seed(provider)
+        proc = self.review(
+            provider, "adversarial-reviewer", "-c", str(self.work / "no-such-context.md")
+        )
+        assert proc.returncode == 2, proc.stderr
+        self.assert_run_dir_clean(provider)
 
-    def test_a_non_finite_timeout_is_refused_rather_than_disabling_the_watchdog(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_non_finite_timeout_is_refused_rather_than_disabling_the_watchdog(
+        self, provider: str
+    ):
         # float() accepts nan and inf, and every deadline is `elapsed >= value`, which is
         # False forever against either — a typo would silently switch the watchdog off.
-        for provider in PROVIDERS:
-            for name in ("CE_PERSONA_IDLE_SECS", "CE_PERSONA_HARD_SECS"):
-                for value in ("nan", "inf", "-inf"):
-                    with self.subTest(provider=provider, var=name, value=value):
-                        self.good_answer(provider)
-                        proc = self.review(
-                            provider, "adversarial-reviewer", env_extra={name: value}
-                        )
-                        self.assertEqual(proc.returncode, 2, proc.stderr)
+        for name in ("CE_PERSONA_IDLE_SECS", "CE_PERSONA_HARD_SECS"):
+            for value in ("nan", "inf", "-inf"):
+                self.good_answer(provider)
+                proc = self.review(provider, "adversarial-reviewer", env_extra={name: value})
+                assert proc.returncode == 2, proc.stderr
 
-    def test_a_non_finite_budget_is_a_usage_error_not_a_crash(self):
-        for provider in PROVIDERS:
-            for value in ("nan", "inf"):
-                with self.subTest(provider=provider, value=value):
-                    self.good_answer(provider)
-                    proc = self.review(
-                        provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS=value
-                    )
-                    self.assertEqual(proc.returncode, 2, proc.stderr)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_non_finite_budget_is_a_usage_error_not_a_crash(self, provider: str):
+        for value in ("nan", "inf"):
+            self.good_answer(provider)
+            proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS=value)
+            assert proc.returncode == 2, proc.stderr
 
-    def test_a_refusal_before_dispatch_leaves_no_stale_artifact(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_refusal_before_dispatch_leaves_no_stale_artifact(self, provider: str):
         # A run refused at the budget or for a bad base never reaches the runner, and used to
         # leave the previous run's findings and provenance in place.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self._seed(provider)
-                proc = self.review(
-                    provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1"
-                )
-                self.assertEqual(proc.returncode, 78)
-                self.assert_run_dir_clean(provider)
+        self._seed(provider)
+        proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1")
+        assert proc.returncode == 78
+        self.assert_run_dir_clean(provider)
 
 
 class TestWatchdogs(Harness):
-    def test_a_silent_runner_is_killed_and_reported_as_a_timeout(self):
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.set_spec(stdout="starting\n", silent_for=90)
-                started = time.monotonic()
-                proc = self.review(
-                    provider, "adversarial-reviewer", timeout=60, CE_PERSONA_IDLE_SECS="3"
-                )
-                elapsed = time.monotonic() - started
-                self.assertEqual(proc.returncode, 5, proc.stderr)
-                self.assertIn("no output for", proc.stderr)
-                self.assertLess(elapsed, 40, "the idle watchdog did not fire promptly")
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_silent_runner_is_killed_and_reported_as_a_timeout(self, provider: str):
+        self.set_spec(stdout="starting\n", silent_for=90)
+        started = time.monotonic()
+        proc = self.review(provider, "adversarial-reviewer", timeout=60, CE_PERSONA_IDLE_SECS="3")
+        elapsed = time.monotonic() - started
+        assert proc.returncode == 5, proc.stderr
+        assert "no output for" in proc.stderr
+        assert elapsed < 40, "the idle watchdog did not fire promptly"
 
-    def test_a_chatty_runner_still_hits_the_hard_deadline(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_chatty_runner_still_hits_the_hard_deadline(self, provider: str):
         # File growth keeps the idle watchdog happy forever, which is exactly why a wall-clock
         # cap has to exist too.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.set_spec(heartbeat=0.2)
-                proc = self.review(
-                    provider,
-                    "adversarial-reviewer",
-                    timeout=60,
-                    CE_PERSONA_IDLE_SECS="30",
-                    CE_PERSONA_HARD_SECS="4",
-                )
-                self.assertEqual(proc.returncode, 5, proc.stderr)
-                self.assertIn("hard timeout", proc.stderr)
+        self.set_spec(heartbeat=0.2)
+        proc = self.review(
+            provider,
+            "adversarial-reviewer",
+            timeout=60,
+            CE_PERSONA_IDLE_SECS="30",
+            CE_PERSONA_HARD_SECS="4",
+        )
+        assert proc.returncode == 5, proc.stderr
+        assert "hard timeout" in proc.stderr
 
-    def test_a_timeout_kills_helpers_that_ignore_sigterm(self):
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_timeout_kills_helpers_that_ignore_sigterm(self, provider: str):
         # The direct child exiting is not proof the process group did. A parent with default
         # SIGTERM handling dies at once while a helper that ignores it keeps running, so a
         # watchdog that waits on the child alone reports a kill it did not perform — and the
         # provider keeps working, and keeps the artifact descriptors open.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.child_pid_file.unlink(missing_ok=True)
-                self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=120)
-                proc = self.review(
-                    provider, "adversarial-reviewer", timeout=90, CE_PERSONA_IDLE_SECS="3"
-                )
-                self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.child_pid_file.unlink(missing_ok=True)
+        self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=120)
+        proc = self.review(provider, "adversarial-reviewer", timeout=90, CE_PERSONA_IDLE_SECS="3")
+        assert proc.returncode == 5, proc.stderr
+        pid = int(self.child_pid_file.read_text(encoding="utf-8").strip())
+        deadline = time.monotonic() + 20
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                alive = False
+                break
+            time.sleep(0.2)
+        if alive:
+            os.kill(pid, 9)  # do not leak a 300s sleeper from a failed test
+        assert not alive, f"helper {pid} survived the timeout kill"
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_killing_the_wrapper_does_not_orphan_the_provider(self, provider: str):
+        # `start_new_session=True` is what lets the watchdog signal the provider's whole
+        # group — and it also means the provider does NOT die with this command. Ctrl-C, a
+        # supervising agent's own timeout, or a CI cancel would otherwise leave a
+        # full-effort model run going with nothing watching it and nothing that will read
+        # its output. The shell version had an EXIT trap; this asserts the replacement.
+        self.child_pid_file.unlink(missing_ok=True)
+        self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=300)
+        # DEVNULL, not PIPE, and `with` so the handles close: nothing here ever reads the
+        # wrapper's output, and an undrained pipe is the hazard runner.py exists to avoid —
+        # a provider helper that outlives its parent while holding the write end blocks on a
+        # full buffer instead of exiting. Leaving them open also leaked two file objects,
+        # which `filterwarnings = ["error"]` turned into a failure.
+        with subprocess.Popen(
+            [str(self.commands[provider]), "adversarial-reviewer"],
+            env=self.env(),
+            cwd=self.work,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as wrapper:
+            # Nested inside the `with`, because Popen.__exit__ waits WITHOUT a timeout: an
+            # assertion firing below would otherwise hang the suite on a stub sleeping 300s.
+            try:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and not self.child_pid_file.exists():
+                    time.sleep(0.2)
+                assert self.child_pid_file.exists(), "the stub never started"
                 pid = int(self.child_pid_file.read_text(encoding="utf-8").strip())
-                deadline = time.monotonic() + 20
+
+                wrapper.terminate()
+                wrapper.wait(timeout=60)
+
+                deadline = time.monotonic() + 30
                 alive = True
                 while time.monotonic() < deadline:
                     try:
@@ -903,58 +905,18 @@ class TestWatchdogs(Harness):
                         break
                     time.sleep(0.2)
                 if alive:
-                    os.kill(pid, 9)  # do not leak a 300s sleeper from a failed test
-                self.assertFalse(alive, f"helper {pid} survived the timeout kill")
-
-    def test_killing_the_wrapper_does_not_orphan_the_provider(self):
-        # `start_new_session=True` is what lets the watchdog signal the provider's whole
-        # group — and it also means the provider does NOT die with this command. Ctrl-C, a
-        # supervising agent's own timeout, or a CI cancel would otherwise leave a
-        # full-effort model run going with nothing watching it and nothing that will read
-        # its output. The shell version had an EXIT trap; this asserts the replacement.
-        for provider in PROVIDERS:
-            with self.subTest(provider=provider):
-                self.child_pid_file.unlink(missing_ok=True)
-                self.set_spec(stdout="starting\n", stubborn_child=True, silent_for=300)
-                wrapper = subprocess.Popen(
-                    [str(self.commands[provider]), "adversarial-reviewer"],
-                    env=self.env(),
-                    cwd=self.work,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                try:
-                    deadline = time.monotonic() + 30
-                    while time.monotonic() < deadline and not self.child_pid_file.exists():
-                        time.sleep(0.2)
-                    self.assertTrue(self.child_pid_file.exists(), "the stub never started")
-                    pid = int(self.child_pid_file.read_text(encoding="utf-8").strip())
-
-                    wrapper.terminate()
-                    wrapper.wait(timeout=60)
-
-                    deadline = time.monotonic() + 30
-                    alive = True
-                    while time.monotonic() < deadline:
-                        try:
-                            os.kill(pid, 0)
-                        except (ProcessLookupError, PermissionError):
-                            alive = False
-                            break
-                        time.sleep(0.2)
-                    if alive:
-                        os.kill(pid, 9)
-                    self.assertFalse(alive, f"provider helper {pid} outlived the killed wrapper")
-                finally:
-                    if wrapper.poll() is None:
-                        wrapper.kill()
-                        wrapper.wait(timeout=10)
+                    os.kill(pid, 9)
+                assert not alive, f"provider helper {pid} outlived the killed wrapper"
+            finally:
+                if wrapper.poll() is None:
+                    wrapper.kill()
+                    wrapper.wait(timeout=10)
 
     def test_partial_output_is_kept_after_a_timeout(self):
         self.set_spec(stdout="partial evidence\n", silent_for=90)
         self.review("grok", "adversarial-reviewer", timeout=60, CE_PERSONA_IDLE_SECS="3")
         events = self.run_dir / "adversarial-reviewer-grok-events.jsonl"
-        self.assertIn("partial evidence", events.read_text(encoding="utf-8"))
+        assert "partial evidence" in events.read_text(encoding="utf-8")
 
 
 class TestFindingsCommand(Harness):
@@ -965,19 +927,15 @@ class TestFindingsCommand(Harness):
 
     def test_the_installed_command_reads_a_real_artifact(self):
         self.good_answer("grok")
-        self.assertEqual(self.review("grok", "adversarial-reviewer").returncode, 0)
+        assert self.review("grok", "adversarial-reviewer").returncode == 0
         proc = self._findings(str(self.artifact("grok")))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("BEGIN UNTRUSTED MODEL OUTPUT", proc.stdout)
-        self.assertIn("#1 P1", proc.stdout)
+        assert proc.returncode == 0, proc.stderr
+        assert "BEGIN UNTRUSTED MODEL OUTPUT" in proc.stdout
+        assert "#1 P1" in proc.stdout
 
     def test_json_round_trips_through_the_installed_command(self):
         self.good_answer("grok")
         self.review("grok", "adversarial-reviewer")
         proc = self._findings(str(self.artifact("grok")), "--json")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout)["findings"][0]["severity"], "P1")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["findings"][0]["severity"] == "P1"

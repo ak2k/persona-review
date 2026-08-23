@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove the guards can fail: revert each fix and require a test to die.
 
-Run: python3 tests/test_mutations.py
+Run: pytest tests/test_mutations.py
 
 This exists because the recurring defect in this package is not a wrong guard, it is a
 guard that CANNOT fail. Seven of them shipped green across a single review cycle — a
@@ -39,13 +39,13 @@ replacement doors — are exercised by `tests/test_process.py` itself and swept 
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
-import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,18 +128,18 @@ MUTATIONS: list[Mutation] = [
         "    if False:",
     ),
     Mutation(
+        # Two HEALTHY terminal events: the second silently became the verdict, so a real P0
+        # review reported clean. Every status check passes because it genuinely is healthy.
+        "multiple grok result events resolve to one instead of being refused",
+        "persona_review/validate.py",
+        r"    if len\(results\) > 1:",
+        "    if False:",
+    ),
+    Mutation(
         "grok is_error accepted when absent",
         "persona_review/validate.py",
         r'    if result\.get\("is_error"\) is not False:',
         '    if result.get("is_error"):',
-    ),
-    Mutation(
-        "grok result event first-wins instead of last",
-        "persona_review/validate.py",
-        r'        if isinstance\(event, dict\) and event\.get\("type"\) == "result":'
-        r"\n            result = event",
-        '        if isinstance(event, dict) and event.get("type") == "result":'
-        "\n            result = result or event",
     ),
     Mutation(
         # Found by asking which guards had no entry here: mutating this left all 64 unit
@@ -223,6 +223,17 @@ MUTATIONS: list[Mutation] = [
         r"    nonce = secrets\.token_hex\(8\)\n    return \(",
         '    nonce = ""\n    return "" + (',
     ),
+    Mutation(
+        # findings-schema.json is the plugin's file, read fresh every run, so its top-level
+        # shape is an input. Dropping this guard turns a schema that is an array or null into
+        # an AttributeError traceback and an unmapped exit status instead of a refusal.
+        # The guard shipped with no test at all until a property test went looking.
+        "the findings schema is used without checking it is an object",
+        "persona_review/validate.py",
+        r'            schema = _as_object\(loads\(schema_path\.read_text\(encoding="utf-8"\)\),'
+        r' "findings schema"\)',
+        '            schema = cast(JSONObject, loads(schema_path.read_text(encoding="utf-8")))',
+    ),
 ]
 
 
@@ -235,12 +246,19 @@ class Run:
 
     @property
     def executed_tests(self) -> bool:
-        """The suite got as far as running tests, rather than dying on import or syntax."""
-        return "Ran " in self.output and " test" in self.output
+        """pytest collected tests and reached a verdict on them.
+
+        Read from the exit STATUS, not from the output text. pytest documents 0 as "all
+        passed" and 1 as "tests failed"; every other code is the suite failing to judge
+        anything — 2 interrupted, 3 internal error, 4 usage error, 5 nothing collected. A
+        mutation that produces one of those must not be counted as a guard firing, which is
+        precisely the lie this file exists to catch.
+        """
+        return self.code in (0, 1)
 
     @property
     def passed(self) -> bool:
-        return self.code == 0 and self.executed_tests
+        return self.code == 0
 
 
 def _scratch_tree(tmp: Path) -> Path:
@@ -262,19 +280,39 @@ def _scratch_tree(tmp: Path) -> Path:
 
 
 def _run_suite(root: Path) -> Run:
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(root)}
+    # Inherited so `-m pytest` resolves the same pytest this harness is running under; the
+    # scratch tree deliberately carries no pyproject.toml, so nothing else supplies it.
+    for passthrough in ("PYTHONPATH", "VIRTUAL_ENV"):
+        if passthrough in os.environ:
+            env[passthrough] = os.environ[passthrough]
     proc = subprocess.run(
-        [sys.executable, "tests/test_unit.py"],
-        cwd=root,
-        capture_output=True,
+        # -p no:cacheprovider so parallel scratch trees never contend over a cache dir, and
+        # --no-header -q to keep a 24-mutation sweep's captured output small.
         # No PYTHONSAFEPATH here. The scratch tree is ours, not a repository under review,
         # and dropping sys.path[0] is what broke the import bootstrap.
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_unit.py",
+            "-x",
+            "-q",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "no:cov",
+        ],
+        cwd=root,
+        capture_output=True,
+        env=env,
         check=False,
     )
     return Run(proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace"))
 
 
-class TestGuardsCanFail(unittest.TestCase):
+class TestGuardsCanFail:
     def test_the_scratch_suite_runs_before_any_mutation_is_believed(self):
         """The control. Without it every 'kill' could be an import error.
 
@@ -283,17 +321,16 @@ class TestGuardsCanFail(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             control = _run_suite(_scratch_tree(Path(tmp)))
-        self.assertTrue(
-            control.passed,
+        assert control.passed, (
             "the unmutated scratch suite does not pass, so no kill below means anything:\n"
-            + control.output[-2000:],
+            + control.output[-2000:]
         )
 
     def test_every_reverted_fix_kills_a_test(self):
         survivors: list[str] = []
         broken: list[str] = []
         for mutation in MUTATIONS:
-            with self.subTest(mutation=mutation.name), tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory() as tmp:
                 root = _scratch_tree(Path(tmp))
                 target = root / mutation.path
                 text = target.read_text(encoding="utf-8")
@@ -316,12 +353,10 @@ class TestGuardsCanFail(unittest.TestCase):
                     # flatters itself.
                     broken.append(f"{mutation.name} (suite did not run: no test executed)")
 
-        self.assertEqual(broken, [], f"mutations that proved nothing: {broken}")
-        self.assertEqual(
-            survivors,
-            [],
+        assert broken == [], f"mutations that proved nothing: {broken}"
+        assert survivors == [], (
             "the unit suite survived these reverted fixes, so nothing guards them: "
-            + "; ".join(survivors),
+            + "; ".join(survivors)
         )
 
     def test_a_mutation_that_merely_breaks_the_code_is_not_counted_as_a_kill(self):
@@ -335,9 +370,5 @@ class TestGuardsCanFail(unittest.TestCase):
             target = root / "persona_review/validate.py"
             target.write_text(target.read_text(encoding="utf-8") + "\nthis is not python(\n")
             run = _run_suite(root)
-        self.assertNotEqual(run.code, 0, "a syntax error should stop the suite")
-        self.assertFalse(run.executed_tests, "a syntax error must not be classified as a kill")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        assert run.code != 0, "a syntax error should stop the suite"
+        assert not run.executed_tests, "a syntax error must not be classified as a kill"

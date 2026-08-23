@@ -27,6 +27,17 @@
           pkgs = nixpkgs.legacyPackages.${system};
           python = pkgs.python3;
 
+          # The suites' own dependencies. basedpyright needs this env too, not just a bare
+          # interpreter: `typeCheckingMode: strict` reports Unknown member types for an
+          # unresolvable `import pytest`, so a type check run without it would fail on every
+          # `pytest.raises` in tests/ — or, with reportMissingImports off, pass while
+          # inferring Unknown for all of them.
+          pythonEnv = python.withPackages (ps: [
+            ps.pytest
+            ps.pytest-cov
+            ps.hypothesis
+          ]);
+
           # `grok` and `codex` are deliberately NOT dependencies. They are the user's own
           # subscription-authenticated CLIs, resolved from PATH at run time so a review uses
           # the login they already have rather than an API key this package would need.
@@ -42,25 +53,32 @@
             # and they are run as their own checks below against THIS built output.
             doCheck = false;
 
-            # TWO doors into the gate-replacement hole, and both have to be shut.
-            #
-            # PYTHONSAFEPATH drops sys.path[0] — the caller's cwd for `python -m`, the
-            # script's own directory otherwise. That closes the cwd vector.
-            #
-            # --unset PYTHONPATH closes the other one, which is the one that actually bit.
-            # This wrapper adds the package's site-packages with `site.addsitedir`, which
-            # APPENDS; a caller-set PYTHONPATH sits at the FRONT. So `PYTHONPATH=.` in the
-            # repository under review shadows `persona_review` wholesale: the planted module
+            # The gate-replacement hole is ONE mechanism: the wrapper adds this package's
+            # site-packages with `site.addsitedir`, which APPENDS, so anything landing
+            # earlier on sys.path shadows `persona_review` wholesale — the planted module
             # answers, prints a plausible summary, exits 0, and runs as the user outside the
-            # read-only sandbox — while the model is never invoked. Demonstrated against
-            # these very binaries. `PYTHONPATH=.` or `=src` is routine under direnv, tox and
-            # CI images, and this repo's own devShell exports `PYTHONPATH="$PWD"`.
+            # read-only sandbox, with the model never invoked.
             #
-            # Safe to unset: this package has no dependencies and the wrapper puts its own
-            # site-packages on the path explicitly.
+            # The cwd, PYTHONPATH and PYTHONHOME are three INSTANCES of that mechanism, not
+            # the set. Two were closed one at a time under a comment reading "TWO doors, and
+            # both have to be shut"; a reviewer promptly found the third. So the doors below
+            # are defence in depth, and the actual guarantee is PERSONA_REVIEW_LIB: the code
+            # asserts at startup that the gate it is running came from here, which holds for
+            # instances nobody has enumerated.
+            #
+            # Safe to unset PYTHONPATH/PYTHONHOME: this package has no dependencies and the
+            # wrapper puts its own site-packages on the path explicitly.
             makeWrapperArgs = [
+              "--set"
+              "PERSONA_REVIEW_LIB"
+              "${placeholder "out"}/${python.sitePackages}"
               "--unset"
               "PYTHONPATH"
+              "--unset"
+              "PYTHONHOME"
+              "--set"
+              "PYTHONNOUSERSITE"
+              "1"
               "--set"
               "PYTHONSAFEPATH"
               "1"
@@ -82,7 +100,7 @@
 
           devShells.default = pkgs.mkShell {
             packages = [
-              python
+              pythonEnv
               pkgs.ruff
               pkgs.basedpyright
               pkgs.git
@@ -102,7 +120,7 @@
               pkgs.runCommand "persona-review-process"
                 {
                   nativeBuildInputs = [
-                    python
+                    pythonEnv
                     pkgs.coreutils
                     # The size preflight measures `git diff BASE..HEAD`, so proving it fires
                     # needs a real repository with a real large diff.
@@ -111,15 +129,20 @@
                 }
                 ''
                   export HOME=$(mktemp -d)
+                  # -p no:cacheprovider: rootdir is a read-only store path and pytest writes
+                  # .pytest_cache there by default. --no-cov because every case here runs the
+                  # library in a SUBPROCESS, so measuring the parent would report ~0% and
+                  # trip the gate for a suite that is doing its job.
                   PERSONA_REVIEW_BIN=${persona-review}/bin \
-                    python3 ${self}/tests/test_process.py
+                    python3 -m pytest ${self}/tests/test_process.py \
+                      -p no:cacheprovider --no-cov --no-header -q
                   touch $out
                 '';
 
             unit =
               pkgs.runCommand "persona-review-unit"
                 {
-                  nativeBuildInputs = [ python ];
+                  nativeBuildInputs = [ pythonEnv ];
                   PYTHONDONTWRITEBYTECODE = "1";
                 }
                 ''
@@ -136,7 +159,8 @@
                   # before believing it about the real run.
                   if PYTHONPATH=/nonexistent-sitepackages \
                      PERSONA_REVIEW_EXPECT_LIB=${persona-review} \
-                       python3 ${self}/tests/test_unit.py > control.log 2>&1; then
+                       python3 -m pytest ${self}/tests/test_unit.py \
+                         -p no:cacheprovider --no-cov --no-header -q > control.log 2>&1; then
                     echo "FAIL: the suite passed while importing something other than the" >&2
                     echo "packaged library. PERSONA_REVIEW_EXPECT_LIB is not being honoured." >&2
                     exit 1
@@ -148,9 +172,25 @@
                   }
                   echo "ok: the packaged-library guard rejects a suite importing the source tree"
 
+                  # The one check where coverage is meaningful, so it is the one that carries
+                  # the gate: the process and mutation suites drive the library through
+                  # subprocesses, which the parent's tracer cannot see.
+                  #
+                  # No explicit --cov here. pyproject's addopts already says
+                  # `--cov=persona_review`, which coverage resolves as a PACKAGE — the built
+                  # one, via PYTHONPATH below. Passing the store path as well would measure
+                  # both it and the never-imported source copy, reporting the latter at 0%
+                  # and failing the gate for a suite that is fully covering what it tests.
+                  #
+                  # --cov-config IS needed, though: pytest finds its own ini by walking up
+                  # from the test file, but coverage looks for [tool.coverage.run] in the
+                  # CURRENT DIRECTORY, which here is an empty build dir. Without this the
+                  # sandbox silently ran with branch coverage off and the omit list empty.
                   PYTHONPATH=$(echo ${persona-review}/${python.sitePackages}) \
                   PERSONA_REVIEW_EXPECT_LIB=${persona-review} \
-                    python3 ${self}/tests/test_unit.py
+                    python3 -m pytest ${self}/tests/test_unit.py \
+                      -p no:cacheprovider --no-header -q \
+                      --cov-config=${self}/pyproject.toml
                   touch $out
                 '';
 
@@ -162,12 +202,16 @@
             mutations =
               pkgs.runCommand "persona-review-mutations"
                 {
-                  nativeBuildInputs = [ python ];
+                  nativeBuildInputs = [ pythonEnv ];
                   PYTHONDONTWRITEBYTECODE = "1";
                 }
                 ''
                   export HOME=$(mktemp -d)
-                  python3 ${self}/tests/test_mutations.py
+                  # --no-cov: the harness spawns a suite per mutation, so the parent covers
+                  # nothing. It also mutates a scratch COPY, which is why it runs against the
+                  # source tree rather than the built package.
+                  python3 -m pytest ${self}/tests/test_mutations.py \
+                    -p no:cacheprovider --no-cov --no-header -q
                   touch $out
                 '';
 
@@ -176,7 +220,9 @@
                 {
                   nativeBuildInputs = [
                     pkgs.basedpyright
-                    python
+                    # pythonEnv, not a bare interpreter: strict mode infers Unknown for an
+                    # unresolvable `import pytest`, so tests/ would be checked against nothing.
+                    pythonEnv
                   ];
                 }
                 ''

@@ -4,14 +4,21 @@ version = "0.2.0"
 description = "Run a compound-engineering review persona through grok or codex and get schema-valid findings back, not a transcript"
 readme = "README.md"
 license = "Apache-2.0"
-# 3.12 for PEP 695 `type` statements. The floor is enforced by the interpreter itself
-# rather than by a runtime check: a console entry point is generated against the Python it
-# was installed with, so there is no version to guess at run time.
+# 3.12 for PEP 695 `type` statements. The house floor is also 3.12.
 requires-python = ">=3.12"
-# No dependencies, by design. `grok` and `codex` are the user's own
+# No RUNTIME dependencies, by design. `grok` and `codex` are the user's own
 # subscription-authenticated CLIs, resolved from PATH at run time so a review uses the login
 # they already have rather than an API key this package would need to hold.
 dependencies = []
+
+[dependency-groups]
+dev = [
+  "basedpyright>=1.20",
+  "ruff>=0.6",
+  "pytest>=8.3",
+  "pytest-cov>=5",
+  "hypothesis>=6.100",
+]
 
 [project.scripts]
 ce-grok-persona = "persona_review.cli:grok_main"
@@ -24,3 +31,39 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["persona_review"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Load-bearing, not decoration: this already caught a leaked pair of pipe handles in the
+# watchdog test, which is the same class of defect (a provider helper holding an undrained
+# pipe) that the runner is built to avoid.
+filterwarnings = ["error"]
+xfail_strict = true
+# --cov=persona_review names the PACKAGE, so coverage follows whatever the suite imported.
+# The flake's unit check points PYTHONPATH at the built output and relies on that: naming a
+# path instead would measure a second, never-imported copy and report it at 0%.
+addopts = "--cov=persona_review --cov-report=term-missing --cov-fail-under=60 --strict-markers"
+markers = [
+  "process: drives the installed console scripts as subprocesses (slow; needs stub runners)",
+  "mutation: reverts a fix and requires a test to die (slow; spawns a suite per entry)",
+]
+
+# The gate measures the UNIT suite, and only it. The process and mutation suites run the
+# library in subprocesses the parent's tracer cannot see, so they contribute nothing and are
+# run with --no-cov. cli.py and runner.py therefore read low here while being the most
+# heavily exercised modules in the package — the number is a floor against regression, not a
+# claim about how much of this code is tested. Neither module is omitted below, because
+# hiding them to flatter the total is exactly the kind of guard-shaped-nothing this repo
+# keeps finding.
+[tool.coverage.run]
+branch = true
+omit = [
+  # Probes a real authenticated `grok` binary; no check drives it, so counting it would
+  # depress the gate for code that is deliberately manual.
+  #
+  # Leading */ deliberately. coverage resolves a bare relative pattern against the CURRENT
+  # WORKING DIRECTORY, and the flake's unit check runs in a build directory while importing
+  # the library from a /nix/store path — so `persona_review/flags.py` matched locally and
+  # matched nothing in the sandbox, quietly counting 69 statements the gate was set without.
+  "*/persona_review/flags.py",
+]

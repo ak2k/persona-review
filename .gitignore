@@ -1,8 +1,16 @@
 # Tool caches embed absolute paths from whoever ran them. Ruff self-ignores its cache,
 # but relying on a tool to exclude itself from a public repo is not a control.
 .ruff_cache/
+.pytest_cache/
 __pycache__/
 *.py[cod]
+
+# Coverage's data file records the absolute path of every measured module, so a stray commit
+# would publish the committer's home directory. `.hypothesis/` cannot appear while the
+# property tests set database=None, and is listed because that setting is one edit away.
+.coverage
+.coverage.*
+.hypothesis/
 
 # nix build symlinks
 result
