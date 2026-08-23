@@ -154,6 +154,23 @@
                   touch $out
                 '';
 
+            # Every guard must be able to fail. The recurring defect in this package is not
+            # a wrong guard but a guard that CANNOT fail — seven shipped green in one review
+            # cycle, each found by a reviewer running mutations by hand. This reverts each
+            # fix in a scratch copy and requires a test to die, so a future guard has to
+            # earn its place rather than merely exist.
+            mutations =
+              pkgs.runCommand "persona-review-mutations"
+                {
+                  nativeBuildInputs = [ python ];
+                  PYTHONDONTWRITEBYTECODE = "1";
+                }
+                ''
+                  export HOME=$(mktemp -d)
+                  python3 ${self}/tests/test_mutations.py
+                  touch $out
+                '';
+
             types =
               pkgs.runCommand "persona-review-types"
                 {

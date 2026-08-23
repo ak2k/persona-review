@@ -17,7 +17,6 @@ correct across CLI versions that rename their events.
 from __future__ import annotations
 
 import contextlib
-import io
 import os
 import signal
 import subprocess
@@ -26,7 +25,7 @@ import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, cast
+from typing import IO
 
 # How often the watchdog looks at the growing output file. Small enough to notice a stall
 # promptly, large enough that a long review costs a negligible number of stat() calls.
@@ -127,48 +126,30 @@ def diff_bytes(repo: Path, base: str) -> int:
     oversized review breaks: a 209 MB diff took peak RSS to roughly 2.4x its size. Only the
     byte count is wanted, so read and discard in chunks.
     """
-    # stderr goes to a FILE, not a second pipe. Draining stdout to EOF while stderr is a
-    # pipe deadlocks: git fills the ~64 KiB stderr buffer, blocks in write(), and never
-    # closes stdout, so this waits for an EOF that cannot come. A committed .gitattributes
-    # of a few thousand malformed lines produces half a megabyte of stderr, which makes the
-    # hang repo-controlled — and this runs in the budget preflight, before the watchdogs in
-    # `execute` exist, so nothing else bounds it.
-    with tempfile.TemporaryFile() as err:
+    # NEITHER stream is a pipe. That is the invariant this module runs on, and the reason
+    # is that both ways of breaking it have already cost a defect: reading the runner's
+    # stdout through a pipe hangs when a provider's helper holds the descriptor open, and
+    # draining stdout to EOF while stderr was a pipe deadlocked whenever git filled the
+    # ~64 KiB stderr buffer — repo-controlled, via a committed .gitattributes. Files have
+    # neither failure mode, and the byte count is a stat rather than a read.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             proc = subprocess.Popen(
-                _git_diff_argv(repo, base),
-                stdout=subprocess.PIPE,
-                stderr=err,
-                env=_git_env(),
+                _git_diff_argv(repo, base), stdout=out, stderr=err, env=_git_env()
             )
         except FileNotFoundError as exc:
             raise MissingTool(f"git is required to weigh `-b {base}` but is not on PATH") from exc
 
-        total = 0
-        deadline = time.monotonic() + DIFF_TIMEOUT_SECS
-        with proc:
-            # BufferedReader, which is what Popen(stdout=PIPE) yields; `IO[bytes]` does
-            # not declare read1.
-            stdout = cast("io.BufferedReader | None", proc.stdout)
-            if stdout is not None:
-                # read1, not read: it returns as soon as any bytes are available, so the
-                # deadline below is actually checked rather than sat behind a blocking read.
-                while chunk := stdout.read1(1 << 20):
-                    total += len(chunk)
-                    if time.monotonic() > deadline:
-                        proc.kill()
-                        raise RunError(
-                            f"`git diff {base}..HEAD` in {repo} exceeded "
-                            f"{int(DIFF_TIMEOUT_SECS)}s while being measured"
-                        )
-            try:
-                proc.wait(timeout=max(1.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                raise RunError(
-                    f"`git diff {base}..HEAD` in {repo} did not finish within "
-                    f"{int(DIFF_TIMEOUT_SECS)}s"
-                ) from None
+        try:
+            proc.wait(timeout=DIFF_TIMEOUT_SECS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise RunError(
+                f"`git diff {base}..HEAD` in {repo} did not finish within {int(DIFF_TIMEOUT_SECS)}s"
+            ) from None
+
+        total = os.fstat(out.fileno()).st_size
         err.seek(0)
         detail = err.read().decode("utf-8", "replace")
 

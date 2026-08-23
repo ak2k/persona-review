@@ -315,7 +315,6 @@ def main(provider: Provider, argv: list[str] | None = None) -> int:
         answer_file=answer_file,
         schema_path=schema_file,
         mode=provider.mode,
-        prompt=prompt,
         findings_out=findings_file,
         provenance_out=prov_file,
         prov_pairs=[

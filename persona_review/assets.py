@@ -25,9 +25,8 @@ _PLUGIN_GLOB = "compound-engineering-plugin/compound-engineering/*/skills/ce-cod
 # ends in "no findings JSON object" — indistinguishable from a model that gave up.
 _FINDINGS_CONTRACT = re.compile(r"findings[ .-]schema", re.IGNORECASE)
 
-# The last line of every prompt. The transcript-mode extractor cuts on it to tell the
-# runner's echo of the prompt from the model's own answer, so it must be stable and it must
-# be the final line build_prompt emits.
+# The last line of every prompt: a plain instruction to answer now. It used to double as
+# the extractor's cut point, which is gone — nothing parses this, so it is free to change.
 BOUNDARY = "Return the findings object now."
 
 

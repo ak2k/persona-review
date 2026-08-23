@@ -19,16 +19,19 @@ append the brief's own schema-valid EXAMPLE object and read as a clean review, a
 that found real defects can append the same example and have them silently replaced by an
 empty array. The prompt asks for a bare object precisely so this can stay strict.
 
-`transcript` remains for a runner that offers only plain text. Neither shipped provider uses
-it. It carries two hard-won anchors and the tests that pin them.
+THERE IS NO THIRD MODE, DELIBERATELY
+------------------------------------
+A prose-scanning fallback used to exist for a hypothetical runner offering only plain text.
+No shipped provider ever used it, and it accounted for SIX separate false-passes: the
+persona brief's echoed example validating as a clean review, a quoted object validating
+after the boundary cut, a trailing empty object wiping a real answer, an unanchored cut
+slicing into a real object, a replayed boundary hiding the answer from the ambiguity check,
+and a non-empty object supplied by the reviewed repository replacing the model's findings.
 
-WHY THE PROMPT IS AN ARGUMENT (transcript mode only)
-----------------------------------------------------
-13 of the 16 persona briefs carry a schema-valid EXAMPLE object, and a runner that echoes
-its prompt replays them into the transcript. Scanning the whole output for the last object
-with a `findings` key therefore validates the persona's own example whenever the model
-answers with prose. So: cut at the LAST occurrence of the prompt's final line and scan only
-what follows.
+Each fix was correct and each exposed the next, because the premise is unsound: you cannot
+reliably tell "the model's answer" from "text the model quoted" by scanning output. Both
+remaining modes read a channel the RUNNER delimits, so the question never arises. A runner
+that cannot provide one is unsupported rather than supported badly.
 
 WHAT THIS DOES NOT COVER
 ------------------------
@@ -45,14 +48,9 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import NoReturn, cast
-
-# What may follow the findings object and still count as "at the end": whitespace and a
-# closing code fence. Anything else means the object was quoted mid-transcript.
-TRAILING_NOISE = re.compile(r"\s*(?:```)?\s*\Z")
 
 # Parsed JSON, spelled out. The schema is owned by the compound-engineering plugin, read at
 # run time, and free to grow fields this package has never heard of — so the value type is
@@ -79,100 +77,6 @@ def _as_object(value: JSONValue, what: str) -> JSONObject:
     if not isinstance(value, dict):
         fail(f"{what} is not a JSON object")
     return value
-
-
-def _scan(text: str) -> list[tuple[JSONObject, bool, bool]]:
-    """Every findings object in `text`, as (object, sits-at-the-end, has-any-findings)."""
-    decoder = json.JSONDecoder()
-    out: list[tuple[JSONObject, bool, bool]] = []
-    for i, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            decoded, consumed = decoder.raw_decode(text[i:])
-        except ValueError:
-            continue
-        obj = cast(JSONValue, decoded)
-        if not isinstance(obj, dict) or "findings" not in obj:
-            continue
-        entries = obj.get("findings")
-        at_end = TRAILING_NOISE.fullmatch(text[i + consumed :]) is not None
-        out.append((obj, at_end, isinstance(entries, list) and len(entries) > 0))
-    return out
-
-
-def _boundary_lines(text: str, boundary: str) -> list[int]:
-    """Indexes of the lines that ARE the boundary, ignoring surrounding whitespace.
-
-    A whole-line match, never a substring. An unanchored search matches the boundary
-    wherever it appears — including inside a finding's own quoted evidence, which happens
-    the moment this tool reviews itself — and cutting there slices the real answer in half.
-    """
-    return [n for n, line in enumerate(text.split("\n")) if line.strip() == boundary]
-
-
-def findings_object(text: str, prompt: str) -> Artifact:
-    """The model's own findings object: after the echoed prompt, at the end of the output.
-
-    Three anchors, because each of the first two alone has been bypassed.
-
-    The boundary cut drops the runner's echo of the prompt, where the persona brief's
-    EXAMPLE object lives. It cuts at the LAST whole-line boundary, so a runner that echoes
-    more than once still gets past its own replay. An empty boundary must not cut at all —
-    `"abc".rfind("")` is 3, which would slice the whole output away.
-
-    The end anchor drops everything the model merely QUOTED: tool output, a replayed brief.
-
-    The third rejects an at-end EMPTY object when a non-empty one appeared anywhere: taking
-    the last would discard a real review, which is worse than a false clean because the work
-    actually happened. It deliberately scans the UNCUT text. Scoping it to what follows the
-    boundary lets a model answer, replay the boundary line, then paste the brief's empty
-    example — pushing its own answer out of the anchor's view. The cost is a false refusal
-    when a `-c` context brief embeds a non-empty findings object of its own and the review
-    genuinely finds nothing; that fails loudly, with a legible reason, which is the side to
-    err on for a gate.
-    """
-    boundary = prompt.rstrip().rsplit("\n", 1)[-1] if prompt.strip() else ""
-    lines = text.split("\n")
-    marks = _boundary_lines(text, boundary) if boundary else []
-
-    # Extraction reads only what follows the last echo; the ambiguity check reads everything.
-    body = "\n".join(lines[marks[-1] + 1 :]) if marks else text
-
-    found: JSONObject | None = None
-    quoted_any = False
-    for obj, at_end, _ in _scan(body):
-        if at_end:
-            found = obj
-        else:
-            quoted_any = True
-
-    if found is None:
-        if quoted_any:
-            fail(
-                "findings JSON found, but not at the end of the output — the model quoted "
-                "an object instead of returning one"
-            )
-        fail("no findings JSON object in the model's output")
-
-    # SYMMETRIC. The first version of this only fired when the at-end object was EMPTY,
-    # which tests the wrong half: a NON-EMPTY object at the end wins silently over the
-    # model's real answer, and this gate reads untrusted repositories — a file containing a
-    # schema-valid findings object, quoted last, becomes the artifact and the real defects
-    # vanish. Comparing against every non-empty object in the UNCUT text catches both, and
-    # a boundary replayed after the real answer cannot hide it.
-    #
-    # Non-empty ones only, deliberately: the persona brief's echoed EXAMPLE is empty, so
-    # including empties would make a normal run — echoed example, then a real answer —
-    # disagree with itself and fail every time.
-    for other, _, nonempty in _scan(text):
-        if nonempty and other != found:
-            fail(
-                "two different findings objects appear in the output — ambiguous, and this "
-                "gate cannot tell which is the model's answer: taking the last would "
-                "discard a real review, or adopt one the repository supplied"
-            )
-    return found
 
 
 # JSON Schema type -> what Python accepts. bool is excluded from the numeric types because
@@ -507,13 +411,20 @@ def write_provenance(path: Path, pairs: list[str], files: dict[str, str]) -> Non
     path.write_text(json.dumps(record, indent=1, sort_keys=True), encoding="utf-8")
 
 
-def extract(mode: str, text: str, prompt: str) -> Artifact:
+def extract(mode: str, text: str) -> Artifact:
+    """Recover the model's answer through the channel its runner actually provides.
+
+    Both modes read a channel the RUNNER defines — grok's terminal event, codex's
+    final-message file — so neither has to decide which part of a transcript is the answer.
+    There is deliberately no prose-scanning mode: telling "the model's answer" from "text
+    the model quoted" by scanning output is not a decidable problem, and the attempt hosted
+    six separate false-passes before it was removed. A runner offering only plain text is
+    not supported rather than supported badly.
+    """
     if mode == "object":
         return from_object_file(text)
     if mode == "grok-events":
         return from_grok_events(text)
-    if mode == "transcript":
-        return findings_object(text, prompt)
     fail(f"unknown extraction mode {mode!r}")
 
 
@@ -522,7 +433,6 @@ def gate(
     answer_file: Path,
     schema_path: Path,
     mode: str,
-    prompt: str,
     findings_out: Path,
     provenance_out: Path,
     prov_pairs: list[str],
@@ -536,7 +446,7 @@ def gate(
             schema = _as_object(loads(schema_path.read_text(encoding="utf-8")), "findings schema")
         except (OSError, ValueError) as exc:
             fail(f"cannot read findings schema {schema_path}: {exc}")
-        found = extract(mode, text, prompt)
+        found = extract(mode, text)
         count = validate(found, schema)
     except GateError as exc:
         print(f"{label}: {exc}", file=sys.stderr)
