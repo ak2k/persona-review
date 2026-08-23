@@ -97,13 +97,47 @@ inputs.persona-review.url = "github:ak2k/persona-review";
 | `CE_REVIEW_ASSETS` | the plugin `references/` directory to read briefs and schema from |
 | `CE_PERSONA_RUN_DIR` | where artifacts land; defaults to a fresh temp dir |
 | `CE_PERSONA_MAX_PROMPT_TOKENS` | budget, default 80000. Counts the prompt **plus** `git diff <base>..HEAD` |
-| `CE_PERSONA_IDLE_SECS` | kill after this long with no output, default 600 |
-| `CE_PERSONA_HARD_SECS` | kill after this long overall, default 2400 |
+| `CE_PERSONA_IDLE_SECS` | kill after this long with no output, default 600. Must be **> 0** |
+| `CE_PERSONA_HARD_SECS` | kill after this long overall, default 2400. Must be **> 0** |
+
+Every value is parsed and validated before any work happens, and a bad one exits `2` naming the
+variable. Two rules are worth knowing because they refuse things you might expect to work:
+
+- **A watchdog cannot be switched off.** `0` is rejected, not treated as "no timeout". An unwatched
+  run is a full-effort model run that nothing will stop and nothing will read. Set a large value if
+  you want a long one.
+- **An unrecognised `CE_PERSONA_*` name is an error.** `CE_PERSONA_IDEL_SECS=30` would otherwise be
+  ignored in silence while the real idle timeout stayed at its default — a misconfiguration that
+  looks exactly like a working one.
 
 **The budget only means something with `-b`.** Without a base ref the prompt does not contain the
 change and does not name a range — the model picks its own scope — so there is genuinely nothing to
 weigh, and the budget bounds the prompt alone. That is a real limit, stated rather than papered over
 with a guessed base.
+
+## Concurrency
+
+Artifact paths are deterministic and `CE_PERSONA_RUN_DIR` is reusable, which together mean two runs
+of the same persona through the same provider in the same directory address the same files. A run
+takes an exclusive lock on its artifact stem; a second one **exits `2` rather than interleaving**.
+Wait, or point `CE_PERSONA_RUN_DIR` somewhere else. Different personas, different providers and the
+default fresh temp dir never contend.
+
+This is a refusal rather than a queue because the alternative is not a lost race: the second run's
+directory clear unlinks the first run's event stream while its provider is still writing, both
+append to one events file, and the gate then validates an interleaving of two transcripts.
+
+## Provenance
+
+Each run writes `<persona>-<provider>-provenance.json` beside its findings, recording what produced
+them: the provider, model and effort; the persona brief, the findings schema and **the exact prompt
+the model received**, each by SHA-256; and the repository with the resolved `head_sha` and `base_sha`.
+
+The hashes are the point. Briefs live in a plugin cache that updates underneath you, so two runs are
+only comparable if they ran the same brief — and `base_ref=HEAD~1` names a different commit every
+day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
+about. Reviewing a directory that is not a git repository is fine; the SHA fields record
+`unresolved:` rather than going missing.
 
 ## Breaking changes in 0.2.0
 
@@ -123,13 +157,26 @@ are unchanged; the exit statuses are not:
   everything, so a caller can tell a bad invocation from an unusable artifact.
 - Both review commands now enforce timeouts. A wedged provider previously hung forever and took the
   calling agent with it; `CE_PERSONA_IDLE_SECS` and `CE_PERSONA_HARD_SECS` bound that.
+- **`CE_PERSONA_*` values are validated strictly.** A timeout of `0`, a non-finite or negative
+  number, and an unrecognised `CE_PERSONA_*` name all exit `2`. Previously `0` disabled the watchdog
+  and a misspelled name was ignored in silence.
+- **Concurrent runs of the same persona and provider in one run directory are refused** with `2`
+  rather than overwriting each other. See Concurrency above.
 
 ## Development
 
 ```console
-nix flake check   # package build, lint, strict types, unit tests, packaged-process tests
+nix flake check   # package build, lint, strict types, unit + process suites, mutation harness
 nix develop
 ```
+
+Five checks, and the fifth is the unusual one. `tests/test_mutations.py` reverts each fix in a
+scratch copy of the **built** package and requires a test to die — because the recurring defect here
+has never been a wrong guard, it has been a guard that *cannot* fail. Seven shipped green in a
+single review cycle. A new guard without an entry in that table is not finished.
+
+`AGENTS.md` records the house-template divergences (no pydantic, no rich, no structlog) with the
+measurements behind each, and the structural invariants worth not breaking.
 
 The unit suite exercises the packaged library and asserts which copy it imported — an earlier
 version put its own source root ahead of `PYTHONPATH` and passed with every packaged module replaced
