@@ -76,7 +76,13 @@ TYPE_INVALID = json.dumps(
 
 # A stub runner. It records the argv it was called with, honours codex's `-o`, and does
 # whatever the spec file tells it — including going silent, so the watchdogs can be tested.
-STUB = """#!/usr/bin/env python3
+#
+# This interpreter, not `env python3`, for the reason the shims below carry the same
+# shebang: `env()` runs these under a PATH of <stubs>:/usr/bin:/bin, and a build sandbox
+# that has no /usr/bin/python3 cannot exec them. The kernel reports a missing interpreter
+# as ENOENT on the stub itself, which surfaces as the provider missing from PATH — so the
+# suite fails everywhere the platform does not happen to ship a system python3.
+STUB = f"""#!{sys.executable}
 import json, os, sys, time
 spec = json.load(open(os.environ["STUB_SPEC"]))
 argv = sys.argv[1:]
