@@ -361,6 +361,14 @@ class Harness:
                 last=ANSWER,
             )
 
+    def findings(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """The retrieval command, as installed. On Harness rather than on its own test class
+        because the vacuous-run tests need it too: the refusal is only closed if BOTH the
+        review command and the reader of its artifact honour it."""
+        cmd = self.findings_cmd
+        argv = [str(cmd), *args] if isinstance(cmd, Path) else [*cmd, *args]
+        return subprocess.run(argv, capture_output=True, text=True, env=self.env(), check=False)
+
     def artifact(self, provider: str) -> Path:
         return self.run_dir / f"adversarial-reviewer-{provider}.json"
 
@@ -656,6 +664,88 @@ class TestVacuousRuns(Harness):
         # Measured by the wrapper rather than read from the stream, so it is real for both
         # providers even though only one of them publishes a duration.
         assert isinstance(stats["duration_s"], float) and stats["duration_s"] > 0, stats
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_will_not_render_the_artifact_the_review_refused(self, provider: str):
+        # THE LAUNDERING ROUTE. exit 6 keeps the artifact as evidence, and an artifact on
+        # disk is exactly what `ce-persona-findings` renders — so a caller that ignored the
+        # status got the same dud back as an ordinary listing at exit 0, one command later,
+        # through this package's own reader. Both ends have to honour the refusal.
+        assert self.review_dud(provider, ANSWER).returncode == 6
+        proc = self.findings(str(self.artifact(provider)))
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "no tool calls" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_refuses_json_too(self, provider: str):
+        # The mode a programmatic caller uses, and therefore the one most likely to be acted
+        # on without a person ever reading it.
+        assert self.review_dud(provider, ANSWER).returncode == 6
+        proc = self.findings(str(self.artifact(provider)), "--json")
+        assert proc.returncode == 6, proc.stdout
+        assert proc.stdout.strip() == "", proc.stdout
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_still_renders_a_review_that_happened(self, provider: str):
+        # The control for the three above: without it they are all satisfied by a reader that
+        # refuses every artifact.
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        proc = self.findings(str(self.artifact(provider)))
+        assert proc.returncode == 0, proc.stderr
+        assert "#1 P1" in proc.stdout
+
+
+class TestVocabularyDriftIsNotBlamedOnTheModel(Harness):
+    """A renamed provider vocabulary is a broken wrapper, and must not read as a bad model.
+
+    After a codex upgrade renames its item kinds, every run counts zero tool calls. Refusing
+    those with exit 6 and "the model never opened the diff" would be a falsehood repeated on
+    every run, about the component that was working — a permanent outage that the README
+    tells the caller to retry once and then blame the model for.
+    """
+
+    def _drifted(self) -> str:
+        renamed = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "shell_call_v2", "command": "git diff"},
+            }
+        )
+        return (
+            '{"type":"thread.started","thread_id":"th_1"}\n'
+            '{"type":"turn.started"}\n' + renamed + "\n"
+            '{"type":"turn.completed","usage":{"output_tokens":900}}\n'
+        )
+
+    def test_an_unrecognised_item_vocabulary_is_an_environment_error(self):
+        self.set_spec(stdout=self._drifted(), last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "shell_call_v2" in proc.stderr, proc.stderr
+        assert "drift" in proc.stderr, proc.stderr
+        # And NOT the model's fault, said in those words: the message a person reads first
+        # decides which component they go and look at.
+        assert "never opened the diff" not in proc.stderr
+        assert not self.artifact("codex").exists()
+
+    def test_a_codex_run_that_emits_no_events_at_all_is_an_environment_error(self):
+        # `codex exec --json` opens every run with a thread and a turn, so an empty stream is
+        # a runner that did not run rather than a model that did nothing.
+        self.set_spec(stdout="", last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "no events at all" in proc.stderr, proc.stderr
+
+    def test_a_genuine_dud_is_still_the_model_s_doing(self):
+        # THE CONTROL that keeps exit 6 alive: a real vacuous run emits agent_message and
+        # nothing else, and those are kinds the wrapper knows and skips on purpose. If they
+        # counted as unrecognised, every dud would report drift and the refusal would be dead.
+        self.set_spec(stdout=codex_stream(), last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        assert "no tool calls" in proc.stderr
 
 
 class TestExitStatus(Harness):
@@ -1193,15 +1283,10 @@ class TestWatchdogs(Harness):
 
 
 class TestFindingsCommand(Harness):
-    def _findings(self, *args: str) -> subprocess.CompletedProcess[str]:
-        cmd = self.findings_cmd
-        argv = [str(cmd), *args] if isinstance(cmd, Path) else [*cmd, *args]
-        return subprocess.run(argv, capture_output=True, text=True, env=self.env(), check=False)
-
     def test_the_installed_command_reads_a_real_artifact(self):
         self.good_answer("grok")
         assert self.review("grok", "adversarial-reviewer").returncode == 0
-        proc = self._findings(str(self.artifact("grok")))
+        proc = self.findings(str(self.artifact("grok")))
         assert proc.returncode == 0, proc.stderr
         assert "BEGIN UNTRUSTED MODEL OUTPUT" in proc.stdout
         assert "#1 P1" in proc.stdout
@@ -1209,6 +1294,6 @@ class TestFindingsCommand(Harness):
     def test_json_round_trips_through_the_installed_command(self):
         self.good_answer("grok")
         self.review("grok", "adversarial-reviewer")
-        proc = self._findings(str(self.artifact("grok")), "--json")
+        proc = self.findings(str(self.artifact("grok")), "--json")
         assert proc.returncode == 0, proc.stderr
         assert json.loads(proc.stdout)["findings"][0]["severity"] == "P1"

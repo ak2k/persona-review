@@ -324,14 +324,17 @@ def _review_locked(
     if last_file is not None and not (last_file.exists() and last_file.stat().st_size):
         raise errors.GateError(f"{provider.binary} wrote no final message to {last_file}")
 
-    # WHAT THE RUN DID, counted from the event stream this process just wrote. Read from the
-    # events file for BOTH providers even though codex's answer arrives elsewhere: the
-    # question is what the run inspected, and only the event stream records that.
-    stats = validate.run_stats(provider.events_mode, events_file, duration_s=elapsed)
+    # WHERE THE RUN'S OWN ACCOUNT OF ITSELF LIVES. The events file for BOTH providers, even
+    # though codex's answer arrives elsewhere: the question is what the run inspected, and
+    # only the event stream records that. Handed to the gate rather than counted here, so the
+    # counting happens where the stream has already been read.
+    evidence = validate.Evidence(
+        events_file=events_file, mode=provider.events_mode, duration_s=elapsed
+    )
 
     # The gate has the last word: a run that returned prose, or an object of the wrong
     # shape, is a failed review that otherwise reads as a clean one. So is a run that
-    # answered without reading anything, and `stats` is what lets the gate see it.
+    # answered without reading anything, and `evidence` is what lets the gate see it.
     return validate.gate(
         answer_file=answer_file,
         schema_path=schema_file,
@@ -368,7 +371,7 @@ def _review_locked(
             "schema": str(schema_file),
             "prompt": str(prompt_file),
         },
-        stats=stats,
+        evidence=evidence,
         label=provider.command,
     )
 

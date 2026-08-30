@@ -55,7 +55,10 @@ class UsageError(AppError):
 class EnvError(AppError):
     """The machine is not set up: a missing binary, unusable directory, or absent assets.
 
-    No argument the caller could pass would fix it.
+    No argument the caller could pass would fix it. Also the status for a provider CLI whose
+    event vocabulary has moved out from under this build — the wrapper can no longer count
+    what a run did, which is a defect in the wrapper and must not be reported as one in the
+    model (see VacuousRun).
     """
 
     exit_code = 3
@@ -96,6 +99,11 @@ class VacuousRun(AppError):
 
     The one status a caller should consider retrying: the machine is fine, the invocation
     is fine, and the same command may well work next time.
+
+    Reached only when the wrapper positively understood the stream and counted nothing in it.
+    A stream it could not read, or one carrying event kinds it does not recognise, is an
+    EnvError instead — "the model inspected nothing" would be a false statement told
+    identically on every run, about the one component that was working.
     """
 
     exit_code = 6
@@ -129,7 +137,8 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
         EnvError.exit_code,
         (
             "environment error: {runner}, git or the plugin assets are missing,",
-            "or CE_PERSONA_RUN_DIR cannot be created",
+            "CE_PERSONA_RUN_DIR cannot be created, or {runner}'s event vocabulary",
+            "changed and this build can no longer count what a run did",
         ),
     ),
     (RunnerError.exit_code, ("{runner} itself exited non-zero",)),

@@ -60,7 +60,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, cast
@@ -87,6 +87,48 @@ def fail(message: str) -> NoReturn:
 
 def loads(text: str) -> JSONValue:
     return cast(JSONValue, json.loads(text))
+
+
+def objects(lines: Iterable[str]) -> Iterator[JSONObject]:
+    """Every JSON object in an NDJSON stream, in order.
+
+    THE ONE PLACE THE SKIP RULES LIVE. Both readers of a provider's event stream — the
+    answer extractor and the tool-call counter — need "one JSON object per line, ignore
+    what is not one", and a second copy of those four rules is a second thing to drift.
+
+    A line that does not parse is skipped rather than fatal: the stream is append-only, a
+    killed run leaves a partial last line, and that is a condition the watchdogs have
+    already judged rather than one to re-decide here.
+    """
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            event = loads(text)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def file_objects(events_file: Path) -> Iterator[JSONObject]:
+    """The same, streamed from a file a line at a time.
+
+    Never `read_text`: a real event stream is around a megabyte and its size is the
+    provider's decision, not this package's.
+
+    Only the OPEN is guarded. A failure there means the file this process wrote moments ago
+    is not there or not readable, which is the machine's problem; an OSError part-way
+    through a read of a local file is a different and far stranger animal, and swallowing it
+    into the same message would report the wrong cause.
+    """
+    try:
+        handle = events_file.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise errors.EnvError(f"cannot open the event stream {events_file}: {exc}") from exc
+    with handle:
+        yield from objects(handle)
 
 
 def _as_object(value: JSONValue, what: str) -> JSONObject:
@@ -355,18 +397,7 @@ def from_grok_events(text: str) -> Artifact:
     well-formed `{"findings": []}`, which is indistinguishable from a clean review by
     looking at the payload alone.
     """
-    results: list[JSONObject] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = loads(line)
-        except ValueError:
-            continue
-        if isinstance(event, dict) and event.get("type") == "result":
-            results.append(event)
-
+    results = [event for event in objects(text.splitlines()) if event.get("type") == "result"]
     if not results:
         fail("no `result` event in grok's output stream")
     if len(results) > 1:
@@ -441,20 +472,44 @@ class RunStats:
     duration_s: float | None
 
 
-# A tool call in grok's stream is a `tool_use` content block inside an ASSISTANT message.
-# The matching `tool_result` comes back in a `user` message, so counting blocks without
-# looking at the event type would double every total. Verified against grok 1.0.13: one real
-# review carried 99 `tool_use` blocks across 31 turns.
+@dataclass(frozen=True)
+class Evidence:
+    """Where a run's own account of itself lives, and how long the run took.
+
+    Passed to `gate` instead of a finished `RunStats` so the counting happens where the
+    stream has already been read. grok's answer arrives INSIDE its event stream, so
+    `events_file` is then the same path as the answer file and the gate counts from the text
+    it already holds rather than opening a megabyte twice.
+    """
+
+    events_file: Path
+    mode: str
+    duration_s: float | None
+
+
+# BOTH ADAPTERS ASK ONE QUESTION: did the model reach outside itself? They answer it
+# differently because the streams differ in kind, and the difference is worth stating rather
+# than discovering.
+#
+# grok names a tool call structurally — a `tool_use` content block — so ANY of them counts
+# and there is no list of tool names to go stale. codex names it by an item KIND, so the
+# adapter has to carry a list, and a list can go out of date. That asymmetry is why only the
+# codex side needs the drift detection below.
+
+# A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
+# defence in depth rather than a fix for an observed shape: grok returns tool RESULTS in
+# `user` events as `tool_result` blocks, which the block-type test already excludes. If a
+# future build ever echoed a `tool_use` block back, this stops it being counted twice.
+# Verified against grok 1.0.13: one real review carried 99 `tool_use` blocks over 31 turns.
 GROK_TOOL_BLOCK = "tool_use"
 
 # codex's `--json` stream is items rather than messages: one `item.started` and one
-# `item.completed` per call, both carrying the same `item.id`. These are the kinds that
-# reach outside the model; `agent_message` and `reasoning` are the model talking to itself
-# and are deliberately absent. Verified against codex-cli 0.150.1.
+# `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
+# outside the model. Verified against codex-cli 0.150.1.
 #
-# An unrecognised kind is NOT counted, and that is the fail-closed direction on purpose: a
-# provider that renames its vocabulary makes every run refuse loudly, rather than certifying
-# a review nobody can show happened.
+# `todo_list` is deliberately NOT here. It is a tool invocation, but it reaches nothing: a
+# run whose only "tool call" was writing itself a plan has inspected exactly as much as one
+# that made none.
 CODEX_TOOL_ITEMS = frozenset(
     {
         "command_execution",
@@ -464,36 +519,15 @@ CODEX_TOOL_ITEMS = frozenset(
         "local_shell_call",
         "mcp_tool_call",
         "patch_apply",
-        "todo_list",
         "web_search",
     }
 )
 
-
-def _stream(events_file: Path) -> Iterator[JSONObject]:
-    """Every JSON object in a run's event stream, one line at a time.
-
-    Streamed rather than read whole: a real stream is around a megabyte and its size is the
-    provider's decision, not this package's. A line that does not parse is skipped, because
-    the stream is append-only and a killed run leaves a partial last line — a condition the
-    watchdogs have already judged, and not one to re-decide here.
-    """
-    try:
-        with events_file.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    event = loads(text)
-                except ValueError:
-                    continue
-                if isinstance(event, dict):
-                    yield event
-    except OSError as exc:
-        # The machine, not the answer: this process wrote the file moments ago, so failing
-        # to read it back is the same class of problem as an unwritable run directory.
-        raise errors.EnvError(f"cannot read the event stream {events_file}: {exc}") from exc
+# Kinds this wrapper knows about and deliberately does not count: the model talking to
+# itself, and the plan it writes for itself. Named explicitly so that "a kind we chose to
+# skip" and "a kind we have never heard of" stay different facts — which is the whole of the
+# drift check in `_codex_stats`.
+CODEX_QUIET_ITEMS = frozenset({"agent_message", "reasoning", "todo_list", "error"})
 
 
 def _whole_number(value: JSONValue) -> int | None:
@@ -501,11 +535,11 @@ def _whole_number(value: JSONValue) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _grok_stats(events_file: Path) -> tuple[int, int | None, int | None]:
+def _grok_stats(events: Iterable[JSONObject]) -> tuple[int, int | None, int | None]:
     calls = 0
     turns: int | None = None
     output_tokens: int | None = None
-    for event in _stream(events_file):
+    for event in events:
         kind = event.get("type")
         if kind == "assistant":
             message = event.get("message")
@@ -517,6 +551,10 @@ def _grok_stats(events_file: Path) -> tuple[int, int | None, int | None]:
                     if isinstance(block, dict) and block.get("type") == GROK_TOOL_BLOCK
                 )
         elif kind == "result":
+            # LAST wins, where the extractor refuses a stream carrying more than one. The
+            # laxity is unreachable rather than a disagreement: `gate` extracts and validates
+            # the answer BEFORE it asks for these numbers, so a multi-`result` stream has
+            # already failed the gate and no caller ever sees the stats taken from it.
             turns = _whole_number(event.get("num_turns"))
             usage = event.get("usage")
             if isinstance(usage, dict):
@@ -524,15 +562,18 @@ def _grok_stats(events_file: Path) -> tuple[int, int | None, int | None]:
     return calls, turns, output_tokens
 
 
-def _codex_stats(events_file: Path) -> tuple[int, int | None, int | None]:
+def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int | None, int | None]:
     seen: set[str] = set()
+    unknown: set[str] = set()
+    total = 0
     calls = 0
     # codex's own turn accounting, which counts one per `exec` turn rather than one per
     # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
     # it is the number codex publishes, not because the two mean the same thing.
     turns = 0
     output_tokens: int | None = None
-    for event in _stream(events_file):
+    for event in events:
+        total += 1
         kind = event.get("type")
         if kind == "turn.started":
             turns += 1
@@ -542,21 +583,54 @@ def _codex_stats(events_file: Path) -> tuple[int, int | None, int | None]:
                 output_tokens = _whole_number(usage.get("output_tokens"))
         elif kind in ("item.started", "item.completed"):
             item = event.get("item")
-            if not isinstance(item, dict) or item.get("type") not in CODEX_TOOL_ITEMS:
+            item_kind = item.get("type") if isinstance(item, dict) else None
+            if not isinstance(item, dict) or not isinstance(item_kind, str):
                 continue
-            # One call, two events. Deduped on the item's own id rather than counted from
-            # `item.completed` alone, so a call the run never finished still counts as
-            # evidence that something was inspected.
+            if item_kind not in CODEX_TOOL_ITEMS:
+                if item_kind not in CODEX_QUIET_ITEMS:
+                    unknown.add(item_kind)
+                continue
+            # ONE CALL, TWO EVENTS, and the count sits inside whichever rule applies rather
+            # than after both — an item with no usable id used to fall past the dedupe and be
+            # counted once per event, which is the fail-OPEN direction.
             ident = item.get("id")
             if isinstance(ident, str):
-                if ident in seen:
-                    continue
-                seen.add(ident)
-            calls += 1
+                # Deduped on the item's own id, so a call the run started and never finished
+                # still counts as evidence that something was inspected.
+                if ident not in seen:
+                    seen.add(ident)
+                    calls += 1
+            elif kind == "item.completed":
+                # No id, so the two events cannot be paired. Count the terminal one only:
+                # counting both would double a single call, and an unfinished id-less call
+                # going uncounted is the safe direction for a number that gates a refusal.
+                calls += 1
+
+    if total == 0:
+        # `codex exec --json` opens every run with `thread.started` and `turn.started`, so a
+        # stream with nothing in it is not a model that did nothing — it is a runner that did
+        # not run, or one whose output shape moved. Saying "the model never opened the diff"
+        # about that would be a diagnosis of the wrong component.
+        raise errors.EnvError(
+            "codex produced no events at all. `codex exec --json` opens every run with a "
+            "thread and a turn, so an empty stream means the runner did not run or its "
+            "output format has changed -- this is not something the model did."
+        )
+    if calls == 0 and unknown:
+        # THE MISDIAGNOSIS THIS PREVENTS. After a provider-CLI upgrade renames its item
+        # kinds, every run counts zero and would otherwise be refused as "the model never
+        # opened the diff" — a falsehood, told identically on every run, about a component
+        # that is working. The wrapper is the broken part and the message says so.
+        raise errors.EnvError(
+            "counted no tool calls, but codex's stream carries item kind(s) this wrapper "
+            f"does not recognise: {', '.join(sorted(unknown))}. That is provider CLI drift, "
+            "not model behaviour -- the tool-kind list in validate.CODEX_TOOL_ITEMS needs to "
+            "catch up before any run through codex can be believed."
+        )
     return calls, turns, output_tokens
 
 
-def run_stats(mode: str, events_file: Path, duration_s: float | None) -> RunStats:
+def run_stats(mode: str, events: Iterable[JSONObject], duration_s: float | None) -> RunStats:
     """Count what the run did, through the event vocabulary its runner actually speaks.
 
     Named modes rather than sniffing the stream's shape. Guessing which schema a file is in
@@ -564,16 +638,25 @@ def run_stats(mode: str, events_file: Path, duration_s: float | None) -> RunStat
     vocabularies share nothing: one is messages carrying content blocks, the other is items
     carrying kinds.
 
+    Takes already-parsed objects rather than a path, so the caller decides where they come
+    from: `gate` reuses the text it has already read when the answer and the evidence are the
+    same file, and streams from disk when they are not.
+
     `duration_s` is measured by the caller rather than read from the stream. Only one of the
     two providers publishes a duration, and a field that means a different thing depending on
     who produced it is worse than one that means the same thing everywhere.
     """
-    if mode == "grok-events":
-        calls, turns, tokens = _grok_stats(events_file)
-    elif mode == "codex-events":
-        calls, turns, tokens = _codex_stats(events_file)
+    if mode == "grok-messages":
+        calls, turns, tokens = _grok_stats(events)
+    elif mode == "codex-items":
+        calls, turns, tokens = _codex_stats(events)
     else:
-        fail(f"unknown event mode {mode!r}")
+        # The MACHINE, not the model. An events mode this module does not implement is a
+        # mis-wired build, and reporting it as a gate failure would blame the answer for a
+        # defect in the wrapper — the same misdiagnosis the drift check above exists to stop.
+        raise errors.EnvError(
+            f"unknown event mode {mode!r}; this build cannot count what its own provider did"
+        )
     return RunStats(tool_calls=calls, turns=turns, output_tokens=tokens, duration_s=duration_s)
 
 
@@ -581,7 +664,7 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _evidence(stats: RunStats) -> str:
+def describe_run(stats: RunStats) -> str:
     """The counts behind a refusal, in one clause. A refusal nobody can check is a rumour."""
     parts: list[str] = []
     if stats.turns is not None:
@@ -634,6 +717,51 @@ def write_provenance(path: Path, pairs: list[str], files: dict[str, str], stats:
     path.write_text(json.dumps(record, indent=1, sort_keys=True), encoding="utf-8")
 
 
+# The sidecar's name, derived from the findings artifact's. `cli.ARTIFACT_SUFFIXES` builds
+# the same path from the other end; both sit on `<stem>` and this is the only place that has
+# to turn one into the other.
+PROVENANCE_SUFFIX = "-provenance.json"
+
+
+def refused_run(artifact: Path) -> RunStats | None:
+    """The run behind this artifact, IF its provenance records no tool calls at all.
+
+    The reading counterpart to `write_provenance`, here so one module owns the sidecar's
+    shape from both ends rather than two agreeing by memory.
+
+    This exists because a refusal has to survive being handed on. `gate` refuses a vacuous
+    run with exit 6 and keeps the artifact as evidence — and an artifact on disk is exactly
+    what the retrieval command renders, cheerfully and at exit 0. The refusal was laundered
+    by this package's own reader, so the reader has to be able to see it too.
+
+    `None` means "nothing here says this run was vacuous": no sidecar, an unreadable or
+    malformed one, or one recording at least one tool call. Only a POSITIVE reading refuses,
+    because the sidecar is a record rather than a gate — an artifact written before this
+    field existed, or one a person assembled by hand, must still render.
+    """
+    sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
+    try:
+        record = loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    stats = record.get("run_stats") if isinstance(record, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    calls = _whole_number(stats.get("tool_calls"))
+    if calls != 0:
+        return None
+    return RunStats(
+        tool_calls=calls,
+        turns=_whole_number(stats.get("turns")),
+        output_tokens=_whole_number(stats.get("output_tokens")),
+        duration_s=_seconds(stats.get("duration_s")),
+    )
+
+
+def _seconds(value: JSONValue) -> float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def extract(mode: str, text: str) -> Artifact:
     """Recover the model's answer through the channel its runner actually provides.
 
@@ -660,13 +788,15 @@ def gate(
     provenance_out: Path,
     prov_pairs: list[str],
     prov_files: dict[str, str],
-    stats: RunStats,
+    evidence: Evidence,
     label: str,
 ) -> int:
     """Validate a run's answer and write its artifacts. Returns the process exit status.
 
     Raises `VacuousRun` when the run made no tool calls — after the artifacts are written,
     because that dud IS the evidence and a caller has to be able to look at what it refused.
+    Raises `EnvError` when the stream cannot be counted at all, which is a fact about this
+    build or the provider CLI rather than about the model, and must not be told as one.
     """
     try:
         text = answer_file.read_text(encoding="utf-8", errors="replace")
@@ -679,6 +809,21 @@ def gate(
     except GateError as exc:
         print(f"{label}: {exc}", file=sys.stderr)
         return 1
+
+    # WHAT THE RUN DID. Counted after the answer is validated, so a stream carrying two
+    # terminal events has already been refused, and BEFORE any artifact is written, so a
+    # stream this build cannot count leaves nothing behind that a caller could believe.
+    #
+    # grok's answer arrives inside its event stream, which is why `answer_file` and
+    # `events_file` are then one path: the text above IS the whole stream, and counting from
+    # it costs one read of a ~1.4 MB file rather than two.
+    stats = run_stats(
+        evidence.mode,
+        objects(text.splitlines())
+        if evidence.events_file == answer_file
+        else file_objects(evidence.events_file),
+        evidence.duration_s,
+    )
 
     # Findings first, provenance second: the sidecar's job is attesting THIS artifact, so it
     # must never be the only thing on disk.
@@ -695,10 +840,14 @@ def gate(
     # calling agent's decision and its budget; this command's job is to refuse to certify,
     # and a wrapper that silently re-ran would hide how often this happens.
     if stats.tool_calls == 0:
+        # The PROVENANCE sidecar, not the findings file. Naming the findings file here was a
+        # laundering route: it invited the caller to open the very artifact just refused, and
+        # `ce-persona-findings` would render it as an ordinary review. The sidecar is the
+        # record of WHY it was refused, and it is the only one of the two safe to read.
         raise errors.VacuousRun(
             f"refusing to report {count} findings from a run that made no tool calls "
-            f"({_evidence(stats)}). The model never opened the diff, so nothing it "
-            f"reported is founded; the artifacts are kept at {findings_out} as evidence."
+            f"({describe_run(stats)}). The model never opened the diff, so nothing it "
+            f"reported is founded; the evidence is {provenance_out}."
         )
 
     entries = found.get("findings")
