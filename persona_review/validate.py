@@ -33,13 +33,24 @@ reliably tell "the model's answer" from "text the model quoted" by scanning outp
 remaining modes read a channel the RUNNER delimits, so the question never arises. A runner
 that cannot provide one is unsupported rather than supported badly.
 
+ONE QUESTION ABOUT THE ANSWER, ONE ABOUT THE RUN
+------------------------------------------------
+The schema rules judge what the model SAID. `run_stats` counts what it DID, from the event
+stream the wrapper already keeps, and `gate` refuses a run that made zero tool calls: a
+reviewer that never opened a file cannot certify anything, and its findings are unfounded
+whether the array is empty or full. Exactly zero is the threshold, with no configurable
+floor — "did this run inspect anything" has an answer, while "did it inspect enough" is a
+judgement this package is not entitled to make.
+
 WHAT THIS DOES NOT COVER
 ------------------------
-A well-formed but EMPTY findings array is schema-valid and stays valid: distinguishing
-"found nothing" from "quietly gave up" needs a judgement about the transcript this does not
-attempt. The grok path narrows that gap from one side by checking the run's own terminal
-status before believing its answer, but `stop_reason` is an open vocabulary and the denylist
-cannot be exhaustive.
+A well-formed but EMPTY findings array from a run that DID inspect the code is schema-valid
+and stays valid: distinguishing "found nothing" from "looked, then gave up" needs a
+judgement about the transcript this does not attempt. Two checks narrow that gap from either
+side and neither closes it — the grok path reads the run's own terminal status before
+believing its answer, but `stop_reason` is an open vocabulary and the denylist cannot be
+exhaustive; the tool-call count catches a run that inspected nothing at all, but one tool
+call is not diligence.
 """
 
 from __future__ import annotations
@@ -49,6 +60,8 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -410,6 +423,177 @@ def from_grok_events(text: str) -> Artifact:
     fail("grok's result event carried no structured output")
 
 
+@dataclass(frozen=True)
+class RunStats:
+    """What a run DID, as opposed to what it said.
+
+    `tool_calls` is an int and is never None, because it is the only field here that gates
+    anything: "the adapter could not tell" is not an answer this package is entitled to
+    give. A stream carrying nothing this module recognises counts zero and the run is
+    refused; a stream that cannot be READ is an environment error rather than a quiet zero,
+    because the two have different causes and only one of them is about the model. The rest
+    are provenance — best effort, and None where a provider publishes no comparable number.
+    """
+
+    tool_calls: int
+    turns: int | None
+    output_tokens: int | None
+    duration_s: float | None
+
+
+# A tool call in grok's stream is a `tool_use` content block inside an ASSISTANT message.
+# The matching `tool_result` comes back in a `user` message, so counting blocks without
+# looking at the event type would double every total. Verified against grok 1.0.13: one real
+# review carried 99 `tool_use` blocks across 31 turns.
+GROK_TOOL_BLOCK = "tool_use"
+
+# codex's `--json` stream is items rather than messages: one `item.started` and one
+# `item.completed` per call, both carrying the same `item.id`. These are the kinds that
+# reach outside the model; `agent_message` and `reasoning` are the model talking to itself
+# and are deliberately absent. Verified against codex-cli 0.150.1.
+#
+# An unrecognised kind is NOT counted, and that is the fail-closed direction on purpose: a
+# provider that renames its vocabulary makes every run refuse loudly, rather than certifying
+# a review nobody can show happened.
+CODEX_TOOL_ITEMS = frozenset(
+    {
+        "command_execution",
+        "custom_tool_call",
+        "file_change",
+        "function_call",
+        "local_shell_call",
+        "mcp_tool_call",
+        "patch_apply",
+        "todo_list",
+        "web_search",
+    }
+)
+
+
+def _stream(events_file: Path) -> Iterator[JSONObject]:
+    """Every JSON object in a run's event stream, one line at a time.
+
+    Streamed rather than read whole: a real stream is around a megabyte and its size is the
+    provider's decision, not this package's. A line that does not parse is skipped, because
+    the stream is append-only and a killed run leaves a partial last line — a condition the
+    watchdogs have already judged, and not one to re-decide here.
+    """
+    try:
+        with events_file.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    event = loads(text)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    yield event
+    except OSError as exc:
+        # The machine, not the answer: this process wrote the file moments ago, so failing
+        # to read it back is the same class of problem as an unwritable run directory.
+        raise errors.EnvError(f"cannot read the event stream {events_file}: {exc}") from exc
+
+
+def _whole_number(value: JSONValue) -> int | None:
+    """A count a provider reported, or None. `True` is an `int` in Python and is not one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _grok_stats(events_file: Path) -> tuple[int, int | None, int | None]:
+    calls = 0
+    turns: int | None = None
+    output_tokens: int | None = None
+    for event in _stream(events_file):
+        kind = event.get("type")
+        if kind == "assistant":
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                calls += sum(
+                    1
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == GROK_TOOL_BLOCK
+                )
+        elif kind == "result":
+            turns = _whole_number(event.get("num_turns"))
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                output_tokens = _whole_number(usage.get("output_tokens"))
+    return calls, turns, output_tokens
+
+
+def _codex_stats(events_file: Path) -> tuple[int, int | None, int | None]:
+    seen: set[str] = set()
+    calls = 0
+    # codex's own turn accounting, which counts one per `exec` turn rather than one per
+    # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
+    # it is the number codex publishes, not because the two mean the same thing.
+    turns = 0
+    output_tokens: int | None = None
+    for event in _stream(events_file):
+        kind = event.get("type")
+        if kind == "turn.started":
+            turns += 1
+        elif kind == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                output_tokens = _whole_number(usage.get("output_tokens"))
+        elif kind in ("item.started", "item.completed"):
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") not in CODEX_TOOL_ITEMS:
+                continue
+            # One call, two events. Deduped on the item's own id rather than counted from
+            # `item.completed` alone, so a call the run never finished still counts as
+            # evidence that something was inspected.
+            ident = item.get("id")
+            if isinstance(ident, str):
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            calls += 1
+    return calls, turns, output_tokens
+
+
+def run_stats(mode: str, events_file: Path, duration_s: float | None) -> RunStats:
+    """Count what the run did, through the event vocabulary its runner actually speaks.
+
+    Named modes rather than sniffing the stream's shape. Guessing which schema a file is in
+    is the same undecidable move as scanning prose for the model's answer, and the two event
+    vocabularies share nothing: one is messages carrying content blocks, the other is items
+    carrying kinds.
+
+    `duration_s` is measured by the caller rather than read from the stream. Only one of the
+    two providers publishes a duration, and a field that means a different thing depending on
+    who produced it is worse than one that means the same thing everywhere.
+    """
+    if mode == "grok-events":
+        calls, turns, tokens = _grok_stats(events_file)
+    elif mode == "codex-events":
+        calls, turns, tokens = _codex_stats(events_file)
+    else:
+        fail(f"unknown event mode {mode!r}")
+    return RunStats(tool_calls=calls, turns=turns, output_tokens=tokens, duration_s=duration_s)
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _evidence(stats: RunStats) -> str:
+    """The counts behind a refusal, in one clause. A refusal nobody can check is a rumour."""
+    parts: list[str] = []
+    if stats.turns is not None:
+        parts.append(_plural(stats.turns, "turn"))
+    parts.append(_plural(stats.tool_calls, "tool call"))
+    if stats.duration_s is not None:
+        parts.append(f"{stats.duration_s:.1f}s")
+    if stats.output_tokens is not None:
+        parts.append(f"{stats.output_tokens} output tokens")
+    return ", ".join(parts)
+
+
 def _sha256(filename: str) -> str:
     """Content hash, or a recorded reason. An unreadable asset is provenance too, and must
     not abort a review that already ran."""
@@ -419,13 +603,17 @@ def _sha256(filename: str) -> str:
         return f"unreadable: {exc}"
 
 
-def write_provenance(path: Path, pairs: list[str], files: dict[str, str]) -> None:
-    """Record which brief and schema this run used, by content hash.
+def write_provenance(path: Path, pairs: list[str], files: dict[str, str], stats: RunStats) -> None:
+    """Record which brief and schema this run used, by content hash, and what it did.
 
     Two arms are only comparable if they ran the same brief, and briefs live in a plugin
     cache that updates underneath us, so without this the drift between two runs is
     invisible and a comparison silently stops meaning anything. A sidecar, so the findings
     artifact keeps exactly the shape the plugin's fold-in expects.
+
+    `stats` is required rather than optional: it is what the exit status turns on, and a
+    caller that could forget to pass it would silently get a record attesting nothing about
+    whether the run inspected anything.
     """
     record: JSONObject = {}
     for pair in pairs:
@@ -434,6 +622,15 @@ def write_provenance(path: Path, pairs: list[str], files: dict[str, str]) -> Non
     for key, filename in files.items():
         record[f"{key}_file"] = filename
         record[f"{key}_sha256"] = _sha256(filename)
+    # WHAT THE RUN DID, beside what produced it. `tool_calls` decides the exit status, so it
+    # is written down rather than only acted on: a refusal a caller cannot audit afterwards
+    # is one it has to take on trust.
+    record["run_stats"] = {
+        "tool_calls": stats.tool_calls,
+        "turns": stats.turns,
+        "output_tokens": stats.output_tokens,
+        "duration_s": stats.duration_s,
+    }
     path.write_text(json.dumps(record, indent=1, sort_keys=True), encoding="utf-8")
 
 
@@ -463,9 +660,14 @@ def gate(
     provenance_out: Path,
     prov_pairs: list[str],
     prov_files: dict[str, str],
+    stats: RunStats,
     label: str,
 ) -> int:
-    """Validate a run's answer and write its artifacts. Returns the process exit status."""
+    """Validate a run's answer and write its artifacts. Returns the process exit status.
+
+    Raises `VacuousRun` when the run made no tool calls — after the artifacts are written,
+    because that dud IS the evidence and a caller has to be able to look at what it refused.
+    """
     try:
         text = answer_file.read_text(encoding="utf-8", errors="replace")
         try:
@@ -481,7 +683,23 @@ def gate(
     # Findings first, provenance second: the sidecar's job is attesting THIS artifact, so it
     # must never be the only thing on disk.
     findings_out.write_text(json.dumps(found, indent=1), encoding="utf-8")
-    write_provenance(provenance_out, prov_pairs, prov_files)
+    write_provenance(provenance_out, prov_pairs, prov_files, stats)
+
+    # A reviewer that made ZERO tool calls never opened the diff, so it has no verdict to
+    # summarize: empty findings and a page of them are equally unfounded. Decided here, ahead
+    # of the summary the rest of this function builds — a gating caller reads only the status,
+    # and a line saying "0 findings" beside a status saying "refused" is the exact ambiguity
+    # being closed.
+    #
+    # Deliberately no retry here. Whether to spend another full-effort model run is the
+    # calling agent's decision and its budget; this command's job is to refuse to certify,
+    # and a wrapper that silently re-ran would hide how often this happens.
+    if stats.tool_calls == 0:
+        raise errors.VacuousRun(
+            f"refusing to report {count} findings from a run that made no tool calls "
+            f"({_evidence(stats)}). The model never opened the diff, so nothing it "
+            f"reported is founded; the artifacts are kept at {findings_out} as evidence."
+        )
 
     entries = found.get("findings")
     tally: dict[str, int] = {}
@@ -491,6 +709,7 @@ def gate(
             key = severity if isinstance(severity, str) else "?"
             tally[key] = tally.get(key, 0) + 1
     breakdown = ", ".join(f"{n} {sev}" for sev, n in sorted(tally.items()))
+
     # stdout is the caller's context: one line, never the transcript. Severity counts first
     # so a caller can triage without opening the artifact at all.
     #

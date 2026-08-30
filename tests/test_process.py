@@ -135,17 +135,81 @@ sys.exit(spec.get("exit", 0))
 """
 
 
-def grok_stream(payload: str | None = None, **result: Any) -> str:
+# One tool call, in each provider's own event vocabulary. A stream WITHOUT one is a run that
+# inspected nothing, which the wrapper now refuses with exit 6 — so a fixture standing in for
+# a real review has to carry one, and the fixtures that deliberately omit it are testing the
+# refusal rather than forgetting to be realistic.
+#
+# Both shapes are copied from real runs: grok 1.0.13 (a `tool_use` content block inside an
+# assistant message) and codex-cli 0.150.1 (`item.started`/`item.completed` around an item
+# whose `type` names a tool).
+GROK_TOOL_CALL = json.dumps(
+    {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"p": "f.py"}}
+            ]
+        },
+    }
+)
+CODEX_TOOL_CALL = "\n".join(
+    json.dumps(
+        {
+            "type": kind,
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "git diff",
+                "status": status,
+            },
+        }
+    )
+    for kind, status in (("item.started", "in_progress"), ("item.completed", "completed"))
+)
+
+
+def grok_stream(payload: str | None = None, *, tool_call: bool = False, **result: Any) -> str:
     event: dict[str, Any] = {
         "type": "result",
         "is_error": False,
         "subtype": "success",
         "stop_reason": "end_turn",
+        "num_turns": 3,
+        "usage": {"output_tokens": 4096},
     }
     if payload is not None:
         event["structured_output"] = json.loads(payload)
     event.update(result)
-    return '{"type":"system","subtype":"init"}\n' + json.dumps(event) + "\n"
+    head = '{"type":"system","subtype":"init"}\n'
+    if tool_call:
+        head += GROK_TOOL_CALL + "\n"
+    return head + json.dumps(event) + "\n"
+
+
+def codex_stream(*, tool_call: bool = False) -> str:
+    """codex's `--json` stream: a thread, a turn, an agent message, optionally a tool call.
+
+    codex's ANSWER never travels here — `-o` writes it to its own file — so this exists only
+    as the evidence of what the run did. The agent message and the turn are always present,
+    which is what makes the tool-call arm the single variable.
+    """
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+    ]
+    if tool_call:
+        lines.append(CODEX_TOOL_CALL)
+    lines.append(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_9", "type": "agent_message", "text": "done"},
+            }
+        )
+    )
+    lines.append(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 4096}}))
+    return "\n".join(lines) + "\n"
 
 
 class Harness:
@@ -281,14 +345,21 @@ class Harness:
         BOTH streams carry the leak marker. The grok fixture used to be marker-free, so the
         "transcript never reaches stdout" assertion could not have failed for the grok arm
         however the event stream was routed.
+
+        Both also carry a TOOL CALL, because a run that made none is refused: a fixture
+        without one would be a dud review, and every test built on this would be asserting
+        against the refusal path by accident.
         """
         if provider == "grok":
             self.set_spec(
                 stdout='{"type":"assistant","text":"transcript the caller must never see"}\n'
-                + grok_stream(ANSWER)
+                + grok_stream(ANSWER, tool_call=True)
             )
         else:
-            self.set_spec(stdout="transcript the caller must never see\n", last=ANSWER)
+            self.set_spec(
+                stdout=codex_stream(tool_call=True) + "transcript the caller must never see\n",
+                last=ANSWER,
+            )
 
     def artifact(self, provider: str) -> Path:
         return self.run_dir / f"adversarial-reviewer-{provider}.json"
@@ -471,17 +542,21 @@ class TestGate(Harness):
         assert proc.returncode == 1, proc.stdout
 
     def test_an_empty_structured_output_is_the_documented_gap(self):
-        # Executable documentation of the ONE hole this package does not close, on the exact
+        # Executable documentation of the hole this package does not close, on the exact
         # channel production uses: a healthy terminal event carrying a schema-valid EMPTY
-        # findings object is accepted, because "found nothing" and "quietly gave up" are
+        # findings object is accepted, because "found nothing" and "looked, then gave up" are
         # indistinguishable without judging the transcript.
         #
         # It is asserted rather than left implicit so that closing it later fails loudly
         # here, and so no other test can be read as already covering it.
+        #
+        # The stream carries a TOOL CALL, and that is the whole remaining gap: a run that made
+        # none is refused with 6 (TestVacuousRuns), so without one this would be documenting
+        # the refusal rather than the gap and the hole would look closed when it is not.
         empty = json.dumps(
             {"reviewer": "adversarial", "findings": [], "residual_risks": [], "testing_gaps": []}
         )
-        self.set_spec(stdout=grok_stream(empty))
+        self.set_spec(stdout=grok_stream(empty, tool_call=True))
         proc = self.review("grok", "adversarial-reviewer")
         assert proc.returncode == 0, proc.stderr
         assert "0 findings" in proc.stdout
@@ -514,6 +589,73 @@ class TestGate(Harness):
         proc = self.review("codex", "adversarial-reviewer")
         assert proc.returncode == 1, proc.stdout
         assert not self.artifact("codex").exists()
+
+
+class TestVacuousRuns(Harness):
+    """A run that made no tool calls read nothing, so it certified nothing.
+
+    From the production incident this closes: one turn, zero tool calls, thinking truncated
+    mid-sentence, 151 output tokens, four and a half seconds — and a schema-valid
+    `{"findings": []}` that exited 0. A gating caller branching on the documented contract
+    ("0 = schema-valid findings, an empty array is valid") read that as CLEAN.
+    """
+
+    EMPTY = json.dumps(
+        {"reviewer": "adversarial", "findings": [], "residual_risks": [], "testing_gaps": []}
+    )
+
+    def review_dud(self, provider: str, answer: str) -> subprocess.CompletedProcess[str]:
+        """Run a provider that answers without touching anything: the incident's shape."""
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(answer, num_turns=1, usage={"output_tokens": 151}))
+        else:
+            self.set_spec(stdout=codex_stream(), last=answer)
+        return self.review(provider, "adversarial-reviewer")
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_run_with_no_tool_calls_is_refused_although_its_answer_is_valid(self, provider: str):
+        proc = self.review_dud(provider, self.EMPTY)
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        # NOT the summary line. "0 findings -> <path>" beside a refusal is the exact
+        # ambiguity being closed, and a caller that reads stdout must see nothing to relay.
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "no tool calls" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_findings_from_a_run_with_no_tool_calls_are_refused_too(self, provider: str):
+        # The half that is easy to get wrong. Refusing only EMPTY findings would treat a
+        # populated array as evidence the model worked — but a model that read nothing and
+        # reported a P1 has hallucinated it, and that is worse than reporting nothing.
+        proc = self.review_dud(provider, ANSWER)
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_refusal_names_the_evidence_and_keeps_the_artifacts(self, provider: str):
+        # A refusal a caller cannot audit is a rumour. The counts go on stderr and the dud
+        # itself stays on disk, because it is the only record of what was refused.
+        proc = self.review_dud(provider, self.EMPTY)
+        assert proc.returncode == 6
+        assert "0 tool calls" in proc.stderr, proc.stderr
+        assert self.artifact(provider).is_file(), "the refused artifact must be kept as evidence"
+        record = json.loads(self.provenance(provider).read_text(encoding="utf-8"))
+        assert record["run_stats"]["tool_calls"] == 0, record["run_stats"]
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_one_tool_call_is_enough_and_the_stats_are_recorded(self, provider: str):
+        # THE CONTROL, and it is load-bearing twice over: without it every assertion above
+        # would also hold for a wrapper that refused every run, and `tool_calls` could be
+        # hardcoded to 0 with the whole class still green.
+        self.good_answer(provider)
+        proc = self.review(provider, "adversarial-reviewer")
+        assert proc.returncode == 0, proc.stderr
+        assert "1 P1" in proc.stdout
+        stats = json.loads(self.provenance(provider).read_text(encoding="utf-8"))["run_stats"]
+        assert stats["tool_calls"] == 1, stats
+        assert stats["output_tokens"] == 4096, stats
+        # Measured by the wrapper rather than read from the stream, so it is real for both
+        # providers even though only one of them publishes a duration.
+        assert isinstance(stats["duration_s"], float) and stats["duration_s"] > 0, stats
 
 
 class TestExitStatus(Harness):
@@ -603,7 +745,7 @@ class TestExitStatus(Harness):
     def test_help_exits_zero_and_documents_the_exit_table(self, provider: str):
         proc = self.review(provider, "--help")
         assert proc.returncode == 0
-        for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "78 "):
+        for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "78 "):
             assert code in proc.stdout
         assert "CE_PERSONA_IDLE_SECS" in proc.stdout
 

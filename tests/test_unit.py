@@ -141,6 +141,11 @@ def _help_text() -> str:
 
 EMPTY_EXAMPLE = json.dumps(artifact())
 
+# A run that DID inspect something. Every gate test that is not about the tool-call refusal
+# has to carry one, because a run with zero tool calls is refused before the summary line —
+# so a zero here would quietly turn those tests into assertions about the refusal.
+STATS = validate.RunStats(tool_calls=7, turns=4, output_tokens=4096, duration_s=61.5)
+
 # A placeholder for a per-test fixture path inside a parametrize table, which is evaluated at
 # import time and so cannot see instance state. Compared with `is`, never `==`.
 ARTIFACT = "<the artifact under test>"
@@ -465,6 +470,221 @@ class TestGrokRunGating:
         assert got["findings"] == []
         with pytest.raises(validate.GateError):
             validate.from_grok_events(self._events(result="I gave up. " + EMPTY_EXAMPLE))
+
+
+class TestRunEvidence:
+    """What the run DID, counted from its own event stream.
+
+    The incident this closes: grok returned a schema-valid EMPTY findings artifact from one
+    turn, zero tool calls, 151 output tokens and four and a half seconds, and exited 0.
+    Nothing about the ANSWER separated that from a clean review — only the transcript did,
+    and the exit status a gating caller branches on said CLEAN.
+
+    Both fixtures below are the shapes of real runs: grok 1.0.13 and codex-cli 0.150.1.
+    """
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _events(self, *lines: str) -> Path:
+        path = self.dir / "events.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _grok_tool_call(name: str = "read_file") -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "..."},
+                        {"type": "tool_use", "id": f"toolu_{name}", "name": name, "input": {}},
+                    ]
+                },
+            }
+        )
+
+    @staticmethod
+    def _grok_result(**over: Any) -> str:
+        event: dict[str, Any] = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "stop_reason": "end_turn",
+            "num_turns": 3,
+            "usage": {"output_tokens": 4096},
+        }
+        event.update(over)
+        return json.dumps(event)
+
+    @staticmethod
+    def _codex_item(kind: str, item_type: str, ident: str) -> str:
+        return json.dumps({"type": kind, "item": {"id": ident, "type": item_type}})
+
+    def test_grok_counts_tool_use_blocks_and_reads_the_run_s_own_numbers(self):
+        path = self._events(
+            '{"type":"system","subtype":"init"}',
+            self._grok_tool_call("grep"),
+            self._grok_tool_call("read_file"),
+            self._grok_result(),
+        )
+        stats = validate.run_stats("grok-events", path, 12.5)
+        assert stats.tool_calls == 2
+        assert (stats.turns, stats.output_tokens, stats.duration_s) == (3, 4096, 12.5)
+
+    def test_grok_does_not_count_the_tool_results_coming_back(self):
+        # Every call is echoed as a `tool_result` block inside a USER message. Counting
+        # content blocks without looking at the event type doubles every total, which would
+        # make one real call look like two and — worse — make a stream of nothing but
+        # results look like work.
+        echo = json.dumps(
+            {
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_x"}]},
+            }
+        )
+        path = self._events(self._grok_tool_call(), echo, self._grok_result())
+        assert validate.run_stats("grok-events", path, None).tool_calls == 1
+
+    def test_the_incident_stream_counts_zero(self):
+        # The shape of the run that started this: one assistant turn carrying thinking and
+        # text, no tool_use anywhere, a healthy terminal event, 151 output tokens. The real
+        # stream produces the same counts — checked against the kept artifact, not inferred.
+        answered = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "The user wants me to review a diff"},
+                        {"type": "text", "text": EMPTY_EXAMPLE},
+                    ]
+                },
+            }
+        )
+        path = self._events(
+            '{"type":"system","subtype":"init"}',
+            answered,
+            self._grok_result(num_turns=1, usage={"output_tokens": 151}),
+        )
+        stats = validate.run_stats("grok-events", path, 4.5)
+        assert stats.tool_calls == 0
+        assert (stats.turns, stats.output_tokens) == (1, 151)
+
+    def test_codex_counts_one_call_per_item_not_one_per_event(self):
+        # codex emits `item.started` AND `item.completed` for the same call, both carrying
+        # the same id. Counting events rather than items doubles every total.
+        path = self._events(
+            '{"type":"thread.started","thread_id":"th_1"}',
+            '{"type":"turn.started"}',
+            self._codex_item("item.started", "command_execution", "item_1"),
+            self._codex_item("item.completed", "command_execution", "item_1"),
+            self._codex_item("item.started", "command_execution", "item_2"),
+            self._codex_item("item.completed", "command_execution", "item_2"),
+            '{"type":"turn.completed","usage":{"output_tokens":19278}}',
+        )
+        stats = validate.run_stats("codex-events", path, 90.0)
+        assert stats.tool_calls == 2
+        assert (stats.turns, stats.output_tokens) == (1, 19278)
+
+    def test_codex_does_not_mistake_the_model_talking_to_itself_for_a_tool_call(self):
+        # `agent_message` and `reasoning` are items too. A count that took every item would
+        # certify a run that only ever thought and answered — precisely the dud shape.
+        path = self._events(
+            '{"type":"turn.started"}',
+            self._codex_item("item.completed", "agent_message", "item_0"),
+            self._codex_item("item.completed", "reasoning", "item_1"),
+            '{"type":"turn.completed","usage":{"output_tokens":151}}',
+        )
+        assert validate.run_stats("codex-events", path, None).tool_calls == 0
+
+    def test_an_item_kind_this_gate_does_not_know_is_not_counted(self):
+        # Fail-closed on drift: an unrecognised kind counts nothing, so a renamed vocabulary
+        # refuses every run loudly instead of certifying reviews nobody can show happened.
+        path = self._events(
+            self._codex_item("item.completed", "some_future_kind", "item_1"),
+            '{"type":"turn.completed"}',
+        )
+        assert validate.run_stats("codex-events", path, None).tool_calls == 0
+
+    def test_a_partial_last_line_is_skipped_rather_than_fatal(self):
+        # The stream is append-only and a killed run leaves a half-written line. That is a
+        # condition the watchdogs already judged; re-deciding it here would fail runs that
+        # completed.
+        path = self._events(self._grok_tool_call(), self._grok_result(), '{"type":"assi')
+        assert validate.run_stats("grok-events", path, None).tool_calls == 1
+
+    def test_an_unreadable_stream_is_an_environment_error_not_a_silent_zero(self):
+        # It must not fall through to zero and refuse the run with the wrong reason: this
+        # process wrote that file moments ago, so failing to read it back is the machine's
+        # problem, not the model's.
+        with pytest.raises(errors.EnvError):
+            validate.run_stats("grok-events", self.dir / "never-written.jsonl", None)
+
+    def test_an_unknown_event_mode_is_refused(self):
+        with pytest.raises(validate.GateError) as caught:
+            validate.run_stats("transcript", self._events("{}"), None)
+        assert "unknown event mode" in str(caught.value)
+
+    def test_every_provider_names_a_mode_this_module_understands(self):
+        # The drift control. `events_mode` is declared in providers.py and dispatched here,
+        # so the two are free to disagree — and the failure would be a provider whose runs
+        # all refuse, or worse, one whose evidence is never counted.
+        path = self._events(self._grok_tool_call(), self._grok_result())
+        for provider in providers.PROVIDERS.values():
+            validate.run_stats(provider.events_mode, path, None)
+
+
+class TestTheGateRefusesARunThatInspectedNothing:
+    """Zero tool calls is not a small number of tool calls; it is no review at all."""
+
+    def _gate(self, tmp: Path, answer: str, stats: validate.RunStats) -> tuple[int, str, str]:
+        (tmp / "answer.txt").write_text(answer, encoding="utf-8")
+        (tmp / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = validate.gate(
+                    answer_file=tmp / "answer.txt",
+                    schema_path=tmp / "schema.json",
+                    mode="object",
+                    findings_out=tmp / "out.json",
+                    provenance_out=tmp / "prov.json",
+                    prov_pairs=[],
+                    prov_files={},
+                    stats=stats,
+                    label="ce-persona",
+                )
+            except errors.VacuousRun as exc:
+                return exc.exit_code, out.getvalue(), str(exc)
+        return code, out.getvalue(), err.getvalue()
+
+    @pytest.mark.parametrize(
+        "answer", [EMPTY_EXAMPLE, json.dumps(artifact(finding(severity="P0")))]
+    )
+    def test_no_tool_calls_is_refused_whether_or_not_it_reported_findings(self, answer: str):
+        # Both arms, because refusing only the EMPTY one would read a populated array as
+        # evidence the model worked. A model that read nothing and reported a P0 invented it.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, validate.RunStats(0, 1, 151, 4.5))
+            assert code == 6, message
+            assert out == "", "the summary line must not be printed for a refused run"
+            assert "no tool calls" in message
+            # The artifacts survive: the dud IS the evidence of what was refused.
+            record = json.loads((Path(tmp) / "prov.json").read_text(encoding="utf-8"))
+        assert record["run_stats"]["tool_calls"] == 0
+
+    def test_one_tool_call_is_enough(self):
+        # The control. Without it every assertion above holds for a gate that refuses
+        # everything, which is the same cannot-fail defect in the other direction.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._gate(Path(tmp), EMPTY_EXAMPLE, validate.RunStats(1, 1, 151, 4.5))
+        assert code == 0, err
+        assert "0 findings" in out
 
 
 class TestAssets:
@@ -801,7 +1021,9 @@ class TestProvenance:
             odd = Path(tmp) / 'we"ird\\name.md'
             odd.write_text("brief", encoding="utf-8")
             out = Path(tmp) / "prov.json"
-            validate.write_provenance(out, ["provider=grok", "base_ref="], {"persona": str(odd)})
+            validate.write_provenance(
+                out, ["provider=grok", "base_ref="], {"persona": str(odd)}, STATS
+            )
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["provider"] == "grok"
         assert record["base_ref"] == ""
@@ -811,9 +1033,23 @@ class TestProvenance:
     def test_an_unreadable_asset_is_recorded_not_raised(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "prov.json"
-            validate.write_provenance(out, [], {"schema": str(Path(tmp) / "gone.json")})
+            validate.write_provenance(out, [], {"schema": str(Path(tmp) / "gone.json")}, STATS)
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["schema_sha256"].startswith("unreadable:")
+
+    def test_what_the_run_did_is_recorded_beside_what_produced_it(self):
+        # `tool_calls` decides the exit status, so it has to be auditable after the fact:
+        # a refusal a caller cannot check is one it has to take on trust.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prov.json"
+            validate.write_provenance(out, [], {}, validate.RunStats(0, 1, 151, 4.5))
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["run_stats"] == {
+            "tool_calls": 0,
+            "turns": 1,
+            "output_tokens": 151,
+            "duration_s": 4.5,
+        }
 
 
 class TestSettings:
@@ -910,12 +1146,14 @@ class TestErrorVocabulary:
         assert errors.EnvError.exit_code == cli.EXIT_ENV
         assert errors.RunnerError.exit_code == cli.EXIT_RUNNER
         assert errors.RunTimeout.exit_code == cli.EXIT_TIMEOUT
+        assert errors.VacuousRun.exit_code == cli.EXIT_VACUOUS
         assert errors.BudgetError.exit_code == cli.EXIT_BUDGET
         # LITERALS, because the codes are the published contract. An assertion written only
         # against the module's own constants moves with them: mutation testing caught exactly
         # that elsewhere, where redefining EXIT_USAGE to 1 left the suite green.
         assert (cli.EXIT_GATE, cli.EXIT_USAGE, cli.EXIT_ENV) == (1, 2, 3)
-        assert (cli.EXIT_RUNNER, cli.EXIT_TIMEOUT, cli.EXIT_BUDGET) == (4, 5, 78)
+        assert (cli.EXIT_RUNNER, cli.EXIT_TIMEOUT, cli.EXIT_VACUOUS) == (4, 5, 6)
+        assert cli.EXIT_BUDGET == 78
 
 
 class TestTheEnvironmentIsReadInOnePlace:
@@ -1010,6 +1248,7 @@ class TestGateReadsItsSchemaDefensively:
                 provenance_out=tmp / "prov.json",
                 prov_pairs=[],
                 prov_files={},
+                stats=STATS,
                 label="ce-persona",
             )
         return code, err.getvalue()

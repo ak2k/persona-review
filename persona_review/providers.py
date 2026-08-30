@@ -28,6 +28,13 @@ from pathlib import Path
 MODE_GROK_EVENTS = "grok-events"
 MODE_OBJECT = "object"
 
+# How the run's own EVENTS are read, to count what it actually did. A second vocabulary
+# rather than a reuse of the one above, because the two questions have different answers for
+# codex: its ANSWER is a file written by `-o`, while its EVIDENCE is the `codex exec --json`
+# stream. For grok they happen to be the same stream, and the name says so.
+EVENTS_GROK = "grok-events"
+EVENTS_CODEX = "codex-events"
+
 
 @dataclass(frozen=True)
 class Invocation:
@@ -101,6 +108,9 @@ class Provider:
     default_model: str
     default_effort: str
     mode: str
+    # Which event vocabulary the run's stdout stream speaks, so the wrapper can count the
+    # tool calls it made. Both providers write one; the schemas share nothing.
+    events_mode: str
     argv: Callable[[Invocation], list[str]]
     # codex takes its prompt on stdin; grok is given a path and opens the file itself.
     prompt_on_stdin: bool
@@ -126,6 +136,7 @@ GROK = Provider(
     # with the enum needs no change here.
     default_effort="xhigh",
     mode=MODE_GROK_EVENTS,
+    events_mode=EVENTS_GROK,
     argv=_grok_argv,
     prompt_on_stdin=False,
     writes_last_message=False,
@@ -142,6 +153,7 @@ CODEX = Provider(
     # provider's own default, rather than one invented here.
     default_effort="",
     mode=MODE_OBJECT,
+    events_mode=EVENTS_CODEX,
     argv=_codex_argv,
     prompt_on_stdin=True,
     writes_last_message=True,

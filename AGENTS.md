@@ -142,11 +142,18 @@ at every call site. Each has a test; breaking one should fail loudly rather than
 
 ## Things that look like bugs and are not
 
-- **A schema-valid but EMPTY findings array is accepted.** This is the one hole the package
-  does not close, and it is asserted explicitly in
+- **A schema-valid but EMPTY findings array is accepted — from a run that inspected
+  something.** This is the hole the package does not close, and it is asserted explicitly in
   `test_an_empty_structured_output_is_the_documented_gap` so that closing it later fails
   loudly and so no other test can be read as already covering it. "Found nothing" and
-  "quietly gave up" are indistinguishable without judging the transcript.
+  "looked, then gave up" are indistinguishable without judging the transcript.
+
+  What is no longer in the hole: a run that made **zero** tool calls. It read nothing, so its
+  findings are unfounded whether the array is empty or full, and it exits `6` with no summary
+  line. Exactly zero, with no configurable floor — "did this run inspect anything" has an
+  answer, "did it inspect enough" is a judgement this package is not entitled to make. The
+  fixture for the gap test therefore carries a tool call, because without one it would be
+  testing the refusal instead.
 - **`git` is symlinked into the stub directory in `test_process.py`.** The suite runs with a
   PATH that deliberately excludes the real `grok` and `codex`: an early version removed a
   stub, reached the genuine binary, and started a real billed model run from a unit test.
