@@ -45,7 +45,19 @@ necessarily the top row.
 | `3` | environment error: the runner, `git` or the plugin assets are missing, or `CE_PERSONA_RUN_DIR` cannot be created |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
+| `6` | the model answered without making a single tool call — it inspected nothing |
 | `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
+
+The distinctions that matter to a caller are `1`, `4` and `6`. `1` is the model's fault — it
+answered with something that is not findings. `4` is the runner's — it exited non-zero and
+never got that far. **`6` is the one worth retrying**: the model answered, the answer may be
+perfectly schema-valid, and it made zero tool calls, so it never opened the diff and
+certified nothing — empty findings or a page of them. That is a run that happened, not a
+hypothetical: one turn, 151 output tokens, four and a half seconds, `{"findings": []}`, exit
+`0`. Nothing is wrong with the machine or the invocation, so the same command is worth
+running once; a second `6` says something about the model rather than about the code. The
+wrapper does not retry for you, deliberately — another full-effort run is the caller's
+budget to spend.
 
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
 `1` the file is unreadable or is not a findings artifact, `2` usage error.
@@ -131,7 +143,10 @@ append to one events file, and the gate then validates an interleaving of two tr
 
 Each run writes `<persona>-<provider>-provenance.json` beside its findings, recording what produced
 them: the provider, model and effort; the persona brief, the findings schema and **the exact prompt
-the model received**, each by SHA-256; and the repository with the resolved `head_sha` and `base_sha`.
+the model received**, each by SHA-256; the repository with the resolved `head_sha` and `base_sha`;
+and a `run_stats` object counting what the run *did* — `tool_calls`, `turns`, `output_tokens` and
+`duration_s`. `tool_calls` is the one the exit status turns on, so it is recorded rather than only
+acted on: a refusal you cannot audit afterwards is one you have to take on trust.
 
 The hashes are the point. Briefs live in a plugin cache that updates underneath you, so two runs are
 only comparable if they ran the same brief — and `base_ref=HEAD~1` names a different commit every

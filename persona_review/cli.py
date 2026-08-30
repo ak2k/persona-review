@@ -14,6 +14,7 @@ import datetime as dt
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from . import assets, errors, runner, validate
@@ -31,6 +32,7 @@ EXIT_USAGE = errors.UsageError.exit_code
 EXIT_ENV = errors.EnvError.exit_code
 EXIT_RUNNER = errors.RunnerError.exit_code
 EXIT_TIMEOUT = errors.RunTimeout.exit_code
+EXIT_VACUOUS = errors.VacuousRun.exit_code
 EXIT_BUDGET = errors.BudgetError.exit_code
 
 
@@ -297,6 +299,9 @@ def _review_locked(
         last_file=last_file,
     )
     started_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Monotonic, not wall clock: this measures how long the run took, and a clock stepped by
+    # ntp mid-review must not turn a four-second dud into a plausible-looking one.
+    started = time.monotonic()
     result = runner.execute(
         provider.argv(inv),
         stdout_path=events_file,
@@ -305,6 +310,7 @@ def _review_locked(
         idle_secs=settings.idle_secs,
         hard_secs=settings.hard_secs,
     )
+    elapsed = time.monotonic() - started
 
     if result.timed_out:
         raise errors.RunTimeout(f"{result.reason}\n  partial output: {events_file}")
@@ -318,8 +324,14 @@ def _review_locked(
     if last_file is not None and not (last_file.exists() and last_file.stat().st_size):
         raise errors.GateError(f"{provider.binary} wrote no final message to {last_file}")
 
+    # WHAT THE RUN DID, counted from the event stream this process just wrote. Read from the
+    # events file for BOTH providers even though codex's answer arrives elsewhere: the
+    # question is what the run inspected, and only the event stream records that.
+    stats = validate.run_stats(provider.events_mode, events_file, duration_s=elapsed)
+
     # The gate has the last word: a run that returned prose, or an object of the wrong
-    # shape, is a failed review that otherwise reads as a clean one.
+    # shape, is a failed review that otherwise reads as a clean one. So is a run that
+    # answered without reading anything, and `stats` is what lets the gate see it.
     return validate.gate(
         answer_file=answer_file,
         schema_path=schema_file,
@@ -356,6 +368,7 @@ def _review_locked(
             "schema": str(schema_file),
             "prompt": str(prompt_file),
         },
+        stats=stats,
         label=provider.command,
     )
 

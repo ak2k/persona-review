@@ -212,6 +212,42 @@ MUTATIONS: list[Mutation] = [
         "        if False:",
     ),
     Mutation(
+        # The production incident: one turn, zero tool calls, 151 output tokens, a
+        # schema-valid empty findings array, exit 0. Every schema rule above passes on that
+        # answer, because the answer is fine — it is the RUN that never happened.
+        "a run that made no tool calls certifies a clean review again",
+        "persona_review/validate.py",
+        r"    if stats\.tool_calls == 0:",
+        "    if False:",
+    ),
+    Mutation(
+        # Counting every content block rather than the tool_use ones counts thinking and
+        # text as evidence of work, which is exactly what the dud run produced.
+        "any content block counts as a tool call",
+        "persona_review/validate.py",
+        r'                    if isinstance\(block, dict\) and block\.get\("type"\) '
+        r"== GROK_TOOL_BLOCK",
+        "                    if isinstance(block, dict)",
+    ),
+    Mutation(
+        # `agent_message` and `reasoning` are items too. Taking every item as a tool call
+        # certifies a codex run that only ever thought and answered.
+        "every codex item counts as a tool call, not just the tool ones",
+        "persona_review/validate.py",
+        r'            if not isinstance\(item, dict\) or item\.get\("type"\) '
+        r"not in CODEX_TOOL_ITEMS:",
+        "            if not isinstance(item, dict):",
+    ),
+    Mutation(
+        # codex emits `item.started` and `item.completed` for the same call, so counting
+        # events rather than items doubles every total — a difference that only matters when
+        # the real answer is small, which is the case this whole guard is about.
+        "codex tool calls are counted twice, once per event",
+        "persona_review/validate.py",
+        r"                if ident in seen:",
+        "                if False:",
+    ),
+    Mutation(
         "persona name may be a path again",
         "persona_review/assets.py",
         r'    if not persona or persona != Path\(persona\)\.name or persona\.startswith\("\."\):',
@@ -419,6 +455,18 @@ MUTATIONS: list[Mutation] = [
         '            f"head_sha=",',
         suite="process",
         selector="provenance and grok",
+    ),
+    Mutation(
+        # The wiring, not the counter: the gate can refuse correctly and still never see a
+        # real number if the CLI hands it a made-up one, or points it at the wrong file. The
+        # unit tier cannot reach this — it drives `run_stats` and `gate` directly.
+        "the tool-call count handed to the gate is invented rather than counted",
+        "persona_review/cli.py",
+        r"    stats = validate\.run_stats\(provider\.events_mode, events_file, "
+        r"duration_s=elapsed\)",
+        "    stats = validate.RunStats(1, None, None, None)",
+        suite="process",
+        selector="no_tool_calls and grok",
     ),
     Mutation(
         # start_new_session is what lets the watchdog signal the provider's whole group. A

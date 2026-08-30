@@ -85,6 +85,22 @@ class RunTimeout(AppError):
     exit_code = 5
 
 
+class VacuousRun(AppError):
+    """The provider answered without making a single tool call. It inspected nothing.
+
+    Not a gate failure: the answer can be perfectly schema-valid, and usually is, because
+    schema-constrained decoding produces a well-formed object whether or not the model read
+    anything. A reviewer that never opened a file has no verdict to report — an empty
+    findings array and a page of them are equally unfounded — so the run is refused instead
+    of summarized.
+
+    The one status a caller should consider retrying: the machine is fine, the invocation
+    is fine, and the same command may well work next time.
+    """
+
+    exit_code = 6
+
+
 class BudgetError(AppError):
     """Over CE_PERSONA_MAX_PROMPT_TOKENS. Refused, never summarized.
 
@@ -118,6 +134,13 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
     ),
     (RunnerError.exit_code, ("{runner} itself exited non-zero",)),
     (RunTimeout.exit_code, ("idle or hard timeout; the run was killed and partial output kept",)),
+    (
+        VacuousRun.exit_code,
+        (
+            "the model answered without making a single tool call: it inspected",
+            "nothing, so its findings -- empty or not -- attest to nothing",
+        ),
+    ),
     (BudgetError.exit_code, ("over CE_PERSONA_MAX_PROMPT_TOKENS; refused, never summarized",)),
 )
 
