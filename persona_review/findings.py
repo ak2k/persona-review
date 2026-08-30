@@ -32,6 +32,14 @@ under review as its input, and they are being handed to another agent as ITS inp
 that reads like an instruction is therefore fenced with a per-run nonce, so the consuming
 agent can tell the data it was asked to read from the instructions it was given. `--json`
 is left unfenced: a programmatic caller parses it rather than reading it.
+
+A REFUSAL HAS TO SURVIVE BEING HANDED ON
+----------------------------------------
+The review commands refuse a run that made no tool calls, keep the artifact as evidence, and
+exit 6. An artifact on disk is exactly what this command renders — so without the check in
+`main`, this package laundered its own refusal: the same findings came back as an ordinary
+listing at exit 0, one command later. Every output mode is refused, `--json` included; a
+programmatic caller is the one most likely to act on it unread.
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from . import errors
+from . import errors, validate
 from .validate import JSONObject, JSONValue
 
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -53,10 +61,13 @@ DEFAULT_SEVERITIES = ("P0", "P1")
 USAGE = "usage: ce-persona-findings <artifact> [--list] [--all] [--show N] [--json]"
 
 # Same vocabulary as the review commands, for the same reason: a caller has to tell "I asked
-# for this wrongly" from "the artifact is not usable" without string-matching stderr.
+# for this wrongly" from "the artifact is not usable" without string-matching stderr. The
+# vacuous-run code is READ FROM the review commands' own class rather than restated, because
+# it is the same verdict about the same run arriving one command later.
 EXIT_OK = 0
 EXIT_DATA = 1
 EXIT_USAGE = 2
+EXIT_VACUOUS = errors.VacuousRun.exit_code
 
 HELP = f"""{USAGE}
 
@@ -78,7 +89,9 @@ handed to another agent as input. --json is deliberately unfenced.
 exit status
   {EXIT_OK}  rendered
   {EXIT_DATA}  the file is unreadable or is not a findings artifact
-  {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding number"""
+  {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding number
+  {EXIT_VACUOUS}  the artifact's provenance records a run that made no tool calls; nothing
+     it reported is founded, so it is refused rather than rendered"""
 
 Finding = JSONObject
 
@@ -192,6 +205,23 @@ def fence(body: str) -> str:
     )
 
 
+def refusal_banner(path: str, stats: validate.RunStats) -> str:
+    """Why this artifact is not being rendered, in the terms the review command used.
+
+    Formatted by `validate.describe_run`, the same function the review command's own refusal
+    uses, so the two cannot come to describe the same run differently.
+    """
+    sidecar = Path(path).with_name(Path(path).stem + validate.PROVENANCE_SUFFIX)
+    return (
+        f"ce-persona-findings: refusing to render {path}\n"
+        f"  Its provenance records a run that made no tool calls ({validate.describe_run(stats)}),"
+        f"\n  so the model never opened the diff and nothing here is founded -- an empty findings"
+        f"\n  array and a page of them equally. The review command already refused this run with"
+        f"\n  exit {EXIT_VACUOUS}; rendering it would launder that refusal one command later."
+        f"\n  The record, which is safe to read: {sidecar}"
+    )
+
+
 def _usage_error(message: str) -> int:
     print(f"ce-persona-findings: {message}", file=sys.stderr)
     print(USAGE, file=sys.stderr)
@@ -241,6 +271,14 @@ def main(argv: list[str] | None = None) -> int:
     except FindingsError as exc:
         print(f"ce-persona-findings: {exc}", file=sys.stderr)
         return EXIT_DATA
+
+    # BEFORE any output mode, `--json` included. A programmatic caller is the one most likely
+    # to act on these findings without a person ever reading them, so it is the last consumer
+    # that should be handed a review nobody performed.
+    vacuous = validate.refused_run(Path(path))
+    if vacuous is not None:
+        print(refusal_banner(path, vacuous), file=sys.stderr)
+        return EXIT_VACUOUS
 
     if as_json:
         json.dump(artifact, sys.stdout, indent=1)

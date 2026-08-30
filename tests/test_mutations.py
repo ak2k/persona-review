@@ -234,9 +234,8 @@ MUTATIONS: list[Mutation] = [
         # certifies a codex run that only ever thought and answered.
         "every codex item counts as a tool call, not just the tool ones",
         "persona_review/validate.py",
-        r'            if not isinstance\(item, dict\) or item\.get\("type"\) '
-        r"not in CODEX_TOOL_ITEMS:",
-        "            if not isinstance(item, dict):",
+        r"            if item_kind not in CODEX_TOOL_ITEMS:",
+        "            if False:",
     ),
     Mutation(
         # codex emits `item.started` and `item.completed` for the same call, so counting
@@ -244,8 +243,63 @@ MUTATIONS: list[Mutation] = [
         # the real answer is small, which is the case this whole guard is about.
         "codex tool calls are counted twice, once per event",
         "persona_review/validate.py",
-        r"                if ident in seen:",
-        "                if False:",
+        r"                if ident not in seen:",
+        "                if True:",
+    ),
+    Mutation(
+        # The other half of that rule, and the one that used to fail OPEN: an item with no
+        # usable id fell past the dedupe entirely and was counted once per event.
+        "an id-less codex item is counted on both of its events",
+        "persona_review/validate.py",
+        r'            elif kind == "item\.completed":',
+        "            else:",
+    ),
+    Mutation(
+        # Without this the wrapper reports "the model never opened the diff" on every run
+        # after a provider-CLI rename — a falsehood about the one component that was working.
+        "a renamed codex vocabulary is blamed on the model instead of the wrapper",
+        "persona_review/validate.py",
+        r"    if calls == 0 and unknown:",
+        "    if False:",
+    ),
+    Mutation(
+        # The control side of the same guard: if the kinds we skip on purpose counted as
+        # unrecognised, every genuine dud would report drift and exit 6 would be dead code.
+        "kinds this wrapper skips on purpose are reported as drift",
+        "persona_review/validate.py",
+        r"                if item_kind not in CODEX_QUIET_ITEMS:",
+        "                if True:",
+    ),
+    Mutation(
+        "an empty codex stream reads as a model that did nothing",
+        "persona_review/validate.py",
+        r"    if total == 0:",
+        "    if False:",
+    ),
+    Mutation(
+        # grok's answer arrives inside its event stream, so the gate counts from the text it
+        # has already read. Reverting this reads the same ~1.4 MB a second time; the unit
+        # test proves it by making the file source unusable.
+        "the gate opens grok's stream a second time to count it",
+        "persona_review/validate.py",
+        r"        if evidence\.events_file == answer_file",
+        "        if False",
+    ),
+    Mutation(
+        # The reader's half of the refusal. Without it the package launders its own verdict:
+        # the artifact exit 6 kept as EVIDENCE comes back as an ordinary listing at exit 0.
+        "a refused artifact is rendered anyway by the retrieval command",
+        "persona_review/findings.py",
+        r"    vacuous = validate\.refused_run\(Path\(path\)\)",
+        "    vacuous = None",
+    ),
+    Mutation(
+        # Only a POSITIVE reading of zero refuses. Reverting this refuses every artifact that
+        # has a sidecar at all, which is every artifact this package writes.
+        "the reader refuses on any provenance rather than on a counted zero",
+        "persona_review/validate.py",
+        r"    if calls != 0:",
+        "    if False:",
     ),
     Mutation(
         "persona name may be a path again",
@@ -457,16 +511,15 @@ MUTATIONS: list[Mutation] = [
         selector="provenance and grok",
     ),
     Mutation(
-        # The wiring, not the counter: the gate can refuse correctly and still never see a
-        # real number if the CLI hands it a made-up one, or points it at the wrong file. The
-        # unit tier cannot reach this — it drives `run_stats` and `gate` directly.
-        "the tool-call count handed to the gate is invented rather than counted",
+        # The wiring, not the counter: the gate can count correctly and still count the wrong
+        # thing if the CLI points it at another file. The unit tier cannot reach this — it
+        # drives `run_stats` and `gate` directly.
+        "the gate is pointed at the wrong file for its evidence",
         "persona_review/cli.py",
-        r"    stats = validate\.run_stats\(provider\.events_mode, events_file, "
-        r"duration_s=elapsed\)",
-        "    stats = validate.RunStats(1, None, None, None)",
+        r"        events_file=events_file, mode=provider\.events_mode, duration_s=elapsed",
+        "        events_file=prompt_file, mode=provider.events_mode, duration_s=elapsed",
         suite="process",
-        selector="no_tool_calls and grok",
+        selector="one_tool_call_is_enough and grok",
     ),
     Mutation(
         # start_new_session is what lets the watchdog signal the provider's whole group. A

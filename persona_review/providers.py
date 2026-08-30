@@ -31,9 +31,16 @@ MODE_OBJECT = "object"
 # How the run's own EVENTS are read, to count what it actually did. A second vocabulary
 # rather than a reuse of the one above, because the two questions have different answers for
 # codex: its ANSWER is a file written by `-o`, while its EVIDENCE is the `codex exec --json`
-# stream. For grok they happen to be the same stream, and the name says so.
-EVENTS_GROK = "grok-events"
-EVENTS_CODEX = "codex-events"
+# stream.
+#
+# EVERY VALUE HERE DIFFERS FROM EVERY VALUE ABOVE, deliberately. `MODE_GROK_EVENTS` and this
+# once shared the string "grok-events", which meant passing an answer mode where an events
+# mode belongs was caught for codex and silently accepted for grok — the two vocabularies
+# would then be one mis-wiring away from agreeing by accident. The names say what each
+# stream is made of instead: grok's is messages carrying content blocks, codex's is items
+# carrying kinds.
+EVENTS_GROK = "grok-messages"
+EVENTS_CODEX = "codex-items"
 
 
 @dataclass(frozen=True)

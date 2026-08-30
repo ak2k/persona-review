@@ -141,10 +141,65 @@ def _help_text() -> str:
 
 EMPTY_EXAMPLE = json.dumps(artifact())
 
-# A run that DID inspect something. Every gate test that is not about the tool-call refusal
-# has to carry one, because a run with zero tool calls is refused before the summary line —
-# so a zero here would quietly turn those tests into assertions about the refusal.
+# A run that DID inspect something. Every provenance test that is not about the tool-call
+# refusal has to carry one, because a run with zero tool calls is refused before the summary
+# line — so a zero here would quietly turn those tests into assertions about the refusal.
 STATS = validate.RunStats(tool_calls=7, turns=4, output_tokens=4096, duration_s=61.5)
+
+
+# Event fixtures in each provider's own vocabulary, at module scope because both the counter's
+# tests and the gate's need them. Shapes copied from real runs: grok 1.0.13 and codex-cli
+# 0.150.1.
+def grok_tool_call(name: str = "read_file") -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "..."},
+                    {"type": "tool_use", "id": f"toolu_{name}", "name": name, "input": {}},
+                ]
+            },
+        }
+    )
+
+
+def grok_result(**over: Any) -> str:
+    event: dict[str, Any] = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "stop_reason": "end_turn",
+        "num_turns": 3,
+        "usage": {"output_tokens": 4096},
+    }
+    event.update(over)
+    return json.dumps(event)
+
+
+def codex_item(kind: str, item_type: str, ident: str | None = "item_1") -> str:
+    item: dict[str, Any] = {"type": item_type}
+    if ident is not None:
+        item["id"] = ident
+    return json.dumps({"type": kind, "item": item})
+
+
+def codex_stream(*items: str) -> str:
+    """A codex run: a thread, a turn, whatever items are given, and a terminal turn."""
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        *items,
+        json.dumps({"type": "turn.completed", "usage": {"output_tokens": 151}}),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+CODEX_ONE_CALL = codex_stream(
+    codex_item("item.started", "command_execution"),
+    codex_item("item.completed", "command_execution"),
+)
+CODEX_NO_CALLS = codex_stream(codex_item("item.completed", "agent_message", "item_0"))
 
 # A placeholder for a per-test fixture path inside a parametrize table, which is evaluated at
 # import time and so cannot see instance state. Compared with `is`, never `==`.
@@ -479,8 +534,6 @@ class TestRunEvidence:
     turn, zero tool calls, 151 output tokens and four and a half seconds, and exited 0.
     Nothing about the ANSWER separated that from a clean review — only the transcript did,
     and the exit status a gating caller branches on said CLEAN.
-
-    Both fixtures below are the shapes of real runs: grok 1.0.13 and codex-cli 0.150.1.
     """
 
     def setup_method(self) -> None:
@@ -490,56 +543,35 @@ class TestRunEvidence:
     def teardown_method(self) -> None:
         self.tmp.cleanup()
 
-    def _events(self, *lines: str) -> Path:
+    def _file(self, *lines: str) -> Path:
         path = self.dir / "events.jsonl"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
 
-    @staticmethod
-    def _grok_tool_call(name: str = "read_file") -> str:
-        return json.dumps(
-            {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "thinking", "thinking": "..."},
-                        {"type": "tool_use", "id": f"toolu_{name}", "name": name, "input": {}},
-                    ]
-                },
-            }
+    def _grok(self, *lines: str, duration: float | None = None) -> validate.RunStats:
+        return validate.run_stats(
+            "grok-messages", validate.file_objects(self._file(*lines)), duration
         )
 
-    @staticmethod
-    def _grok_result(**over: Any) -> str:
-        event: dict[str, Any] = {
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "stop_reason": "end_turn",
-            "num_turns": 3,
-            "usage": {"output_tokens": 4096},
-        }
-        event.update(over)
-        return json.dumps(event)
-
-    @staticmethod
-    def _codex_item(kind: str, item_type: str, ident: str) -> str:
-        return json.dumps({"type": kind, "item": {"id": ident, "type": item_type}})
+    def _codex(self, *items: str) -> validate.RunStats:
+        return validate.run_stats(
+            "codex-items", validate.objects(codex_stream(*items).splitlines()), None
+        )
 
     def test_grok_counts_tool_use_blocks_and_reads_the_run_s_own_numbers(self):
-        path = self._events(
+        stats = self._grok(
             '{"type":"system","subtype":"init"}',
-            self._grok_tool_call("grep"),
-            self._grok_tool_call("read_file"),
-            self._grok_result(),
+            grok_tool_call("grep"),
+            grok_tool_call("read_file"),
+            grok_result(),
+            duration=12.5,
         )
-        stats = validate.run_stats("grok-events", path, 12.5)
         assert stats.tool_calls == 2
         assert (stats.turns, stats.output_tokens, stats.duration_s) == (3, 4096, 12.5)
 
     def test_grok_does_not_count_the_tool_results_coming_back(self):
         # Every call is echoed as a `tool_result` block inside a USER message. Counting
-        # content blocks without looking at the event type doubles every total, which would
+        # content blocks without testing the block type doubles every total, which would
         # make one real call look like two and — worse — make a stream of nothing but
         # results look like work.
         echo = json.dumps(
@@ -548,8 +580,7 @@ class TestRunEvidence:
                 "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_x"}]},
             }
         )
-        path = self._events(self._grok_tool_call(), echo, self._grok_result())
-        assert validate.run_stats("grok-events", path, None).tool_calls == 1
+        assert self._grok(grok_tool_call(), echo, grok_result()).tool_calls == 1
 
     def test_the_incident_stream_counts_zero(self):
         # The shape of the run that started this: one assistant turn carrying thinking and
@@ -566,85 +597,163 @@ class TestRunEvidence:
                 },
             }
         )
-        path = self._events(
+        stats = self._grok(
             '{"type":"system","subtype":"init"}',
             answered,
-            self._grok_result(num_turns=1, usage={"output_tokens": 151}),
+            grok_result(num_turns=1, usage={"output_tokens": 151}),
+            duration=4.5,
         )
-        stats = validate.run_stats("grok-events", path, 4.5)
         assert stats.tool_calls == 0
         assert (stats.turns, stats.output_tokens) == (1, 151)
 
     def test_codex_counts_one_call_per_item_not_one_per_event(self):
-        # codex emits `item.started` AND `item.completed` for the same call, both carrying
-        # the same id. Counting events rather than items doubles every total.
-        path = self._events(
-            '{"type":"thread.started","thread_id":"th_1"}',
-            '{"type":"turn.started"}',
-            self._codex_item("item.started", "command_execution", "item_1"),
-            self._codex_item("item.completed", "command_execution", "item_1"),
-            self._codex_item("item.started", "command_execution", "item_2"),
-            self._codex_item("item.completed", "command_execution", "item_2"),
-            '{"type":"turn.completed","usage":{"output_tokens":19278}}',
+        # codex emits `item.started` AND `item.completed` for the same call. Two of the three
+        # calls below carry an id and are deduped by it; the third carries NONE, which used to
+        # fall past the dedupe and be counted once per event — the fail-OPEN direction, and
+        # the reason an id-less pair is in this fixture rather than a test of its own.
+        stats = self._codex(
+            codex_item("item.started", "command_execution", "item_1"),
+            codex_item("item.completed", "command_execution", "item_1"),
+            codex_item("item.started", "command_execution", "item_2"),
+            codex_item("item.completed", "command_execution", "item_2"),
+            codex_item("item.started", "command_execution", None),
+            codex_item("item.completed", "command_execution", None),
         )
-        stats = validate.run_stats("codex-events", path, 90.0)
-        assert stats.tool_calls == 2
-        assert (stats.turns, stats.output_tokens) == (1, 19278)
+        assert stats.tool_calls == 3
+        assert (stats.turns, stats.output_tokens) == (1, 151)
+
+    def test_an_id_less_call_counts_once_never_twice(self):
+        # Stated on its own as well, because the rule is not "dedupe": without an id the two
+        # events cannot be paired, so the terminal one is counted and the start is not.
+        assert self._codex(codex_item("item.completed", "web_search", None)).tool_calls == 1
+        assert self._codex(codex_item("item.started", "web_search", None)).tool_calls == 0
 
     def test_codex_does_not_mistake_the_model_talking_to_itself_for_a_tool_call(self):
         # `agent_message` and `reasoning` are items too. A count that took every item would
         # certify a run that only ever thought and answered — precisely the dud shape.
-        path = self._events(
-            '{"type":"turn.started"}',
-            self._codex_item("item.completed", "agent_message", "item_0"),
-            self._codex_item("item.completed", "reasoning", "item_1"),
-            '{"type":"turn.completed","usage":{"output_tokens":151}}',
+        stats = self._codex(
+            codex_item("item.completed", "agent_message", "item_0"),
+            codex_item("item.completed", "reasoning", "item_1"),
         )
-        assert validate.run_stats("codex-events", path, None).tool_calls == 0
+        assert stats.tool_calls == 0
 
-    def test_an_item_kind_this_gate_does_not_know_is_not_counted(self):
-        # Fail-closed on drift: an unrecognised kind counts nothing, so a renamed vocabulary
-        # refuses every run loudly instead of certifying reviews nobody can show happened.
-        path = self._events(
-            self._codex_item("item.completed", "some_future_kind", "item_1"),
-            '{"type":"turn.completed"}',
-        )
-        assert validate.run_stats("codex-events", path, None).tool_calls == 0
+    def test_a_todo_list_is_not_evidence_that_anything_was_inspected(self):
+        # It IS a tool invocation, and it reaches nothing: a run whose only tool call was
+        # writing itself a plan inspected exactly as much as one that made none. Counting it
+        # would let the dud shape through by one event.
+        assert self._codex(codex_item("item.completed", "todo_list", "item_3")).tool_calls == 0
 
     def test_a_partial_last_line_is_skipped_rather_than_fatal(self):
         # The stream is append-only and a killed run leaves a half-written line. That is a
         # condition the watchdogs already judged; re-deciding it here would fail runs that
         # completed.
-        path = self._events(self._grok_tool_call(), self._grok_result(), '{"type":"assi')
-        assert validate.run_stats("grok-events", path, None).tool_calls == 1
+        assert self._grok(grok_tool_call(), grok_result(), '{"type":"assi').tool_calls == 1
 
-    def test_an_unreadable_stream_is_an_environment_error_not_a_silent_zero(self):
+    def test_an_unopenable_stream_is_an_environment_error_not_a_silent_zero(self):
         # It must not fall through to zero and refuse the run with the wrong reason: this
-        # process wrote that file moments ago, so failing to read it back is the machine's
+        # process wrote that file moments ago, so failing to open it is the machine's
         # problem, not the model's.
         with pytest.raises(errors.EnvError):
-            validate.run_stats("grok-events", self.dir / "never-written.jsonl", None)
+            validate.run_stats(
+                "grok-messages", validate.file_objects(self.dir / "never-written.jsonl"), None
+            )
 
-    def test_an_unknown_event_mode_is_refused(self):
-        with pytest.raises(validate.GateError) as caught:
-            validate.run_stats("transcript", self._events("{}"), None)
+    def test_an_unknown_event_mode_is_an_environment_error(self):
+        # A mis-wired build, not a bad answer. Reporting it as a gate failure would blame the
+        # model for a defect in the wrapper — the same misdiagnosis the drift check prevents.
+        with pytest.raises(errors.EnvError) as caught:
+            validate.run_stats("transcript", validate.objects(["{}"]), None)
         assert "unknown event mode" in str(caught.value)
 
     def test_every_provider_names_a_mode_this_module_understands(self):
-        # The drift control. `events_mode` is declared in providers.py and dispatched here,
-        # so the two are free to disagree — and the failure would be a provider whose runs
-        # all refuse, or worse, one whose evidence is never counted.
-        path = self._events(self._grok_tool_call(), self._grok_result())
+        # The drift control. `events_mode` is declared in providers.py and dispatched in
+        # validate.py, so the two are free to disagree — and the failure would be a provider
+        # whose runs all refuse, or worse, one whose evidence is never counted.
         for provider in providers.PROVIDERS.values():
-            validate.run_stats(provider.events_mode, path, None)
+            source = CODEX_ONE_CALL if provider.name == "codex" else grok_tool_call()
+            stats = validate.run_stats(
+                provider.events_mode, validate.objects(source.splitlines()), None
+            )
+            assert stats.tool_calls == 1, provider.name
+
+    def test_the_answer_modes_and_the_events_modes_share_no_value(self):
+        # They once shared "grok-events", so handing an ANSWER mode where an events mode
+        # belongs was caught for codex and silently accepted for grok. Distinct values make
+        # that mis-wiring fail for both providers rather than one.
+        answer_modes = {providers.MODE_GROK_EVENTS, providers.MODE_OBJECT}
+        event_modes = {providers.EVENTS_GROK, providers.EVENTS_CODEX}
+        assert not (answer_modes & event_modes), sorted(answer_modes & event_modes)
+        for mode in answer_modes:
+            with pytest.raises(errors.EnvError):
+                validate.run_stats(mode, validate.objects(["{}"]), None)
+
+
+class TestDriftIsNotBlamedOnTheModel:
+    """A renamed event vocabulary is a broken wrapper, and must not be told as a bad model.
+
+    After a provider-CLI upgrade renames its item kinds, every run counts zero. Refusing
+    those with "the model never opened the diff" would be a falsehood repeated identically on
+    every run, about the one component that was working — a permanent outage wearing the
+    costume of a bad model, and a README that says retry-once-then-blame-the-model.
+    """
+
+    def _codex(self, text: str) -> validate.RunStats:
+        return validate.run_stats("codex-items", validate.objects(text.splitlines()), None)
+
+    def test_unrecognised_item_kinds_with_no_tool_calls_are_an_environment_error(self):
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(
+                codex_stream(
+                    codex_item("item.completed", "shell_call_v2", "item_1"),
+                    codex_item("item.completed", "file_patch_v2", "item_2"),
+                )
+            )
+        message = str(caught.value)
+        assert "shell_call_v2" in message and "file_patch_v2" in message, message
+        assert "drift" in message
+
+    def test_a_recognised_kind_alongside_them_is_still_a_review(self):
+        # The control that keeps the check from firing on every mixed stream: one kind we do
+        # understand is evidence the vocabulary still overlaps ours, so this is not drift.
+        stats = self._codex(
+            codex_stream(
+                codex_item("item.completed", "command_execution", "item_1"),
+                codex_item("item.completed", "shell_call_v2", "item_2"),
+            )
+        )
+        assert stats.tool_calls == 1
+
+    def test_the_kinds_we_deliberately_skip_are_not_mistaken_for_drift(self):
+        # THE OTHER CONTROL, and the one that decides whether exit 6 still exists: a genuine
+        # dud emits agent_message and reasoning and nothing else. If those counted as
+        # unrecognised, every vacuous run would report drift and the refusal would be dead.
+        stats = self._codex(CODEX_NO_CALLS)
+        assert stats.tool_calls == 0
+
+    def test_a_codex_stream_with_no_events_at_all_is_an_environment_error(self):
+        # `codex exec --json` opens every run with a thread and a turn, so an empty stream is
+        # a runner that did not run — not a model that did nothing.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex("")
+        assert "no events at all" in str(caught.value)
+
+    def test_grok_has_no_kind_list_to_drift(self):
+        # Stated so the asymmetry is deliberate rather than an omission: grok names a tool
+        # call structurally (`tool_use`), so there is no vocabulary to fall out of date and
+        # nothing for a drift check to detect.
+        stats = validate.run_stats(
+            "grok-messages", validate.objects(grok_result().splitlines()), None
+        )
+        assert stats.tool_calls == 0
 
 
 class TestTheGateRefusesARunThatInspectedNothing:
     """Zero tool calls is not a small number of tool calls; it is no review at all."""
 
-    def _gate(self, tmp: Path, answer: str, stats: validate.RunStats) -> tuple[int, str, str]:
+    def _gate(self, tmp: Path, answer: str, events: str) -> tuple[int, str, str]:
         (tmp / "answer.txt").write_text(answer, encoding="utf-8")
         (tmp / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        (tmp / "events.jsonl").write_text(events, encoding="utf-8")
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
@@ -653,13 +762,15 @@ class TestTheGateRefusesARunThatInspectedNothing:
                     schema_path=tmp / "schema.json",
                     mode="object",
                     findings_out=tmp / "out.json",
-                    provenance_out=tmp / "prov.json",
+                    provenance_out=tmp / "out-provenance.json",
                     prov_pairs=[],
                     prov_files={},
-                    stats=stats,
+                    evidence=validate.Evidence(
+                        events_file=tmp / "events.jsonl", mode="codex-items", duration_s=4.5
+                    ),
                     label="ce-persona",
                 )
-            except errors.VacuousRun as exc:
+            except errors.AppError as exc:
                 return exc.exit_code, out.getvalue(), str(exc)
         return code, out.getvalue(), err.getvalue()
 
@@ -670,21 +781,162 @@ class TestTheGateRefusesARunThatInspectedNothing:
         # Both arms, because refusing only the EMPTY one would read a populated array as
         # evidence the model worked. A model that read nothing and reported a P0 invented it.
         with tempfile.TemporaryDirectory() as tmp:
-            code, out, message = self._gate(Path(tmp), answer, validate.RunStats(0, 1, 151, 4.5))
+            code, out, message = self._gate(Path(tmp), answer, CODEX_NO_CALLS)
             assert code == 6, message
             assert out == "", "the summary line must not be printed for a refused run"
             assert "no tool calls" in message
             # The artifacts survive: the dud IS the evidence of what was refused.
-            record = json.loads((Path(tmp) / "prov.json").read_text(encoding="utf-8"))
+            record = json.loads((Path(tmp) / "out-provenance.json").read_text(encoding="utf-8"))
+            # And the refusal points at the SIDECAR, never at the findings file: naming the
+            # artifact invites the caller into the very listing that was just refused.
+            assert str(Path(tmp) / "out-provenance.json") in message
+            assert str(Path(tmp) / "out.json") not in message
         assert record["run_stats"]["tool_calls"] == 0
 
     def test_one_tool_call_is_enough(self):
         # The control. Without it every assertion above holds for a gate that refuses
         # everything, which is the same cannot-fail defect in the other direction.
         with tempfile.TemporaryDirectory() as tmp:
-            code, out, err = self._gate(Path(tmp), EMPTY_EXAMPLE, validate.RunStats(1, 1, 151, 4.5))
+            code, out, err = self._gate(Path(tmp), EMPTY_EXAMPLE, CODEX_ONE_CALL)
         assert code == 0, err
         assert "0 findings" in out
+
+    def test_a_stream_this_build_cannot_count_leaves_no_artifact_behind(self):
+        # Drift is decided BEFORE anything is written, unlike the vacuous refusal: there is no
+        # verdict to keep evidence of, and an artifact on disk beside an environment failure
+        # is exactly the stale answer `_clear_run_dir` exists to prevent.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, message = self._gate(
+                Path(tmp),
+                EMPTY_EXAMPLE,
+                codex_stream(codex_item("item.completed", "shell_call_v2", "item_1")),
+            )
+            assert code == 3, message
+            assert not (Path(tmp) / "out.json").exists()
+            assert not (Path(tmp) / "out-provenance.json").exists()
+
+    def test_the_gate_counts_grok_from_the_text_it_already_read(self, monkeypatch: Any):
+        # grok's answer arrives INSIDE its event stream, so the answer file and the events
+        # file are one path and the ~1.4 MB is read once.
+        #
+        # Proved by making the file source UNUSABLE rather than by asserting the counts: a
+        # second read would produce exactly the same numbers, so an outcome assertion here
+        # would hold whether or not the reuse existed — which is the shape of guard this
+        # repository keeps finding.
+        def opened_again(path: Path) -> object:
+            raise AssertionError(f"the gate opened {path} a second time to count it")
+
+        monkeypatch.setattr(validate, "file_objects", opened_again)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream = grok_tool_call() + "\n" + grok_result(structured_output=artifact()) + "\n"
+            (root / "events.jsonl").write_text(stream, encoding="utf-8")
+            (root / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = validate.gate(
+                    answer_file=root / "events.jsonl",
+                    schema_path=root / "schema.json",
+                    mode="grok-events",
+                    findings_out=root / "out.json",
+                    provenance_out=root / "out-provenance.json",
+                    prov_pairs=[],
+                    prov_files={},
+                    evidence=validate.Evidence(
+                        events_file=root / "events.jsonl",
+                        mode="grok-messages",
+                        duration_s=1.0,
+                    ),
+                    label="ce-persona",
+                )
+            record = json.loads((root / "out-provenance.json").read_text(encoding="utf-8"))
+        assert code == 0, out.getvalue()
+        assert record["run_stats"]["tool_calls"] == 1
+
+
+class TestARefusalSurvivesBeingHandedOn:
+    """`validate.refused_run`: the reader's half of the vacuous-run refusal.
+
+    The review command refuses with exit 6 and keeps the artifact as evidence. Without this,
+    `ce-persona-findings <artifact>` rendered that same dud as an ordinary listing at exit 0 —
+    the package laundering its own refusal, one command later, through its own reader.
+    """
+
+    def _artifact(self, tmp: Path, stats: dict[str, Any] | None) -> Path:
+        art = tmp / "adversarial-reviewer-grok.json"
+        art.write_text(EMPTY_EXAMPLE, encoding="utf-8")
+        if stats is not None:
+            (tmp / "adversarial-reviewer-grok-provenance.json").write_text(
+                json.dumps({"provider": "grok", "run_stats": stats}), encoding="utf-8"
+            )
+        return art
+
+    def test_a_sidecar_recording_no_tool_calls_is_a_refusal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(
+                Path(tmp),
+                {"tool_calls": 0, "turns": 1, "output_tokens": 151, "duration_s": 4.5},
+            )
+            stats = validate.refused_run(art)
+        assert stats is not None
+        assert (stats.tool_calls, stats.turns, stats.output_tokens) == (0, 1, 151)
+
+    @pytest.mark.parametrize(
+        "stats",
+        [
+            {"tool_calls": 1},
+            {"tool_calls": 99, "turns": 31},
+            # A malformed count is not a positive reading of zero.
+            {"tool_calls": "0"},
+            {"tool_calls": True},
+            {},
+        ],
+    )
+    def test_anything_short_of_a_positive_zero_renders_normally(self, stats: dict[str, Any]):
+        with tempfile.TemporaryDirectory() as tmp:
+            assert validate.refused_run(self._artifact(Path(tmp), stats)) is None
+
+    def test_an_artifact_with_no_sidecar_still_renders(self):
+        # The sidecar is a record, not a gate. An artifact written before this field existed,
+        # or one a person assembled by hand, must not become unreadable.
+        with tempfile.TemporaryDirectory() as tmp:
+            assert validate.refused_run(self._artifact(Path(tmp), None)) is None
+
+    def test_a_malformed_sidecar_still_renders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 0})
+            (Path(tmp) / "adversarial-reviewer-grok-provenance.json").write_text(
+                "{not json", encoding="utf-8"
+            )
+            assert validate.refused_run(art) is None
+
+    def test_the_command_refuses_every_output_mode_including_json(self):
+        # --json especially. A programmatic caller is the one most likely to act on these
+        # findings without a person ever reading them.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(
+                Path(tmp),
+                {"tool_calls": 0, "turns": 1, "output_tokens": 151, "duration_s": 4.5},
+            )
+            for args in ([str(art)], [str(art), "--all"], [str(art), "--json"]):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = findings.main(args)
+                assert code == 6, args
+                assert out.getvalue() == "", args
+                assert "no tool calls" in err.getvalue(), args
+                assert "adversarial-reviewer-grok-provenance.json" in err.getvalue(), args
+
+    def test_the_same_artifact_with_a_real_run_behind_it_renders(self):
+        # The control for the whole class: without it every assertion above is satisfied by a
+        # command that refuses everything.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 12})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = findings.main([str(art)])
+        assert code == 0
+        assert "no findings" in out.getvalue()
 
 
 class TestAssets:
@@ -1238,6 +1490,7 @@ class TestGateReadsItsSchemaDefensively:
     def _gate(self, tmp: Path, schema_text: str) -> tuple[int, str]:
         (tmp / "answer.txt").write_text(EMPTY_EXAMPLE, encoding="utf-8")
         (tmp / "schema.json").write_text(schema_text, encoding="utf-8")
+        (tmp / "events.jsonl").write_text(CODEX_ONE_CALL, encoding="utf-8")
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             code = validate.gate(
@@ -1248,7 +1501,11 @@ class TestGateReadsItsSchemaDefensively:
                 provenance_out=tmp / "prov.json",
                 prov_pairs=[],
                 prov_files={},
-                stats=STATS,
+                # A run that DID inspect something, so these stay tests of the SCHEMA path:
+                # with no tool call the gate refuses before it reaches any of this.
+                evidence=validate.Evidence(
+                    events_file=tmp / "events.jsonl", mode="codex-items", duration_s=1.0
+                ),
                 label="ce-persona",
             )
         return code, err.getvalue()

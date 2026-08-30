@@ -42,7 +42,7 @@ necessarily the top row.
 | `0` | schema-valid findings (an empty findings array is valid) |
 | `1` | the answer was not schema-valid findings — the gate refused |
 | `2` | usage error: bad arguments, unknown or markdown-only persona, bad `-C`, unresolvable `-b`, malformed `CE_PERSONA_*` value |
-| `3` | environment error: the runner, `git` or the plugin assets are missing, or `CE_PERSONA_RUN_DIR` cannot be created |
+| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, or the runner's event vocabulary changed and this build can no longer count what a run did |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
 | `6` | the model answered without making a single tool call — it inspected nothing |
@@ -59,8 +59,25 @@ running once; a second `6` says something about the model rather than about the 
 wrapper does not retry for you, deliberately — another full-effort run is the caller's
 budget to spend.
 
+**`6` is never the answer when the wrapper is the broken part.** If a provider CLI upgrade
+renames the event kinds this counts, every run would count zero and `6` would blame the model
+on every one of them — a permanent outage wearing the costume of a bad model. So a stream
+carrying kinds this build does not recognise, or no events at all, exits `3` naming the
+unrecognised kinds instead; `6` is reached only when the stream was understood and there was
+genuinely nothing in it.
+
+**A review is defined as inspecting the repository.** Passing the material in the prompt
+(`-c -`, or a large `-c` file) and expecting the model to review it without touching the
+working tree still exits `6`: the tool-call count is what makes a finding checkable against
+the code, and there is no mode in which this package certifies a review of text it cannot
+tie to a file. Use the model directly for that.
+
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
-`1` the file is unreadable or is not a findings artifact, `2` usage error.
+`1` the file is unreadable or is not a findings artifact, `2` usage error, and `6` when the
+artifact's provenance records a run that made no tool calls. That last one matters because a
+refusal has to survive being handed on: the review command keeps the dud artifact as
+evidence, and without the check this package would launder its own refusal into an ordinary
+listing at exit `0`, one command later.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
 per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
