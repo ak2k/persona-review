@@ -14,6 +14,7 @@ guarding nothing are how this package got into trouble twice.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1289,6 +1290,30 @@ class TestProvenance:
             validate.write_provenance(out, [], {"schema": str(Path(tmp) / "gone.json")}, STATS)
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["schema_sha256"].startswith("unreadable:")
+
+    def test_a_precomputed_digest_is_recorded_instead_of_re_reading_the_path(self):
+        # Provenance attests what the run USED. Re-reading the path at write time attests
+        # whatever is there afterwards, so a file replaced mid-run is recorded as the one
+        # the model was given.
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp) / "validator-input.json"
+            batch.write_text("replaced after the run", encoding="utf-8")
+            out = Path(tmp) / "prov.json"
+            validate.write_provenance(
+                out, [], {"batch": str(batch)}, STATS, {"batch": "the-bytes-that-were-read"}
+            )
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["batch_sha256"] == "the-bytes-that-were-read"
+        assert record["batch_file"] == str(batch)
+
+    def test_a_file_with_no_precomputed_digest_is_still_hashed_from_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "persona.md"
+            asset.write_text("brief", encoding="utf-8")
+            out = Path(tmp) / "prov.json"
+            validate.write_provenance(out, [], {"persona": str(asset)}, STATS, {"batch": "x"})
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["persona_sha256"] == hashlib.sha256(b"brief").hexdigest()
 
     def test_what_the_run_did_is_recorded_beside_what_produced_it(self):
         # `tool_calls` decides the exit status, so it has to be auditable after the fact:
@@ -2900,6 +2925,38 @@ class TestOneVerdictForEveryFindingExactlyOnce:
         assert verdicts.summarize(found, 2) == "1 validated, 0 rejected"
 
 
+class TestAnAnswerCarryingBothShapesIsRefused:
+    """The producer must not certify an answer its own documented reader cannot render.
+
+    `ce-persona-findings` refuses a file carrying a `findings` list AND a `verdicts` list,
+    so a validation that returned both would exit 0 while the only reader this package
+    ships exits 1 on what it wrote.
+    """
+
+    def _both(self, findings_value: Any) -> validate.Artifact:
+        found = verdicts_of(verdict(1))
+        found["findings"] = findings_value
+        return cast(validate.Artifact, found)
+
+    def test_a_verdicts_only_answer_is_accepted(self):
+        verdicts.check_single_shape(cast(validate.Artifact, verdicts_of(verdict(1))))
+
+    @pytest.mark.parametrize("also", [[], [{"title": "t"}]])
+    def test_an_answer_that_also_carries_a_findings_list_is_refused(self, also: Any):
+        # Empty as well as populated: the reader decides on the KEY being a list, so an
+        # empty one is the same unrenderable file and refusing only the populated case
+        # would leave the producer certifying a file the reader rejects.
+        with pytest.raises(errors.GateError) as caught:
+            verdicts.check_single_shape(self._both(also))
+        assert "findings" in str(caught.value), str(caught.value)
+        assert caught.value.exit_code == 1
+
+    def test_a_findings_key_that_is_not_a_list_is_not_a_second_shape(self):
+        # The reader's rule exactly: a non-list `findings` is not a findings artifact, so
+        # refusing it here would refuse answers `ce-persona-findings` renders happily.
+        verdicts.check_single_shape(self._both(None))
+
+
 class TestTheGateOnVerdicts:
     """The same gate frame a review runs through, with the four validator-mode arguments."""
 
@@ -3157,11 +3214,15 @@ class TestTheExitTableSpeaksTheFlowsWords:
     def test_the_validate_rendering_swaps_the_nouns_and_nothing_else(self):
         rendered = errors.render_exit_table("grok", errors.VALIDATE_WORDS)
         assert "schema-valid verdicts (one verdict for every input #, exactly once)" in rendered
-        assert "the answer was not schema-valid verdicts" in rendered
+        assert (
+            "the answer was not schema-valid verdicts, or also carries a findings list"
+        ) in rendered
         assert "a batch that is not an array of findings carrying a `#` each" in rendered
-        # The word the validate commands must never use: they take no persona, and the
-        # answer they gate is not findings.
-        assert "findings" not in rendered.replace("array of findings", "")
+        # The word the validate commands must never use for their OWN answer: they take no
+        # persona, and what they gate is verdicts. The two places it does appear are the
+        # batch they are handed and the second list an unrenderable answer carries.
+        stripped = rendered.replace("array of findings", "").replace("a findings list", "")
+        assert "findings" not in stripped
         assert "persona" not in rendered
         # The statuses are the same table: same numbers, same runner substitution.
         assert "grok itself exited non-zero" in rendered
@@ -3173,5 +3234,5 @@ class TestTheExitTableSpeaksTheFlowsWords:
         # table that lists every status, which is what the assertions above mostly check.
         for words in (errors.REVIEW_WORDS, errors.VALIDATE_WORDS):
             rendered = errors.render_exit_table("grok", words)
-            for slot in ("{answer}", "{ok}", "{bad_argument}", "{runner}"):
+            for slot in ("{answer}", "{ok}", "{bad_argument}", "{also}", "{runner}"):
                 assert slot not in rendered, (slot, words)

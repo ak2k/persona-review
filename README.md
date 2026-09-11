@@ -201,12 +201,17 @@ finding nobody judged is carried as though it had been.
 **Artifacts** land on the stem `validator-<provider>` in `CE_PERSONA_RUN_DIR`: `.json` (the
 verdicts object), `-provenance.json`, `-events.jsonl`, `-prompt.md`, `-stderr.log`, and a
 `.lock` held for the run. The sidecar records `kind=validator` and hashes the batch, the
-template, the schema and the exact prompt the model received.
+template, the schema and the exact prompt the model received. The batch is hashed from the
+bytes that went into the prompt, not re-read afterwards, so a file replaced mid-run is not
+attested as the one the validator saw.
 
 **The exit statuses are the review commands' own**, with the nouns changed: `0` schema-valid
-verdicts covering the batch, `1` the answer was not that, `2` usage or a malformed batch, `3`
-environment, `4` the runner exited non-zero, `5` timeout, `6` the model made no tool calls, `78`
-over budget. `--help` renders the table in the validate mode's words.
+verdicts covering the batch, `1` the answer was not that, or also carries a findings list, `2`
+usage or a malformed batch, `3` environment, `4` the runner exited non-zero, `5` timeout, `6`
+the model made no tool calls, `78` over budget. `--help` renders the table in the validate
+mode's words. The second half of `1` is the reader's rule asked at the writing end: a file
+carrying both lists is neither artifact, so `ce-persona-findings` refuses it, and a run that
+reported success for one would be certifying verdicts nothing can render.
 
 **`6` here is not worth retrying blind.** `validated: true` across a whole batch from a run that
 opened nothing is precisely the rubber stamp this mode exists to refuse, and the artifacts are

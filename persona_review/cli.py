@@ -469,9 +469,14 @@ def _validate_locked(
     # run's artifacts beside a fresh stream. A malformed batch is an early refusal.
     batch_file = Path(args.batch).expanduser()
     try:
-        batch_text = batch_file.read_text(encoding="utf-8")
+        batch_bytes = batch_file.read_bytes()
     except OSError as exc:
         raise errors.UsageError(f"cannot read validator batch {args.batch}: {exc}") from exc
+    # Hashed HERE, from the bytes that go into the prompt. Re-reading the path when the
+    # sidecar is written attested whatever was on disk after the run instead, so a batch
+    # replaced while the model worked was recorded as the one the validator saw.
+    batch_digest = validate.digest_bytes(batch_bytes)
+    batch_text = batch_bytes.decode("utf-8")
     numbers = verdicts.parse_batch(batch_text, str(batch_file))
 
     if shutil.which(provider.binary) is None:
@@ -495,6 +500,7 @@ def _validate_locked(
         # The schema first, so a verdict whose `#` is not an integer is refused as a bad
         # shape rather than counted as a number the batch never carried.
         count = validate.check_object(found, schema, "verdicts")
+        verdicts.check_single_shape(found)
         verdicts.check_coverage(found, numbers)
         return count
 
@@ -525,6 +531,7 @@ def _validate_locked(
             "schema": str(schema_file),
             "prompt": str(sent.prompt_file),
         },
+        prov_digests={"batch": batch_digest},
         evidence=sent.evidence,
         label=provider.validate_command,
         key="verdicts",

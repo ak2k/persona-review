@@ -753,6 +753,25 @@ MUTATIONS: list[Mutation] = [
         "    if False:",
     ),
     Mutation(
+        # The producer's copy of the reader's rule. Without it an answer carrying a findings
+        # list beside its verdicts passes the gate and is written, while the only reader this
+        # package documents refuses the file -- success reported for verdicts nothing renders.
+        "an answer carrying both shapes is certified instead of refused",
+        "persona_review/verdicts.py",
+        r"    if len\(findings\.artifact_kinds\(found\)\) > 1:",
+        "    if False:",
+    ),
+    Mutation(
+        # Provenance must attest what the run USED. Re-reading the path at write time attests
+        # whatever is on disk afterwards, so a batch replaced while the model worked is
+        # recorded as the one the validator saw -- the one thing the sidecar is for.
+        "provenance re-hashes the path instead of the bytes the run was given",
+        "persona_review/validate.py",
+        r'        record\[f"\{key\}_sha256"\] = \(digests or \{\}\)'
+        r"\.get\(key\) or _sha256\(filename\)",
+        '        record[f"{key}_sha256"] = _sha256(filename)',
+    ),
+    Mutation(
         # The codex/object site of the same fail-open guard the grok entry above covers, and
         # a separate one because neither site's pattern can reach the other: without the key
         # check the gate believes whatever top-level key the answer happens to carry.
@@ -791,6 +810,17 @@ MUTATIONS: list[Mutation] = [
         "            pass",
         suite="process",
         selector="(concurrent or sequential_rerun) and grok",
+    ),
+    Mutation(
+        # The writing end of the same guard: without the precomputed digest the sidecar falls
+        # back to re-reading the caller's file, so the batch is attested as whatever is on
+        # disk once the run is over rather than as the bytes that went into the prompt.
+        "the batch digest is dropped, so provenance hashes the file after the run",
+        "persona_review/cli.py",
+        r'        prov_digests=\{"batch": batch_digest\},',
+        "        prov_digests=None,",
+        suite="process",
+        selector="attested_as_the_bytes",
     ),
     Mutation(
         # Ordering, not presence: locking after the clear still lets the second run delete
