@@ -2498,3 +2498,62 @@ class TestQuotesAreCheckedAgainstTheTree:
         quote = "src/f.py:2 -- `\n    return bill(account)`"
         _, err, after = self._run(quote)
         assert after["first_evidence"] == quote, err
+
+    def test_a_fabricated_citation_beside_true_ones_drops_the_quote(self):
+        # A citation that resolves to nothing carries text of its own here, so it is a claim
+        # like any other segment: unchecked, a lens prefixes an invented line to two true
+        # ones and the quote survives on their strength.
+        self._five_line_file()
+        quote = "src/nope.py:1 -- authorize_everything()\n"
+        quote += "src/f.py:2 -- return bill(account)\nsrc/f.py:4 -- return refund(account)"
+        _, err, after = self._run(quote)
+        assert "first_evidence" not in after
+        assert "cites src/nope.py:1, which does not resolve" in err, err
+
+    def test_a_segmented_quote_whose_citations_all_resolve_is_kept(self):
+        # The control for the case above: the same quote without the invented first line.
+        self._five_line_file()
+        quote = "src/f.py:2 -- return bill(account)\nsrc/f.py:4 -- return refund(account)"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+
+    def test_a_citation_inside_the_quoted_source_is_not_a_claim_of_its_own(self):
+        # The quoted LINE contains a citation, which is what a test fixture or a log line in
+        # a reviewed tree looks like. Read as a second claim it splits the quote, and the
+        # text left to the finding's own citation is too short to check.
+        (self.tree / "tests").mkdir()
+        line = '    quote = "README.md:1 -- persona-review working notes here"'
+        (self.tree / "tests" / "t.py").write_text(f"x = 1\ny = 2\n{line}\n", encoding="utf-8")
+        (self.tree / "README.md").write_text(
+            "persona-review working notes here\n", encoding="utf-8"
+        )
+        quote = f"tests/t.py:3 -- {line.strip()}"
+        _, err, after = self._run(quote, file="tests/t.py", line=3)
+        assert after["first_evidence"] == quote, err
+
+    @pytest.mark.parametrize("separator", ["--", ":"])
+    def test_a_doubled_citation_of_one_location_is_one_claim(self, separator: str):
+        # The same location cited twice is one claim about it, so both citations leave the
+        # compared text. Removing only the one being checked leaves the other in the
+        # remainder, where it is not on the line.
+        quote = f"src/f.py:2 {separator} return bill(account) (src/f.py:2)"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+
+    def test_a_version_token_on_the_quoted_line_does_not_split_the_quote(self):
+        # `python:3` is citation-shaped, and a file named `python` at the root makes it
+        # resolve. Split on it, the finding's own citation keeps `FROM` and the quote dies
+        # on the floor -- on a line the tree carries verbatim.
+        (self.tree / "src" / "f.py").write_text("FROM python:3.12\n", encoding="utf-8")
+        (self.tree / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+        quote = "src/f.py:1 -- FROM python:3.12"
+        _, err, after = self._run(quote, line=1)
+        assert after["first_evidence"] == quote, err
+
+    def test_a_citation_of_the_findings_own_file_by_another_path_founds_it(self):
+        # An in-tree absolute path and a path through `..` both name the finding's own file.
+        # Compared lexically they name some other location, and a verbatim quote is dropped.
+        for cited in (str(self.tree / "src" / "f.py"), "src/../src/f.py"):
+            quote = f"{cited}:2 -- return bill(account)"
+            _, err, after = self._run(quote, file="src/f.py")
+            assert after["first_evidence"] == quote, err
