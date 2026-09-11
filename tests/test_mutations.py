@@ -379,17 +379,139 @@ MUTATIONS: list[Mutation] = [
         # checked, and the merge then treats a fabricated line as founded evidence.
         "--verify-quotes keeps a quote the reviewed tree does not carry",
         "persona_review/findings.py",
-        r"    if quoted not in _normalized\(ref\.lines\[ref\.line - 1\]\):",
+        r'    if quoted not in _normalized\("\\n"\.join\(window\)\):',
         "    if False:",
     ),
     Mutation(
         # A quote is model-written text, so the path inside it is an input and not a
         # destination. Reverting this lets `/etc/passwd:1 -- root:x:0:0` make the reader
         # confirm a line in a file the caller never pointed it at.
+        #
+        # On the RESOLVED path, and the kill cases say why: the string check this replaced
+        # refused `..` and absolute paths — the only two vectors the old kill cases used — and
+        # admitted a symlink inside the tree pointing out of it, so this very entry passed
+        # with the escape wide open.
         "a quote can steer the verifier at a file outside the reviewed tree",
         "persona_review/findings.py",
-        r'            if Path\(rel\)\.is_absolute\(\) or "\.\." in Path\(rel\)\.parts:',
-        "            if False:",
+        r"                if not target\.is_relative_to\(repo\):",
+        "                if False:",
+    ),
+    Mutation(
+        # `_resolve`'s contract is that an unresolvable citation is dropped, never fatal. The
+        # line number is model-written text, and CPython refuses to int() 5000 digits; the
+        # narrow except let that leave as a traceback and exit 1, which already means "not a
+        # findings artifact".
+        "a citation the reader cannot parse crashes instead of dropping",
+        "persona_review/findings.py",
+        r"            except \(OSError, ValueError\):",
+        "            except OSError:",
+    ),
+    Mutation(
+        # The backticked span is read only when the remainder IS one. Searching for it
+        # anywhere chose the branch by the presence of a token: a parenthesized aside was
+        # checked instead of the quote, certifying prose and dropping verbatim lines.
+        "a backtick anywhere in the quote redirects the check at a fragment",
+        "persona_review/findings.py",
+        r"    span = _BACKTICKED\.fullmatch\(rest\)",
+        "    span = _BACKTICKED.search(rest)",
+    ),
+    Mutation(
+        # The evidence contract asks for the motivating LINE(S). A quote spanning the two
+        # lines the finding turns on, tested against one line, can never match — and the
+        # helper then demotes the finding to 50, where its gate suppresses it.
+        "a multi-line quote is tested against a single line again",
+        "persona_review/findings.py",
+        r'    span = compared\.count\("\\n"\) \+ 1',
+        "    span = 1",
+    ),
+    Mutation(
+        # Without the floor, `account` and `r` both "verify" against `return bill(account)`,
+        # and a surviving first_evidence is what unlocks cross-model promotion.
+        "the substring test loses its specificity floor",
+        "persona_review/findings.py",
+        r"^_QUOTE_FLOOR = 12$",
+        "_QUOTE_FLOOR = 0",
+    ),
+    Mutation(
+        # Markdown decoration and a `:col` suffix are shapes lenses write every day. Without
+        # them in the match, the path carried `**` or a backtick, nothing resolved, and a true
+        # quote was dropped with a reason indistinguishable from a fabricated citation.
+        "a decorated citation is unparseable again",
+        "persona_review/findings.py",
+        r"^_REFERENCE = re\.compile\(.*$",
+        r"""_REFERENCE = re.compile(r"([^\\s`'\\"]+?):(\\d+)\\b")""",
+    ),
+    Mutation(
+        # Committing to the first citation that resolves drops a quote the tree does carry
+        # when a lens annotates it with a second one.
+        "only the first resolving citation may corroborate a quote",
+        "persona_review/findings.py",
+        r"    for ref in found:",
+        "    for ref in found[:1]:",
+    ),
+    Mutation(
+        # The twin of the reviewer-name guard above. A non-list `residual_risks` makes the
+        # helper drop the whole return into a silent counter, so a reviewer's entire pass
+        # becomes silence downstream.
+        "a return whose list fields are the wrong shape is emitted anyway",
+        "persona_review/findings.py",
+        r"        if not isinstance\(out\.setdefault\(key, \[\]\), list\):",
+        "        if False:",
+    ),
+    Mutation(
+        # Merge state is the orchestrator's to stamp on its own reconciled returns. A truthy
+        # `settled_conflict` copied out of a lens artifact exempts the finding from the
+        # helper's confidence gate — carrying one whose quote --verify-quotes just dropped
+        # past the very gate this projection exists to feed.
+        "merge state is copied out of a lens artifact again",
+        "persona_review/findings.py",
+        r'^    "first_evidence",$',
+        '    "first_evidence", "settled_conflict",',
+    ),
+    Mutation(
+        # Silently discarding a -C nobody could use emits the plain projection at exit 0,
+        # byte-identical to a verified one, on the mode whose only reader is a machine.
+        "-C without --verify-quotes is discarded instead of refused",
+        "persona_review/findings.py",
+        r"    elif repo_spec is not None:",
+        "    elif False:",
+    ),
+    Mutation(
+        # --return and the rendering modes project the same artifact for different readers,
+        # so ranking them silently hands a caller a shape it did not ask for.
+        "--return together with --json or --show is ranked instead of refused",
+        "persona_review/findings.py",
+        r"    if as_return and \(as_json or show is not None\):",
+        "    if False:",
+    ),
+    Mutation(
+        "--verify-quotes is accepted without the --return it modifies",
+        "persona_review/findings.py",
+        r"        if not as_return:",
+        "        if False:",
+    ),
+    Mutation(
+        # Defaulting the reviewed tree to the working directory verifies the quotes against
+        # whatever happens to be checked out there, and says nothing.
+        "--verify-quotes falls back to the current directory when -C is missing",
+        "persona_review/findings.py",
+        r'^            return _usage_error\("--verify-quotes wants -C.*$',
+        '            repo_spec = "."',
+    ),
+    Mutation(
+        "a -C that is not a directory is accepted",
+        "persona_review/findings.py",
+        r"        if not repo\.is_dir\(\):",
+        "        if False:",
+    ),
+    Mutation(
+        # `Path("~nosuchuser/x").expanduser()` raises RuntimeError — not OSError, and not a
+        # type a caller would think to catch — so an unknown user leaves as a traceback and an
+        # unmapped status instead of exit 2.
+        "an unknown home directory in -C leaves as a traceback",
+        "persona_review/findings.py",
+        r"    except RuntimeError:",
+        "    except SystemError:",
     ),
     Mutation(
         # The laundering route in the mode a machine consumes. --return feeds a merge
@@ -494,6 +616,17 @@ MUTATIONS: list[Mutation] = [
     # Each entry names the tests that should kill it, so one mutation runs a handful of
     # process tests rather than all 85. The selector is itself checked: a mutation whose
     # tests all pass is a survivor, and a selector matching NOTHING is reported as broken.
+    Mutation(
+        # The documented way to consume --return pipes it into `jq -s .`. Without the handler
+        # a reader that stops early leaves the interpreter's shutdown flush to raise where
+        # nothing can catch it, reporting failure for a projection that completed.
+        "a broken pipe turns a completed --return into a failure",
+        "persona_review/findings.py",
+        r"        except BrokenPipeError:",
+        "        except SystemError:",
+        suite="process",
+        selector="piped_into_a_reader_that_stops_early",
+    ),
     Mutation(
         # Two concurrent runs of one persona through one provider address the same files.
         # Not a lost race — a silently wrong answer, which is the failure this package is for.

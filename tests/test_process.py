@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -56,7 +57,8 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
-FINDING = {"title": "t", "severity": "P1", "file": "f.py", "line": 1, "evidence": ["f.py:1 -- x"]}
+QUOTE = "f.py:1 -- return bill(account)"
+FINDING = {"title": "t", "severity": "P1", "file": "f.py", "line": 1, "evidence": [QUOTE]}
 ANSWER = json.dumps(
     {
         "reviewer": "adversarial-reviewer",
@@ -723,7 +725,7 @@ class TestTheMergeTierReturn(Harness):
         assert proc.returncode == 0, proc.stderr
         obj = json.loads(proc.stdout)
         assert obj["reviewer"] == "adversarial-reviewer"
-        assert [row["first_evidence"] for row in obj["findings"]] == ["f.py:1 -- x"]
+        assert [row["first_evidence"] for row in obj["findings"]] == [QUOTE]
         # The evidence array is an artifact field, not a return field.
         assert "evidence" not in obj["findings"][0]
         assert "1 first_evidence backfilled from evidence[0]" in proc.stderr
@@ -734,12 +736,12 @@ class TestTheMergeTierReturn(Harness):
         assert self.review(provider, "adversarial-reviewer").returncode == 0
         tree = self.work / "reviewed"
         tree.mkdir()
-        (tree / "f.py").write_text("x\n", encoding="utf-8")
+        (tree / "f.py").write_text("    return bill(account)\n", encoding="utf-8")
         kept = self.findings(
             str(self.artifact(provider)), "--return", "--verify-quotes", "-C", str(tree)
         )
         assert kept.returncode == 0, kept.stderr
-        assert json.loads(kept.stdout)["findings"][0]["first_evidence"] == "f.py:1 -- x"
+        assert json.loads(kept.stdout)["findings"][0]["first_evidence"] == QUOTE
         assert "0 dropped by --verify-quotes" in kept.stderr
 
         (tree / "f.py").write_text("something else entirely\n", encoding="utf-8")
@@ -754,7 +756,7 @@ class TestTheMergeTierReturn(Harness):
         assert "1 dropped by --verify-quotes" in dropped.stderr
         assert json.loads(self.artifact(provider).read_text(encoding="utf-8"))["findings"][0][
             "evidence"
-        ] == ["f.py:1 -- x"]
+        ] == [QUOTE]
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_verify_quotes_without_a_usable_tree_is_a_usage_error(self, provider: str):
@@ -765,6 +767,7 @@ class TestTheMergeTierReturn(Harness):
             (artifact, "--verify-quotes"),
             (artifact, "--return", "--verify-quotes"),
             (artifact, "--return", "--verify-quotes", "-C", artifact),
+            (artifact, "--return", "-C", "."),
             (artifact, "--return", "--json"),
         ):
             proc = self.findings(*args)
@@ -1365,6 +1368,50 @@ class TestFindingsCommand(Harness):
         assert proc.returncode == 0, proc.stderr
         assert "BEGIN UNTRUSTED MODEL OUTPUT" in proc.stdout
         assert "#1 P1" in proc.stdout
+
+    def test_a_return_piped_into_a_reader_that_stops_early_still_exits_zero(self):
+        """A closed stdout is not a failed projection.
+
+        The documented way to consume `--return` pipes it into `jq -s .`; a `head`, an
+        erroring filter, or any reader that does not drain stdout closes the pipe mid-write.
+        Without the handler the interpreter's shutdown flush raises where nothing can catch
+        it and the process exits non-zero -- failure reported for work that completed, and
+        indistinguishable from an unreadable artifact.
+        """
+        big = self.work / "big.json"
+        rows = [{**FINDING, "title": f"finding {n}"} for n in range(5000)]
+        big.write_text(
+            json.dumps(
+                {
+                    "reviewer": "adversarial-reviewer",
+                    "findings": rows,
+                    "residual_risks": [],
+                    "testing_gaps": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        cmd = self.findings_cmd
+        argv = [str(cmd)] if isinstance(cmd, Path) else list(cmd)
+        # The pipeline's own status is `head`'s, so the command reports its own -- the house
+        # rule about not reading an exit status through a pipe, in a test that needs a pipe.
+        quoted = shlex.join([*argv, str(big), "--return"])
+        script = f"{{ {quoted}; echo EXIT=$? >&2; }} | head -c 100"
+        proc = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            env=self.env(),
+            cwd=self.work,
+            timeout=120,
+            check=False,
+        )
+        assert "EXIT=0" in proc.stderr, proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "BrokenPipeError" not in proc.stderr, proc.stderr
+        assert len(proc.stdout) <= 100, len(proc.stdout)
+        # The summary still reaches the caller: only stdout was closed.
+        assert "5000 findings" in proc.stderr, proc.stderr
 
     def test_json_round_trips_through_the_installed_command(self):
         self.good_answer("grok")

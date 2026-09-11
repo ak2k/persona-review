@@ -1910,19 +1910,16 @@ class TestTheMergeTierProjection:
             "pre_existing",
             "suggested_fix",
             "first_evidence",
-            "settled_conflict",
-            "reviewers",
-            "independent_reviewers",
         }, row
 
-    def test_the_merge_state_keys_are_carried_verbatim(self):
-        # `settled_conflict`, `reviewers` and `independent_reviewers` are written INTO a
-        # return by the helper and read back OUT of one: dropping them silently reopens a
-        # settled conflict and disables cross-model promotion.
+    def test_the_merge_state_keys_are_never_copied_from_an_artifact(self):
+        # Merge state is the orchestrator's to stamp on its own reconciled returns. A truthy
+        # `settled_conflict` exempts a finding from the helper's confidence gate, so a lens
+        # artifact carrying one would walk a finding whose quote --verify-quotes had just
+        # dropped straight past the gate this projection exists to feed.
         row = self._one(artifact(_return_finding()))
-        assert row["settled_conflict"] == "kept as P1 over the peer's P2"
-        assert row["reviewers"] == ["correctness", "api-contract"]
-        assert row["independent_reviewers"] == ["api-contract"]
+        for key in ("settled_conflict", "reviewers", "independent_reviewers"):
+            assert key not in row, key
 
     def test_the_artifact_only_keys_are_dropped(self):
         # A return is a different shape from an artifact, not a subset of one: the helper's
@@ -2037,6 +2034,11 @@ class TestTheMergeTierProjection:
             ((ARTIFACT, "--verify-quotes"), "only applies to --return"),
             ((ARTIFACT, "--return", "--verify-quotes"), "wants -C"),
             ((ARTIFACT, "--return", "--verify-quotes", "-C"), "-C wants a directory"),
+            # A -C nobody asked to use is not discarded: the output would be byte-identical
+            # to an unverified --return at exit 0, and a machine caller has no channel on
+            # which to notice it got no verification.
+            ((ARTIFACT, "--return", "-C", "."), "-C only applies to --verify-quotes"),
+            ((ARTIFACT, "-C", "."), "-C only applies to --verify-quotes"),
         ],
     )
     def test_a_mode_that_does_not_exist_is_a_usage_error(
@@ -2084,6 +2086,12 @@ class TestTheMergeTierProjection:
         assert code == 0
         for token in ("--return", "--verify-quotes", "-C <dir>"):
             assert token in out
+        # Wrapped in HELP, one sentence in README: the words are the contract, the line
+        # breaks are layout, so the comparison is against the collapsed text.
+        assert (
+            "the file is unreadable, is not a findings artifact, or could not be"
+            " projected into a usable return"
+        ) in " ".join(out.split())
 
     @PROPERTY
     @given(
@@ -2170,8 +2178,20 @@ class TestQuotesAreCheckedAgainstTheTree:
             "`return bill(account)` -- src/f.py:2",
             # Whitespace is collapsed on both sides, so a re-indented quote still matches.
             "src/f.py:2 --     return   bill(account)",
-            # A substring of the line is enough: lenses quote the fragment that matters.
+            # A substring of the line is enough, down to the floor: lenses quote the
+            # fragment that matters, and `bill(account)` is 13 characters.
             "src/f.py:2 -- bill(account)",
+            # Decoration around the citation, a `:col` suffix, and a backticked remainder:
+            # shapes lenses write every day, each of which used to drop a verbatim quote.
+            "**src/f.py:2** -- return bill(account)",
+            "return bill(account) (src/f.py:2)",
+            "`src/f.py:2` -- return bill(account)",
+            "<src/f.py:2> -- return bill(account)",
+            "src/f.py:2:5 -- return bill(account)",
+            "src/f.py:2 -- `return bill(account)`",
+            # The motivating LINES, which is what the evidence contract asks for: the
+            # comparison is sized to the quote rather than to one line.
+            "src/f.py:1 -- import billing\n    return bill(account)",
         ],
     )
     def test_a_quote_the_tree_carries_is_kept(self, quote: str):
@@ -2195,9 +2215,59 @@ class TestQuotesAreCheckedAgainstTheTree:
             ("src/f.py:1 -- return bill(account)", {}, "quoted text is not on src/f.py:1"),
             ("src/f.py:99 -- return bill(account)", {}, "line 99 is out of range for src/f.py"),
             ("src/gone.py:2 -- return bill(account)", {}, "no file:line reference resolves"),
+            # A citation that resolves to a DIRECTORY inside the tree: readable, contained,
+            # and still not a file with a line 1.
+            ("src:1 -- return bill(account)", {}, "no file:line reference resolves"),
             ("a finding with no citation at all", {}, "no file:line reference resolves"),
             ("src/f.py:2 --", {}, "quoted text is empty"),
             ("`` -- src/f.py:2", {}, "quoted text is empty"),
+            # A backticked span is read only when the remainder IS one. Reading it wherever a
+            # backtick appeared checked `bill` -- four characters of an aside -- and
+            # certified the first two of these, one of which is pure prose.
+            (
+                "src/f.py:2 -- return charge(account)  (the `bill` path is the correct one)",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
+            (
+                "src/f.py:2 -- the account is never re-read before `bill` is called",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
+            (
+                "src/f.py:2 -- return bill(account), not the `import billing` on line 1",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
+            # The floor. Both are ON the cited line as substrings, and neither says anything
+            # about the finding: verification that cannot fail is worse than none.
+            ("src/f.py:2 -- r", {}, "quoted text is too short to check (1 chars, floor 12)"),
+            (
+                "src/f.py:5 -- account",
+                {},
+                "quoted text is too short to check (7 chars, floor 12)",
+            ),
+            # A two-line quote needs two lines under it; checked before the comparison so the
+            # reason says which lines were wanted.
+            (
+                "src/f.py:2 -- import billing\n    return bill(account)",
+                {},
+                "lines 2-3 are out of range for src/f.py (2 lines)",
+            ),
+            # A trailing cross-reference: the compared text is the quote minus the citation
+            # being checked, so the aside is part of it and the remainder is not verbatim.
+            (
+                "src/f.py:2 -- return bill(account)  (see also src/g.py:9)",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
+            # Two citations, only the second resolving: the reason names src/f.py:2, so the
+            # reader did not stop at the first citation it could not resolve.
+            (
+                "src/gone.py:1 and src/f.py:2 -- return charge(account)",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
         ],
     )
     def test_a_quote_the_tree_does_not_carry_is_dropped_with_its_reason(
@@ -2264,11 +2334,56 @@ class TestQuotesAreCheckedAgainstTheTree:
         assert err.getvalue().strip().endswith("1 dropped by --verify-quotes")
 
     def test_a_citation_cannot_steer_the_reader_out_of_the_tree(self):
-        # The quote is model-written text: an input, not a destination. Both of these name a
-        # real file whose line matches, and both must still be dropped.
+        # The quote is model-written text: an input, not a destination. Each of these names a
+        # real file whose cited line carries the quote verbatim, and each must still drop.
+        secret = "the secret line nobody pointed this reader at"
         outside = self.dir / "outside.py"
-        outside.write_text("the secret line\n", encoding="utf-8")
-        for citation in (f"{outside}:1 -- the secret line", "../outside.py:1 -- the secret line"):
+        outside.write_text(f"{secret}\n", encoding="utf-8")
+        # A link INSIDE the tree, cited by its own path, whose target is outside: the check
+        # on the cited STRING refuses the other two and admits this one, which is how the
+        # verifier became a read oracle over every file its caller can open.
+        (self.tree / "src" / "link.py").symlink_to(outside)
+        for citation in (
+            f"{outside}:1 -- {secret}",
+            f"../outside.py:1 -- {secret}",
+            f"src/link.py:1 -- {secret}",
+        ):
             _, err, after = self._run(citation)
             assert "first_evidence" not in after, citation
-            assert "no file:line reference resolves" in err, citation
+            assert "cites a path outside the reviewed tree" in err, citation
+
+    def test_an_unreadable_directory_drops_the_quote_rather_than_crashing(self):
+        # The other half of the unreadable case: this one fails in the stat, before the read,
+        # and _resolve's contract is that an unresolvable citation is dropped, never fatal.
+        if os.geteuid() == 0:
+            pytest.skip("root traverses a mode-000 directory, so the case cannot be produced")
+        locked = self.tree / "src" / "locked"
+        locked.mkdir()
+        (locked / "x.py").write_text("x = 1  # a line long enough to check\n", encoding="utf-8")
+        locked.chmod(0o000)
+        try:
+            _, err, after = self._run("src/locked/x.py:1 -- x = 1  # a line long enough to check")
+        finally:
+            locked.chmod(0o700)
+        assert "first_evidence" not in after
+        assert "no file:line reference resolves" in err
+
+    def test_a_line_number_too_long_to_parse_drops_the_quote_rather_than_crashing(self):
+        # CPython refuses to int() a 5000-digit string, and the digits come straight out of
+        # model-written text.
+        _, err, after = self._run("src/f.py:" + "9" * 5000 + " -- return bill(account)")
+        assert "first_evidence" not in after
+        assert "no file:line reference resolves" in err
+
+    def test_any_citation_in_the_quote_may_corroborate_it(self):
+        # The first citation resolves and contradicts; the second resolves and carries the
+        # text. Committing to the first resolving citation dropped a quote the tree does
+        # hold -- and src/g.py is a line shaped like a citation, which is what a test fixture
+        # or a log line in a reviewed tree looks like.
+        (self.tree / "src" / "g.py").write_text(
+            "src/f.py:99 -- return bill(account)\n", encoding="utf-8"
+        )
+        quote = "src/f.py:99 -- return bill(account) (src/g.py:1)"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote
+        assert err.strip().endswith("0 dropped by --verify-quotes")
