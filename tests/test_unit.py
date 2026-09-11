@@ -1864,7 +1864,7 @@ class TestTheMergeTierProjection:
     The helper merges reviewer returns, not artifacts, and demotes a 75/100 finding whose
     `first_evidence` is missing to 50 — where its own confidence gate suppresses it. A lens
     that filled only `evidence` therefore reads as having found nothing, so the projection's
-    one judgement is the `evidence[0]` fallback tier 1 already applies for display.
+    one judgment is the `evidence[0]` fallback tier 1 already applies for display.
     """
 
     def setup_method(self) -> None:
@@ -2055,7 +2055,7 @@ class TestTheMergeTierProjection:
             (not_a_dir, "is not a directory"),
             (str(Path(self.tmp.name) / "nope"), "is not a directory"),
             # expanduser raises RuntimeError for an unknown user -- not OSError, and not a
-            # type a caller would think to catch, so it used to leave as a traceback.
+            # type a caller would think to catch, so it needs its own arm to reach exit 2.
             ("~nosuchuser0123/x", "names a home directory that does not exist"),
         ):
             code, out, err = self._run(self.path, "--return", "--verify-quotes", "-C", spec)
