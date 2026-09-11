@@ -41,6 +41,7 @@ from persona_review import (  # noqa: E402
     providers,
     runner,
     validate,
+    verdicts,
 )
 
 # Which copy did we import? Only this process knows, so the flake check asserts it here
@@ -2557,3 +2558,472 @@ class TestQuotesAreCheckedAgainstTheTree:
             quote = f"{cited}:2 -- return bill(account)"
             _, err, after = self._run(quote, file="src/f.py")
             assert after["first_evidence"] == quote, err
+
+
+# ---------------------------------------------------------------------------------------
+# VALIDATOR MODE. A review asks what a model finds; a validation asks it to judge findings
+# somebody else already wrote, and the answer is only usable if it addresses each of them
+# exactly once. The tests below cover the library layer of that: the prompt, the batch, the
+# verdicts schema, the coverage rule and the gate they run through.
+
+# The plugin's template is prose ABOUT a prompt, wrapped around the prompt in one fenced
+# block. The fixture keeps both halves, including a literal JSON example with braces in it:
+# that example is why the fill is `str.replace` and not `str.format`.
+VALIDATOR_TEMPLATE = """# Validator batch
+
+Dispatch this to a second model when a review's findings need independent judgment.
+
+```
+You are validating findings that another reviewer reported.
+
+Scope: {scope_mode_and_remote_refs}
+
+Diff: {diff}
+
+Findings to validate:
+
+{findings_json}
+
+Return one verdict per finding, in this shape:
+
+{"verdicts": [{"#": 1, "validated": true, "reason": "confirmed at f.py:2"}]}
+```
+
+Notes for the dispatcher, which are not part of the prompt and must not reach the model.
+"""
+
+
+def batch_item(n: int, **over: Any) -> dict[str, Any]:
+    """One element of the plugin's validator batch.
+
+    The key set is the one a real batch carries (the u3 rounds' `validator-input.json`),
+    reproduced here rather than read from that file: these tests also run against the built
+    package in a sandbox where nothing outside the source tree exists.
+    """
+    item: dict[str, Any] = {
+        "#": n,
+        "title": "t",
+        "severity": "P1",
+        "file": "f.py",
+        "line": 2,
+        "confidence": 100,
+        "why_it_matters": "w",
+        "evidence": ["f.py:2 -- x"],
+        "first_evidence": "f.py:2 -- x",
+        "suggested_fix": "s",
+        "reviewers": ["grok"],
+    }
+    item.update(over)
+    return item
+
+
+def batch_text(*numbers: int) -> str:
+    return json.dumps([batch_item(n) for n in numbers])
+
+
+def verdict(n: int, **over: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {"#": n, "validated": True, "reason": "confirmed at f.py:2"}
+    item.update(over)
+    return item
+
+
+def verdicts_of(*items: dict[str, Any]) -> dict[str, Any]:
+    return {"verdicts": list(items)}
+
+
+def verdicts_schema() -> dict[str, Any]:
+    """The schema as it SHIPS, read through the accessor the gate uses."""
+    return cast(dict[str, Any], json.loads(verdicts.schema_path().read_text(encoding="utf-8")))
+
+
+class TestTheValidatorPrompt:
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.assets = Path(self.tmp.name)
+        (self.assets / assets.VALIDATOR_TEMPLATE).write_text(VALIDATOR_TEMPLATE, encoding="utf-8")
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _prompt(self, *, base: str = "HEAD~1", context: str = "") -> str:
+        return assets.build_validator_prompt(
+            batch_text=batch_text(1, 2),
+            assets=self.assets,
+            schema_text=json.dumps(verdicts_schema()),
+            base=base,
+            context=context,
+        )
+
+    def test_the_prompt_is_the_fence_body_and_not_the_prose_around_it(self):
+        # The wrapper tells a dispatcher when to use this. Sending it would ask the model to
+        # decide whether to validate rather than to validate.
+        body = assets.validator_body(self.assets)
+        assert "You are validating findings" in body
+        assert "Dispatch this to a second model" not in body
+        assert "Notes for the dispatcher" not in body
+        assert "```" not in body
+
+    def test_a_missing_template_is_an_environment_failure(self):
+        with tempfile.TemporaryDirectory() as bare, pytest.raises(errors.EnvError) as caught:
+            assets.validator_body(Path(bare))
+        assert "validator batch template" in str(caught.value)
+        assert caught.value.exit_code == 3
+
+    def test_a_template_with_no_fence_says_the_plugin_restructured_it(self):
+        # Not "no prompt found": the file is present and readable, so the actionable fact is
+        # that its SHAPE changed. Substituting into the surrounding prose would send the
+        # model something that is not the validator prompt at all.
+        (self.assets / assets.VALIDATOR_TEMPLATE).write_text("# No fence here\n", encoding="utf-8")
+        with pytest.raises(errors.EnvError) as caught:
+            assets.validator_body(self.assets)
+        assert str(self.assets / assets.VALIDATOR_TEMPLATE) in str(caught.value)
+        assert "restructured" in str(caught.value)
+        assert caught.value.exit_code == 3
+
+    def test_the_batch_goes_in_verbatim(self):
+        # Verbatim, not re-serialized: the batch is the document the caller assembled, and
+        # the `#` values are the only part this package reads.
+        assert batch_text(1, 2) in self._prompt()
+        assert "{findings_json}" not in self._prompt()
+
+    def test_a_base_ref_tells_the_model_to_diff_it_itself(self):
+        prompt = self._prompt(base="HEAD~3")
+        assert "git diff HEAD~3..HEAD" in prompt
+        assert "{diff}" not in prompt
+
+    def test_without_a_base_ref_the_working_tree_as_a_whole_is_the_change(self):
+        # The alternative -- leaving the slot empty -- asks the model to validate against a
+        # diff it was never given, and a validator with no scope validates by vibe.
+        prompt = self._prompt(base="")
+        assert "No base ref was given" in prompt
+        assert "git diff" not in prompt
+
+    def test_the_scope_block_is_filled_and_carries_the_context_when_given(self):
+        assert "{scope_mode_and_remote_refs}" not in self._prompt()
+        assert "local-aligned" in self._prompt()
+        assert "Additional validation context" not in self._prompt()
+        with_context = self._prompt(context="the reviewed tree is a worktree at HEAD")
+        assert "Additional validation context:" in with_context
+        assert "the reviewed tree is a worktree at HEAD" in with_context
+
+    def test_the_answer_contract_is_appended_after_the_plugin_text(self):
+        prompt = self._prompt()
+        assert "Return the verdicts as a JSON object matching this schema:" in prompt
+        # The schema itself, because this is how codex is told it: only grok's --json-schema
+        # reads `schema_text` out of band.
+        assert json.dumps(verdicts_schema()) in prompt
+        assert "exactly one JSON object" in prompt
+        assert prompt.rstrip().endswith(assets.BOUNDARY_VERDICTS)
+
+    def test_the_fill_is_replacement_so_the_templates_literal_braces_survive(self):
+        # The example verdict is literal JSON. It must reach the model intact...
+        assert '{"verdicts": [{"#": 1, "validated": true' in self._prompt()
+        # ...and this is the control: `format` reads those braces as fields and raises
+        # before substituting anything, which is why the fill cannot use it.
+        with pytest.raises((KeyError, IndexError, ValueError)):
+            assets.validator_body(self.assets).format(
+                findings_json="x", diff="y", scope_mode_and_remote_refs="z"
+            )
+
+
+class TestTheValidatorBatch:
+    def test_the_shape_a_real_batch_has_is_accepted_in_input_order(self):
+        assert verdicts.parse_batch(batch_text(3, 1, 2), "batch.json") == [3, 1, 2]
+
+    @pytest.mark.parametrize(
+        ("text", "because"),
+        [
+            ("not json at all", "is not JSON"),
+            ('{"findings": []}', "must be a JSON array"),
+            ("[1]", "not a finding object"),
+            ("[]", "empty array"),
+        ],
+    )
+    def test_a_batch_that_is_not_a_list_of_finding_objects_is_refused(
+        self, text: str, because: str
+    ):
+        with pytest.raises(errors.UsageError) as caught:
+            verdicts.parse_batch(text, "batch.json")
+        assert because in str(caught.value), str(caught.value)
+        assert "batch.json" in str(caught.value)
+        assert caught.value.exit_code == 2
+
+    @pytest.mark.parametrize(
+        "number",
+        [None, "1", 1.5, True, False, 0, -1],
+        ids=["missing", "str", "float", "true", "false", "zero", "negative"],
+    )
+    def test_every_finding_needs_an_integer_number_of_one_or_more(self, number: Any):
+        # `isinstance(True, int)` is True, so `"#": true` would otherwise pass as 1 and
+        # address another finding's verdict.
+        item = batch_item(1)
+        if number is None:
+            del item["#"]
+        else:
+            item["#"] = number
+        with pytest.raises(errors.UsageError) as caught:
+            verdicts.parse_batch(json.dumps([item]), "batch.json")
+        assert "element 1 has #=" in str(caught.value), str(caught.value)
+        assert caught.value.exit_code == 2
+
+    def test_a_repeated_number_is_refused_and_named(self):
+        with pytest.raises(errors.UsageError) as caught:
+            verdicts.parse_batch(batch_text(1, 2, 1), "batch.json")
+        assert "element 3 repeats #1" in str(caught.value)
+        assert caught.value.exit_code == 2
+
+    @settings(max_examples=60)
+    @given(numbers=st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=6))
+    def test_a_batch_is_accepted_exactly_when_its_numbers_are_a_set(self, numbers: list[int]):
+        # The property, over MULTISETS: uniqueness is the whole contract, because the
+        # verdicts are matched back on these numbers and nothing else.
+        text = json.dumps([batch_item(n) for n in numbers])
+        if len(set(numbers)) == len(numbers):
+            assert verdicts.parse_batch(text, "b.json") == numbers
+        else:
+            with pytest.raises(errors.UsageError) as caught:
+                verdicts.parse_batch(text, "b.json")
+            assert "repeats" in str(caught.value)
+
+
+class TestTheVerdictsSchemaIsThisPackages:
+    """`findings-schema.json` is the plugin's file; this one is ours and has to earn it."""
+
+    def test_the_shipped_schema_is_where_the_gate_looks_and_uses_only_supported_keywords(self):
+        # A keyword this gate does not implement would be silently ignored, certifying
+        # against a rule nobody checked -- so the schema we OWN must pass the same support
+        # check the plugin's does.
+        assert verdicts.schema_path().name == verdicts.SCHEMA_FILE
+        assert verdicts.schema_path().is_file(), verdicts.schema_path()
+        validate.check_schema_supported(verdicts_schema())
+
+    def test_a_complete_verdict_set_passes_and_is_counted(self):
+        found = verdicts_of(verdict(1), verdict(2, validated=False, reason="not reproducible"))
+        assert validate.check_object(found, verdicts_schema(), "verdicts") == 2
+
+    @pytest.mark.parametrize(
+        ("entry", "because"),
+        [
+            (verdict(1, validated="yes"), "must be boolean"),
+            (verdict(1, validated=None), "must be boolean"),
+            (verdict(1, reason=""), "under the schema's minLength"),
+            (verdict(1, **{"#": 0}), "must be >= 1"),
+            (verdict(1, **{"#": True}), "must be integer"),
+            ({"#": 1, "validated": True}, "missing reason"),
+            ({"validated": True, "reason": "r"}, "missing #"),
+        ],
+    )
+    def test_a_verdict_that_does_not_meet_the_schema_is_refused(
+        self, entry: dict[str, Any], because: str
+    ):
+        with pytest.raises(errors.GateError) as caught:
+            validate.check_object(verdicts_of(entry), verdicts_schema(), "verdicts")
+        assert because in str(caught.value), str(caught.value)
+        # The messages name ONE verdict, so a caller can find it in a batch of forty.
+        assert "verdict 1" in str(caught.value), str(caught.value)
+
+    def test_an_element_that_is_not_an_object_is_refused(self):
+        with pytest.raises(errors.GateError) as caught:
+            validate.check_object({"verdicts": ["yes"]}, verdicts_schema(), "verdicts")
+        assert "verdict 1 is not an object" in str(caught.value)
+
+    def test_a_missing_or_non_array_verdicts_key_is_refused(self):
+        cases: list[dict[str, Any]] = [{}, {"verdicts": {}}]
+        for found in cases:
+            with pytest.raises(errors.GateError):
+                validate.check_object(found, verdicts_schema(), "verdicts")
+
+    def test_the_findings_only_demands_are_not_made_of_this_schema(self):
+        # The control for the split. The verdicts schema declares no enums at all, so a walk
+        # that kept the findings gate's demands would fail closed on EVERY validation -- and
+        # the failure would read as a bad answer rather than as a wrong gate.
+        schema = verdicts_schema()
+        found = verdicts_of(verdict(1))
+        assert validate.check_object(found, schema, "verdicts") == 1
+        with pytest.raises(errors.GateError) as caught:
+            validate.check_object(found, schema, "verdicts", demand_item_rules=True)
+        assert "enums" in str(caught.value)
+
+
+class TestOneVerdictForEveryFindingExactlyOnce:
+    """The rule a silently short answer breaks: a finding nobody judged reads as judged."""
+
+    def test_a_complete_set_covers_the_batch(self):
+        verdicts.check_coverage(verdicts_of(verdict(1), verdict(2)), [1, 2])
+
+    @pytest.mark.parametrize(
+        ("found", "expected", "because"),
+        [
+            (verdicts_of(verdict(1)), [1, 2], "no verdict for #2"),
+            (verdicts_of(verdict(1), verdict(3)), [1, 2], "findings that were not sent: #3"),
+            (verdicts_of(verdict(1), verdict(1)), [1], "more than one verdict for #1"),
+        ],
+    )
+    def test_missing_extra_and_duplicated_numbers_are_named(
+        self, found: dict[str, Any], expected: list[int], because: str
+    ):
+        with pytest.raises(errors.GateError) as caught:
+            verdicts.check_coverage(cast(validate.Artifact, found), expected)
+        assert because in str(caught.value), str(caught.value)
+        assert caught.value.exit_code == 1
+
+    def test_the_summary_counts_both_sides(self):
+        found = verdicts_of(verdict(1), verdict(2, validated=False), verdict(3, validated=False))
+        assert verdicts.summarize(found, 3) == "1 validated, 2 rejected"
+
+    def test_the_summary_counts_from_the_flag_rather_than_from_the_total(self):
+        # Control: with `rejected = count - validated`, a verdict whose flag is neither true
+        # nor false would be counted as rejected. The schema refuses that shape first; the
+        # arithmetic must not depend on it having done so.
+        found = verdicts_of(verdict(1), verdict(2, validated="maybe"))
+        assert verdicts.summarize(found, 2) == "1 validated, 0 rejected"
+
+
+class TestTheGateOnVerdicts:
+    """The same gate frame a review runs through, with the four validator-mode arguments."""
+
+    def _check(self, expected: list[int]) -> Any:
+        def check(found: validate.Artifact, schema: validate.JSONObject) -> int:
+            count = validate.check_object(found, schema, "verdicts")
+            verdicts.check_coverage(found, expected)
+            return count
+
+        return check
+
+    def _gate(
+        self,
+        tmp: Path,
+        answer: str,
+        events: str,
+        *,
+        expected: list[int],
+        mode: str = "object",
+        evidence_mode: str = "codex-items",
+    ) -> tuple[int, str, str]:
+        answer_file = tmp / ("events.jsonl" if mode == "grok-events" else "answer.txt")
+        answer_file.write_text(answer, encoding="utf-8")
+        events_file = tmp / "events.jsonl"
+        if events_file != answer_file:
+            events_file.write_text(events, encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = validate.gate(
+                    answer_file=answer_file,
+                    schema_path=verdicts.schema_path(),
+                    mode=mode,
+                    findings_out=tmp / "validator-grok.json",
+                    provenance_out=tmp / "validator-grok-provenance.json",
+                    prov_pairs=[],
+                    prov_files={},
+                    evidence=validate.Evidence(
+                        events_file=events_file, mode=evidence_mode, duration_s=4.5
+                    ),
+                    label="ce-grok-validate",
+                    key="verdicts",
+                    check=self._check(expected),
+                    summarize=verdicts.summarize,
+                    noun="verdicts",
+                )
+            except errors.AppError as exc:
+                return exc.exit_code, out.getvalue(), str(exc)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_complete_answer_passes_and_reports_the_split_in_one_line(self):
+        answer = json.dumps(verdicts_of(verdict(1), verdict(2, validated=False, reason="no")))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._gate(Path(tmp), answer, CODEX_ONE_CALL, expected=[1, 2])
+            written = json.loads((Path(tmp) / "validator-grok.json").read_text(encoding="utf-8"))
+        assert code == 0, err
+        assert out.strip().endswith("validator-grok.json")
+        assert "ce-grok-validate: 2 verdicts (1 validated, 1 rejected) ->" in out
+        assert out.count("\n") == 1, out
+        assert written == verdicts_of(verdict(1), verdict(2, validated=False, reason="no"))
+
+    def test_the_same_answer_arrives_through_groks_event_stream(self):
+        # Both extraction modes, because the top-level key check that a verdicts answer has
+        # to pass lives in each of them -- and before this parameter existed, a perfectly
+        # good verdicts object died at exit 1 on BOTH providers.
+        stream = (
+            grok_tool_call()
+            + "\n"
+            + grok_result(structured_output=verdicts_of(verdict(1), verdict(2)))
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._gate(
+                Path(tmp),
+                stream,
+                stream,
+                expected=[1, 2],
+                mode="grok-events",
+                evidence_mode="grok-messages",
+            )
+        assert code == 0, err
+        assert "2 verdicts (2 validated, 0 rejected)" in out
+
+    def test_an_answer_that_misses_a_finding_is_a_gate_failure(self):
+        # Exit 1 and no summary line: a batch that comes back a verdict short would
+        # otherwise read as a completed validation, and the unjudged finding as judged.
+        answer = json.dumps(verdicts_of(verdict(1)))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._gate(Path(tmp), answer, CODEX_ONE_CALL, expected=[1, 2])
+        assert code == 1, err
+        assert out == ""
+        assert "no verdict for #2" in err
+
+    def test_a_validation_that_made_no_tool_calls_is_refused_in_its_own_words(self):
+        # The whole reason this mode exists: `validated: true` across the board from a run
+        # that inspected nothing is the answer it must never certify.
+        answer = json.dumps(verdicts_of(verdict(1), verdict(2)))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, CODEX_NO_CALLS, expected=[1, 2])
+            record = json.loads(
+                (Path(tmp) / "validator-grok-provenance.json").read_text(encoding="utf-8")
+            )
+        assert code == 6, message
+        assert out == ""
+        assert "refusing to report 2 verdicts" in message, message
+        assert "findings" not in message, message
+        assert record["run_stats"]["tool_calls"] == 0
+
+    def test_a_findings_answer_does_not_pass_as_verdicts(self):
+        # Control for the key parameter pointing the other way: without it the gate would
+        # read whatever top-level key it was hardcoded to.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, err = self._gate(Path(tmp), EMPTY_EXAMPLE, CODEX_ONE_CALL, expected=[1])
+        assert code == 1
+        assert "no verdicts key" in err, err
+
+
+class TestTheExitTableSpeaksTheFlowsWords:
+    def test_the_default_rendering_is_the_review_wording_unchanged(self):
+        # Byte-for-byte the sentences the review commands published before the table took
+        # word sets at all: the flow parameter must not have edited the shipped contract.
+        rendered = errors.render_exit_table("grok")
+        assert "  0   schema-valid findings (an empty findings array is valid)" in rendered
+        assert "  1   the answer was not schema-valid findings" in rendered
+        assert "  2   usage error: bad arguments, unknown or markdown-only persona," in rendered
+        assert "nothing, so its findings -- empty or not -- attest to nothing" in rendered
+
+    def test_the_validate_rendering_swaps_the_nouns_and_nothing_else(self):
+        rendered = errors.render_exit_table("grok", errors.VALIDATE_WORDS)
+        assert "schema-valid verdicts (one verdict for every input #, exactly once)" in rendered
+        assert "the answer was not schema-valid verdicts" in rendered
+        assert "a batch that is not an array of findings carrying a `#` each" in rendered
+        # The word the validate commands must never use: they take no persona, and the
+        # answer they gate is not findings.
+        assert "findings" not in rendered.replace("array of findings", "")
+        assert "persona" not in rendered
+        # The statuses are the same table: same numbers, same runner substitution.
+        assert "grok itself exited non-zero" in rendered
+        for code in (0, 1, 2, 3, 4, 5, 6, 78):
+            assert f"  {code} " in rendered, f"exit {code} missing"
+
+    def test_no_word_slot_survives_either_rendering(self):
+        # The control for the substitution pass. An unfilled `{answer}` would still leave a
+        # table that lists every status, which is what the assertions above mostly check.
+        for words in (errors.REVIEW_WORDS, errors.VALIDATE_WORDS):
+            rendered = errors.render_exit_table("grok", words)
+            for slot in ("{answer}", "{ok}", "{bad_argument}", "{runner}"):
+                assert slot not in rendered, (slot, words)

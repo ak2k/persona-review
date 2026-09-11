@@ -167,8 +167,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "per-finding required keys unenforced",
         "persona_review/validate.py",
-        r"        absent = \[k for k in item_required "
-        r"if isinstance\(k, str\) and k not in finding\]",
+        r"        absent = \[k for k in required_fields "
+        r"if isinstance\(k, str\) and k not in entry\]",
         "        absent = []",
     ),
     Mutation(
@@ -208,7 +208,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a malformed structured_output falls through to the raw text",
         "persona_review/validate.py",
-        r'        if not isinstance\(obj, dict\) or "findings" not in obj:',
+        r"        if not isinstance\(obj, dict\) or key not in obj:",
         "        if False:",
     ),
     Mutation(
@@ -693,8 +693,42 @@ MUTATIONS: list[Mutation] = [
         "the findings schema is used without checking it is an object",
         "persona_review/validate.py",
         r'            schema = _as_object\(loads\(schema_path\.read_text\(encoding="utf-8"\)\),'
-        r' "findings schema"\)',
+        r' f"\{noun\} schema"\)',
         '            schema = cast(JSONObject, loads(schema_path.read_text(encoding="utf-8")))',
+    ),
+    Mutation(
+        # The rule the whole mode exists for. A batch that comes back one verdict short
+        # reads as a completed validation, and the finding nobody judged is then carried as
+        # if it had been -- which is the validation-degraded state this replaces.
+        "a batch with a finding nobody judged passes as a complete validation",
+        "persona_review/verdicts.py",
+        r"    if problems:",
+        "    if False:",
+    ),
+    Mutation(
+        # `#` is the only address a verdict has. Two findings claiming one number makes a
+        # verdict unattributable, and the coverage check above would then report a count
+        # that happens to match while one finding is unjudged.
+        "a batch may address two findings with one number",
+        "persona_review/verdicts.py",
+        r"        if number in seen:",
+        "        if False:",
+    ),
+    Mutation(
+        # An empty batch buys a full-effort model run whose only correct answer is `[]`.
+        "an empty batch is dispatched instead of refused",
+        "persona_review/verdicts.py",
+        r"    if not numbers:",
+        "    if False:",
+    ),
+    Mutation(
+        # The codex/object site of the same fail-open guard the grok entry above covers, and
+        # a separate one because neither site's pattern can reach the other: without the key
+        # check the gate believes whatever top-level key the answer happens to carry.
+        "the object answer's top-level key is never checked",
+        "persona_review/validate.py",
+        r"    if not isinstance\(decoded, dict\) or key not in decoded:",
+        "    if False:",
     ),
     # ----------------------------------------------------------------------------------
     # PROCESS TIER. cli.py and runner.py had no entries at all, because the unit suite

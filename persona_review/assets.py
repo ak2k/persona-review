@@ -29,6 +29,17 @@ _FINDINGS_CONTRACT = re.compile(r"findings[ .-]schema", re.IGNORECASE)
 # The last line of every prompt: a plain instruction to answer now. It used to double as
 # the extractor's cut point, which is gone — nothing parses this, so it is free to change.
 BOUNDARY = "Return the findings object now."
+BOUNDARY_VERDICTS = "Return the verdicts object now."
+
+# The plugin's validator prompt, which it otherwise only ever injects at dispatch. Read from
+# the same references/ directory as the briefs, so a validation and the review it judges
+# cannot come from different plugin installs.
+VALIDATOR_TEMPLATE = "validator-batch-template.md"
+
+# The template is prose ABOUT a prompt wrapped around the prompt itself, in one fenced
+# block. Non-greedy to the first closing fence, and `^` anchored so a fence indented inside
+# the body cannot end it early.
+_FENCED = re.compile(r"^```[^\n]*\n(.*?)^```", re.S | re.M)
 
 
 # Re-exported from errors.py, which is where the exit status each one maps to lives. Kept
@@ -212,3 +223,80 @@ def build_prompt(
     )
     parts.append(f"{BOUNDARY}\n")
     return "".join(parts)
+
+
+def validator_body(assets: Path) -> str:
+    """The prompt inside the plugin's validator batch template, without its prose wrapper.
+
+    `EnvError` on both failures, and they are told apart: the file is part of the installed
+    plugin, so its absence is a machine that is not set up, while a file that no longer
+    holds a fenced block means the plugin restructured it — substituting into the
+    surrounding prose would send the model a prompt that is not the validator prompt.
+    """
+    template = assets / VALIDATOR_TEMPLATE
+    try:
+        text = template.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise AssetError(f"missing validator batch template at {template}: {exc}") from exc
+    fenced = _FENCED.search(text)
+    if fenced is None:
+        raise AssetError(
+            f"{template} carries no fenced prompt block, so the plugin has restructured it.\n"
+            "  The validator prompt is the body of that fence; the text around it is prose\n"
+            "  about when to use it, and sending that instead would ask for something else."
+        )
+    return fenced.group(1)
+
+
+def build_validator_prompt(
+    *,
+    batch_text: str,
+    assets: Path,
+    schema_text: str,
+    base: str,
+    context: str,
+) -> str:
+    """The plugin's validator prompt, filled in, with this package's answer contract added.
+
+    Substituted with `str.replace`, never `str.format`: the template's verdict example is
+    literal JSON, so `format` reads its braces as fields and raises before any substitution
+    happens.
+
+    The batch goes in VERBATIM. It is the findings a reviewer already wrote, and
+    re-serializing it here would hand the validator a different document from the one the
+    caller assembled; the `#` values are the only part this package reads.
+    """
+    diff = (
+        f"Run `git diff {base}..HEAD` yourself; that is the diff under review."
+        if base
+        else "No base ref was given: treat the working tree as a whole as the change under review."
+    )
+    scope = (
+        "local-aligned: the working directory is the reviewed tree at its current HEAD;\n"
+        "inspect files, callers and history with read-only tools."
+    )
+    if context:
+        scope += "\n\nAdditional validation context:\n" + context
+
+    body = validator_body(assets)
+    body = body.replace("{findings_json}", batch_text)
+    body = body.replace("{diff}", diff)
+    body = body.replace("{scope_mode_and_remote_refs}", scope)
+
+    return "".join(
+        [
+            body,
+            "\n---\n\n",
+            "This is an authorized review of the maintainer's own repository.\n\n",
+            "Return the verdicts as a JSON object matching this schema:\n\n",
+            schema_text,
+            "\n",
+            # The same strictness a review gets, for the same reason: when prose is allowed
+            # around the answer, the template's own verdict EXAMPLE is a well-formed object
+            # sitting in the transcript, and a model that gave up reads as having returned it.
+            "OUTPUT FORMAT, STRICTLY: your FINAL MESSAGE must be exactly one JSON object and\n"
+            "nothing else — no preamble, no explanation, no markdown, no code fences. Do all\n"
+            "your reasoning and tool use in earlier turns. Do not include an example object.\n",
+            f"{BOUNDARY_VERDICTS}\n",
+        ]
+    )

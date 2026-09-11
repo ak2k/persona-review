@@ -25,6 +25,8 @@ mutation testing caught precisely that: redefining EXIT_USAGE to 1 left a suite 
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 
 class AppError(Exception):
     """Anything this package refuses to do, with a status and a legible reason.
@@ -122,14 +124,20 @@ class BudgetError(AppError):
 # rather than restating it: two lists of the same numbers are one edit from disagreeing, and
 # a caller branches on them. `{runner}` is filled in with the provider's binary name.
 #
+# The statuses mean the same thing in both modes, but the NOUNS do not — a validation
+# returns verdicts, and "unknown or markdown-only persona" describes an argument it does not
+# take. Those words are slots too, filled from one of the sets below, so this stays one
+# table: a second literal table for the validate commands would be the same two-lists
+# problem the rendering exists to avoid.
+#
 # Descriptions may span lines; continuation lines are indented by the renderer.
 EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (0, ("schema-valid findings (an empty findings array is valid)",)),
-    (GateError.exit_code, ("the answer was not schema-valid findings",)),
+    (0, ("schema-valid {answer} ({ok})",)),
+    (GateError.exit_code, ("the answer was not schema-valid {answer}",)),
     (
         UsageError.exit_code,
         (
-            "usage error: bad arguments, unknown or markdown-only persona,",
+            "usage error: bad arguments, {bad_argument},",
             "bad -C directory, unresolvable -b base ref, malformed CE_PERSONA_* value",
         ),
     ),
@@ -147,14 +155,38 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
         VacuousRun.exit_code,
         (
             "the model answered without making a single tool call: it inspected",
-            "nothing, so its findings -- empty or not -- attest to nothing",
+            "nothing, so its {answer} -- empty or not -- attest to nothing",
         ),
     ),
     (BudgetError.exit_code, ("over CE_PERSONA_MAX_PROMPT_TOKENS; refused, never summarized",)),
 )
 
+# The two word sets the table is rendered with. A flow picks one; nothing else varies.
+REVIEW_WORDS: Mapping[str, str] = {
+    "answer": "findings",
+    "ok": "an empty findings array is valid",
+    "bad_argument": "unknown or markdown-only persona",
+}
+VALIDATE_WORDS: Mapping[str, str] = {
+    "answer": "verdicts",
+    "ok": "one verdict for every input #, exactly once",
+    "bad_argument": "a batch that is not an array of findings carrying a `#` each",
+}
 
-def render_exit_table(runner: str, width: int = 4) -> str:
+
+def _words(line: str, words: Mapping[str, str]) -> str:
+    """Fill the flow's nouns by REPLACEMENT, before `{runner}` is filled by `format`.
+
+    Two passes rather than one `format` call, so a description reaching `format` with a
+    noun still in it is impossible: `format` would raise KeyError at `--help` time, which
+    is a crash in the one place a caller goes to read the contract.
+    """
+    for name, value in words.items():
+        line = line.replace("{" + name + "}", value)
+    return line
+
+
+def render_exit_table(runner: str, words: Mapping[str, str] = REVIEW_WORDS, width: int = 4) -> str:
     """The exit table as `--help` shows it. One source, two readers: help text and the tests.
 
     `width` pads the status column so 78 and 0 line up; it is the only formatting decision,
@@ -162,7 +194,7 @@ def render_exit_table(runner: str, width: int = 4) -> str:
     """
     lines: list[str] = []
     for code, description in EXIT_TABLE:
-        head, *rest = description
+        head, *rest = [_words(line, words) for line in description]
         lines.append(f"  {str(code).ljust(width)}{head.format(runner=runner)}")
         lines.extend(f"      {line.format(runner=runner)}" for line in rest)
     return "\n".join(lines)
