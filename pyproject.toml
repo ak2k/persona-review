@@ -1,6 +1,6 @@
 [project]
 name = "persona-review"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run a compound-engineering review persona through grok or codex and get schema-valid findings back, not a transcript"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,6 +23,8 @@ dev = [
 [project.scripts]
 ce-grok-persona = "persona_review.cli:grok_main"
 ce-codex-persona = "persona_review.cli:codex_main"
+ce-grok-validate = "persona_review.cli:grok_validate_main"
+ce-codex-validate = "persona_review.cli:codex_validate_main"
 ce-persona-findings = "persona_review.findings:main"
 
 [build-system]

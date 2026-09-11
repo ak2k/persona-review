@@ -804,10 +804,30 @@ MUTATIONS: list[Mutation] = [
         # f.py:42 could not be tied to the code it was about.
         "provenance stops recording the commit that was reviewed",
         "persona_review/cli.py",
-        r"^            f\"head_sha=\{runner\.resolve_revision\(repo, 'HEAD'\)\}\",$",
-        '            f"head_sha=",',
+        r"^        f\"head_sha=\{runner\.resolve_revision\(repo, 'HEAD'\)\}\",$",
+        '        f"head_sha=",',
         suite="process",
         selector="provenance and grok",
+    ),
+    Mutation(
+        # The validate flow's own wiring of the shared gate. `evidence=evidence,` alone now
+        # appears in both flows' gate calls, so this anchors on the validate-only label
+        # beside it: pointing the gate at the prompt file makes every validation look like a
+        # run that inspected nothing -- and the reverse mis-wiring would make one that
+        # inspected nothing look fine, which is the direction that ships.
+        "the validate gate is pointed at the wrong file for its evidence",
+        "persona_review/cli.py",
+        r"        evidence=sent\.evidence,\n        label=provider\.validate_command,",
+        "        evidence=validate.Evidence(\n"
+        "            events_file=sent.prompt_file,\n"
+        "            mode=provider.events_mode,\n"
+        "            duration_s=sent.evidence.duration_s,\n"
+        "        ),\n"
+        "        label=provider.validate_command,",
+        suite="process",
+        # Both validate cases the wiring decides between: the mis-wire reads a prompt as an
+        # event stream, counts nothing in it, and reports every validation as vacuous.
+        selector="(complete_verdicts_object or inspected_nothing) and grok",
     ),
     Mutation(
         # The wiring, not the counter: the gate can count correctly and still count the wrong
