@@ -510,7 +510,7 @@ def _validate_locked(
             f"effort={args.effort or 'config-default'}",
             # WHICH MODE WROTE THIS. The artifact stem already says it, but a sidecar is
             # read on its own and a consumer must not have to parse a filename to learn
-            # whether these are findings or judgements of somebody else's.
+            # whether these are findings or judgments of somebody else's.
             "kind=validator",
             f"batch={batch_file}",
             f"assets_dir={asset_dir}",

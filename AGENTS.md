@@ -37,8 +37,9 @@ mean first establishing empirically that `PositiveFloat` rejects exactly `0`, th
 stdlib are pinned directly, by machinery already in the repo.
 
 The place pydantic *would* earn its keep is parsing `findings-schema.json` into typed
-models — and the design deliberately rules that out. The schema belongs to the
-compound-engineering plugin and is free to grow fields this package has no authority to fix,
+models — and the design deliberately rules that out. That schema belongs to the
+compound-engineering plugin (the validate mode's `verdicts-schema.json` is this package's own;
+see *Things that look like bugs and are not*) and is free to grow fields it has no authority to fix,
 so `validate.JSONValue` plus `isinstance` narrowing is the documented choice. See the note
 at the top of `validate.py`.
 
@@ -151,7 +152,7 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   What is no longer in the hole: a run that made **zero** tool calls. It read nothing, so its
   findings are unfounded whether the array is empty or full, and it exits `6` with no summary
   line. Exactly zero, with no configurable floor — "did this run inspect anything" has an
-  answer, "did it inspect enough" is a judgement this package is not entitled to make. The
+  answer, "did it inspect enough" is a judgment this package is not entitled to make. The
   fixture for the gap test therefore carries a tool call, because without one it would be
   testing the refusal instead.
 - **The two tool-call adapters are shaped differently on purpose.** grok names a tool call
@@ -169,6 +170,15 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   exactly what this command renders — so without the check the package laundered its own
   verdict into an ordinary listing at exit `0`, one command later. Only a positive reading of
   zero refuses; no sidecar, or a malformed one, renders as before.
+- **One schema ships with this package while the other is read from the plugin.**
+  `findings-schema.json` is the plugin's file: this package reads it at run time, hashes it into
+  provenance, and has no authority to change what a finding means. `verdicts-schema.json` is
+  ours, shipped as package data — the plugin inlines the verdict shape in
+  `validator-batch-template.md` and ships no schema file at all, so there is nothing to read and
+  the shape the gate enforces would otherwise be a literal buried in a prompt. The asymmetry is
+  deliberate, not an oversight: a validation reads its template from the assets directory and its
+  schema from the installed library, and the process suite's fixture assets dir carries the
+  template WITHOUT the schema so that split cannot quietly reverse.
 - **`git` is symlinked into the stub directory in `test_process.py`.** The suite runs with a
   PATH that deliberately excludes the real `grok` and `codex`: an early version removed a
   stub, reached the genuine binary, and started a real billed model run from a unit test.
