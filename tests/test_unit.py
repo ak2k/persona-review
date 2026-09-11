@@ -1225,7 +1225,7 @@ class TestFindingsRetrieval:
         Path(other).write_text('{"hello": "world"}', encoding="utf-8")
         code, _, err = self._run(other)
         assert code == 1
-        assert "not a findings artifact" in err
+        assert "not a findings or verdicts artifact" in err
 
         code, _, _ = self._run(str(Path(self.tmp.name) / "nope.json"))
         assert code == 1
@@ -2090,8 +2090,8 @@ class TestTheMergeTierProjection:
         # Wrapped in HELP, one sentence in README: the words are the contract, the line
         # breaks are layout, so the comparison is against the collapsed text.
         assert (
-            "the file is unreadable, is not a findings artifact, or could not be"
-            " projected into a usable return"
+            "the file is unreadable, is neither a findings nor a verdicts artifact, is"
+            " both at once, or could not be projected into a usable return"
         ) in " ".join(out.split())
 
     @PROPERTY
@@ -2994,6 +2994,133 @@ class TestTheGateOnVerdicts:
             code, _, err = self._gate(Path(tmp), EMPTY_EXAMPLE, CODEX_ONE_CALL, expected=[1])
         assert code == 1
         assert "no verdicts key" in err, err
+
+
+class TestTheReaderRendersVerdicts:
+    """`ce-persona-findings` on what a validation wrote, not on what a review wrote.
+
+    One command reads both shapes because both are model output being handed to an agent,
+    and one reader is one place to keep the fence and the vacuous-run refusal. What it must
+    not do is blur them: a verdict has no severity to hide behind and no merge shape to be
+    projected into, so the modes that mean nothing here say so rather than approximating.
+    """
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.path = str(self.dir / "validator-grok.json")
+        # Out of `#` order on disk, so the ordering assertion below is not satisfied by the
+        # file's own layout.
+        self._write(
+            verdicts_of(
+                verdict(2, validated=False, reason="the handler re-raises one line down"),
+                verdict(1, reason="confirmed at f.py:2"),
+            )
+        )
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _write(self, obj: dict[str, Any]) -> None:
+        Path(self.path).write_text(json.dumps(obj), encoding="utf-8")
+
+    def _run(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_every_verdict_renders_in_number_order_with_its_call_and_reason(self):
+        code, out, err = self._run(self.path)
+        assert code == 0, err
+        rows = [ln for ln in out.splitlines() if ln.startswith("#")]
+        assert rows == [
+            "#1 validated — confirmed at f.py:2",
+            "#2 REJECTED — the handler re-raises one line down",
+        ], out
+
+    def test_the_listing_is_fenced_as_untrusted(self):
+        # A verdict is model-written text about somebody else's model-written text, and it
+        # is being handed to a third agent. If anything here needs the fence, this does.
+        _, out, _ = self._run(self.path)
+        assert "BEGIN UNTRUSTED MODEL OUTPUT" in out
+        assert "END UNTRUSTED MODEL OUTPUT" in out
+
+    def test_show_renders_the_verdict_addressed_to_that_finding(self):
+        code, out, err = self._run(self.path, "--show", "2")
+        assert code == 0, err
+        assert "#2 REJECTED — the handler re-raises one line down" in out
+        assert "#1" not in out
+
+    def test_show_for_a_finding_nobody_judged_is_a_usage_error(self):
+        # LITERAL 2: these numbers are a published contract, and an assertion written
+        # against the module's own constant moves with it.
+        code, _, err = self._run(self.path, "--show", "9")
+        assert code == 2
+        assert "no verdict #9" in err
+
+    def test_all_changes_nothing_because_no_verdict_is_hidden(self):
+        _, plain, _ = self._run(self.path)
+        _, widened, _ = self._run(self.path, "--all")
+        assert [ln for ln in plain.splitlines() if ln.startswith("#")] == [
+            ln for ln in widened.splitlines() if ln.startswith("#")
+        ]
+
+    def test_json_is_the_raw_object_unfenced(self):
+        code, out, _ = self._run(self.path, "--json")
+        assert code == 0
+        assert "UNTRUSTED" not in out
+        assert json.loads(out) == json.loads(Path(self.path).read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("args", [("--return",), ("--return", "--verify-quotes", "-C", ".")])
+    def test_the_merge_projection_is_refused_rather_than_approximated(self, args: tuple[str, ...]):
+        # The merge helper reads findings. Projecting a verdict into that shape would put an
+        # object with no title, file or line into a merge that would drop the whole return.
+        code, out, err = self._run(self.path, *args)
+        assert code == 2, err
+        assert out == ""
+        assert "--return" in err
+
+    def test_an_artifact_carrying_both_shapes_is_a_data_error(self):
+        # Neither reading is the file's answer, and rendering one half would report a
+        # complete result for a file that is two half-written ones.
+        self._write({"findings": [], "verdicts": [verdict(1)]})
+        code, _, err = self._run(self.path)
+        assert code == 1
+        assert "both findings and verdicts" in err
+
+    def test_an_object_with_neither_key_is_still_a_data_error(self):
+        # The control for the widening: `load` must not have become "any JSON object".
+        self._write({"hello": "world"})
+        code, _, err = self._run(self.path)
+        assert code == 1
+        assert "not a findings or verdicts artifact" in err
+
+    def test_a_validation_that_inspected_nothing_is_refused_through_its_own_sidecar(self):
+        # Proved rather than assumed: the sidecar lookup is by artifact STEM, and the stem
+        # of a validation is `validator-<provider>`, not `<persona>-<provider>`.
+        (self.dir / "validator-grok-provenance.json").write_text(
+            json.dumps(
+                {
+                    "provider": "grok",
+                    "kind": "validator",
+                    "run_stats": {"tool_calls": 0, "turns": 1, "output_tokens": 151},
+                }
+            ),
+            encoding="utf-8",
+        )
+        for args in ((), ("--json",), ("--show", "1"), ("--return",)):
+            code, out, err = self._run(self.path, *args)
+            assert code == 6, (args, err)
+            assert out == "", args
+            assert "no tool calls" in err, args
+            assert "validator-grok-provenance.json" in err, args
+
+    def test_the_help_documents_the_verdicts_rows(self):
+        code, out, _ = self._run("--help")
+        assert code == 0
+        for token in ("verdicts", "REJECTED", "ce-grok-validate"):
+            assert token in out
 
 
 class TestTheExitTableSpeaksTheFlowsWords:

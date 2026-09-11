@@ -346,10 +346,29 @@ MUTATIONS: list[Mutation] = [
         "    return rows",
     ),
     Mutation(
+        # Retargeted when `load` learned the verdicts shape: ONE refusal line now decides
+        # whether a file is an artifact at all, and this is that line.
         "any JSON file accepted as a findings artifact",
         "persona_review/findings.py",
-        r'    if not isinstance\(raw, dict\) or not isinstance\(raw\.get\("findings"\), list\):',
+        r"    if not kinds:",
         "    if False:",
+    ),
+    Mutation(
+        # A file with both keys is two half-written artifacts. Rendering it as findings
+        # reports a complete result for the half the caller did not ask about.
+        "an artifact carrying both shapes is rendered as one of them",
+        "persona_review/findings.py",
+        r"    if len\(kinds\) > 1:",
+        "    if False:",
+    ),
+    Mutation(
+        # --return is the merge helper's shape, and the helper reads findings. A verdict
+        # projected into it arrives with no title, file or line -- which makes the helper
+        # drop the whole return, taking a real reviewer's pass down with it.
+        "--return is projected off a verdicts artifact instead of refused",
+        "persona_review/findings.py",
+        r"    if as_return:\n        return _usage_error\(",
+        "    if False:\n        return _usage_error(",
     ),
     Mutation(
         "--show off by one",

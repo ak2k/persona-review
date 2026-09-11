@@ -40,13 +40,13 @@ stream the wrapper already keeps, and `gate` refuses a run that made zero tool c
 reviewer that never opened a file cannot certify anything, and its findings are unfounded
 whether the array is empty or full. Exactly zero is the threshold, with no configurable
 floor — "did this run inspect anything" has an answer, while "did it inspect enough" is a
-judgement this package is not entitled to make.
+judgment this package is not entitled to make.
 
 WHAT THIS DOES NOT COVER
 ------------------------
 A well-formed but EMPTY findings array from a run that DID inspect the code is schema-valid
 and stays valid: distinguishing "found nothing" from "looked, then gave up" needs a
-judgement about the transcript this does not attempt. Two checks narrow that gap from either
+judgment about the transcript this does not attempt. Two checks narrow that gap from either
 side and neither closes it — the grok path reads the run's own terminal status before
 believing its answer, but `stop_reason` is an open vocabulary and the denylist cannot be
 exhaustive; the tool-call count catches a run that inspected nothing at all, but one tool

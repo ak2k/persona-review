@@ -31,6 +31,16 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
 | — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
 | — | whole artifact | `ce-persona-findings <artifact> --return` — the compact **return** object compound-engineering's merge helper expects, unfenced |
+| — | ~10 tokens/verdict | `ce-persona-findings <verdicts-artifact>` — one row per verdict in `#` order: `#N validated — <reason>` or `#N REJECTED — <reason>` |
+| — | one verdict | `ce-persona-findings <verdicts-artifact> --show N` — the verdict addressed to finding `#N` |
+
+The same command reads both artifact shapes, because both are model output being handed to an
+agent and one reader is one place to keep the fence and the refusal. On a verdicts artifact
+`--all` changes nothing (a verdict has no severity, so no row is hidden from the default
+listing) and `--return` is a **usage error**: the merge helper reads findings, and a verdict
+projected into that shape would arrive with no title, file or line. A file carrying both a
+`findings` and a `verdicts` list is exit `1` — it is two half-written artifacts, and rendering
+either half would report a complete result.
 
 `N` in `--show N` is the number rendered as `#N` in the listing. Numbering follows the
 artifact's own order; the listing is *displayed* most-severe-first, so `#1` is not
@@ -73,14 +83,15 @@ working tree still exits `6`: the tool-call count is what makes a finding checka
 the code, and there is no mode in which this package certifies a review of text it cannot
 tie to a file. Use the model directly for that.
 
-`ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
-`1` the file is unreadable, is not a findings artifact, or could not be projected into a
-usable return, `2` usage error — including `--return` with `--json` or `--show`,
-`--verify-quotes` without `--return` or without `-C`, a `-C` given without `--verify-quotes`,
-and a `-C` that is missing, is not a directory, or names an unknown user — and `6` when the
-artifact's provenance records a run that made no tool calls. That last one matters because a
-refusal has to survive being handed on: the review command keeps the dud artifact as
-evidence, and without the check this package would launder its own refusal into an
+`ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered, `1`
+the file is unreadable, is neither a findings nor a verdicts artifact, is both at once, or
+could not be projected into a usable return, `2` usage error — including no such finding or
+verdict number, `--return` with `--json` or `--show`, `--return` or `--verify-quotes` on a
+verdicts artifact, `--verify-quotes` without `--return` or without `-C`, a `-C` given without
+`--verify-quotes`, and a `-C` that is missing, is not a directory, or names an unknown user —
+and `6` when the artifact's provenance records a run that made no tool calls. That last one
+matters because a refusal has to survive being handed on: the review command keeps the dud
+artifact as evidence, and without the check this package would launder its own refusal into an
 ordinary listing at exit `0`, one command later.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
@@ -141,6 +152,71 @@ text is empty, when the tree contradicts it, when no citation names the finding'
 the quote founds some other location, not this one — or when the compared text is **shorter than
 12 characters** — a one-word fragment is on the line as a substring while saying nothing about the
 finding, and verification that cannot fail is worse than none.
+
+## Validating a findings batch
+
+`/ce-code-review`'s Stage 5b sends a batch of findings to a second model and asks it to confirm
+or reject each one. That pass has to run as a foreground agent call, so it has no disk sentinel,
+nothing to poll, and a runner at its context checkpoint cannot dispatch it at all. These two
+commands run the same prompt out of process, with the watchdogs, the provenance and the
+refusals the review commands already have:
+
+```console
+$ ce-grok-validate validator-input.json -b origin/main
+ce-grok-validate: 5 verdicts (3 validated, 2 rejected) -> /tmp/.../validator-grok.json
+$ ce-persona-findings /tmp/.../validator-grok.json
+#1 validated — confirmed at resolver.py:88; the cache is read before the write lands
+#2 REJECTED — the handler re-raises one line down, so nothing is swallowed
+...
+```
+
+`ce-codex-validate` is the same command through `codex`. They take the same `-C`, `-b`, `-m`,
+`-e` and `-c` options as the review commands, and the same `CE_PERSONA_*` environment.
+
+**The batch** is the plugin's own `validator-input.json`: a JSON array of finding objects, each
+with an integer `#` of 1 or more, unique across the array. The file's text goes into the prompt
+verbatim — the caller assembled that document and it is not re-serialized. An array that is not
+an array, an element that is not an object, a missing, non-integer, boolean, sub-1 or duplicate
+`#`, and an empty array are each exit `2` naming the offending element. An empty batch is
+refused rather than run because its only correct answer is `[]`, at the price of a full-effort
+model run.
+
+**The prompt** is the plugin's `validator-batch-template.md`, read from the same assets
+directory as the persona briefs and the findings schema (`$CE_REVIEW_ASSETS`). Its first fenced
+block is the prompt body; a missing file or a file with no fence exits `3`, because that is a
+machine that is not set up and no different argument would fix it.
+
+**The verdicts schema is this package's own**, shipped as package data rather than read from the
+assets directory — the plugin inlines the verdict shape in that template and ships no schema
+file, so there is nothing to read and the shape the gate enforces has to be ours. It requires
+`verdicts` to be an array of objects with an integer `#`, a boolean `validated` and a non-empty
+`reason`. It is the one place this package owns a schema, and `AGENTS.md` records why.
+
+**Coverage is enforced**: the `#` values that come back must be exactly the batch's, each once.
+Missing, extra and duplicated numbers are all exit `1`, named in the message. This is the
+template's own "one verdict for every input `#`" rule, checked rather than trusted, because a
+batch that comes back one verdict short otherwise reads as a completed validation and the
+finding nobody judged is carried as though it had been.
+
+**Artifacts** land on the stem `validator-<provider>` in `CE_PERSONA_RUN_DIR`: `.json` (the
+verdicts object), `-provenance.json`, `-events.jsonl`, `-prompt.md`, `-stderr.log`, and a
+`.lock` held for the run. The sidecar records `kind=validator` and hashes the batch, the
+template, the schema and the exact prompt the model received.
+
+**The exit statuses are the review commands' own**, with the nouns changed: `0` schema-valid
+verdicts covering the batch, `1` the answer was not that, `2` usage or a malformed batch, `3`
+environment, `4` the runner exited non-zero, `5` timeout, `6` the model made no tool calls, `78`
+over budget. `--help` renders the table in the validate mode's words.
+
+**`6` here is not worth retrying blind.** `validated: true` across a whole batch from a run that
+opened nothing is precisely the rubber stamp this mode exists to refuse, and the artifacts are
+kept as evidence — `ce-persona-findings` refuses them too, for the same reason it refuses a
+review's. Another full-effort run is the caller's budget to spend; this package does not spend
+it for you.
+
+**There is no turn limit, only wall clock.** `grok` has a `--max-turns` and `codex` does not,
+and a cap that exists on one provider is a contract this package cannot publish. `CE_PERSONA_IDLE_SECS`
+and `CE_PERSONA_HARD_SECS` bound a validation exactly as they bound a review.
 
 ## How the findings are extracted
 
@@ -228,6 +304,23 @@ only comparable if they ran the same brief — and `base_ref=HEAD~1` names a dif
 day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
+
+## Changes in 0.3.0
+
+Additions only; every existing command, flag and exit status is unchanged.
+
+- **`ce-grok-validate` / `ce-codex-validate`** — the validator mode above: the plugin's Stage 5b
+  batch, run out of process with the watchdogs, provenance and refusals the review commands have.
+  See *Validating a findings batch*.
+- **`ce-persona-findings` reads a verdicts artifact**, listing one row per verdict in `#` order
+  with `--show`, `--json` and the vacuous-run refusal applying to it as they do to a review's.
+  `--return` on one is a usage error, and an artifact carrying both shapes is exit `1`.
+- **`ce-persona-findings --return`** projects a findings artifact into the compact **return**
+  object compound-engineering's merge helper reads, so a merge can be run from what the lenses
+  wrote to disk. See *`--return`: an artifact as a merge input*.
+- **`ce-persona-findings --return --verify-quotes -C <dir>`** checks each `first_evidence`
+  against the file and line it cites in that working tree and drops the ones the tree does not
+  corroborate, never rewriting one.
 
 ## Breaking changes in 0.2.0
 

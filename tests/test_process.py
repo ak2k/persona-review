@@ -1613,6 +1613,38 @@ class TestValidatorMode(Harness):
         assert str(self.validator_provenance(provider)) in proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_verdicts_a_green_run_wrote_render_through_the_installed_reader(
+        self, provider: str
+    ):
+        # End to end across two commands: the file one wrote is the file the other renders,
+        # so the stem, the shape and the rows are asserted where they actually meet.
+        self.good_verdicts(provider)
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        proc = self.findings(str(self.validator_artifact(provider)))
+        assert proc.returncode == 0, proc.stderr
+        rows = [ln for ln in proc.stdout.splitlines() if ln.startswith("#")]
+        assert rows == [
+            "#1 validated — confirmed at f.py:2",
+            "#2 REJECTED — the handler re-raises one line down",
+        ], proc.stdout
+        assert "BEGIN UNTRUSTED MODEL OUTPUT" in proc.stdout
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_refuses_the_artifacts_of_a_validation_that_inspected_nothing(
+        self, provider: str
+    ):
+        # Both ends of the refusal, for the validate mode's own stem: exit 6 KEEPS the
+        # artifact as evidence, and the reader is what would otherwise launder it back into
+        # a clean listing -- here a page of `validated: true` nobody earned.
+        self.good_verdicts(provider, tool_call=False)
+        assert self.validate(provider, str(self.batch)).returncode == 6
+        proc = self.findings(str(self.validator_artifact(provider)))
+        assert proc.returncode == 6, proc.stdout
+        assert proc.stdout == ""
+        assert "no tool calls" in proc.stderr
+        assert str(self.validator_provenance(provider)) in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
     @pytest.mark.parametrize(
         ("name", "text"),
         [

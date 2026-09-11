@@ -9,6 +9,19 @@ artifact for a caller — usually an agent — so nobody pays for detail they wi
     ce-persona-findings <artifact> --json       # the raw object, unchanged
     ce-persona-findings <artifact> --return     # the merge-tier compact return object
 
+TWO ARTIFACT SHAPES
+-------------------
+A FINDINGS artifact is what a review writes: an object whose `findings` is a list. A VERDICTS
+artifact is what `ce-grok-validate` / `ce-codex-validate` write: an object whose `verdicts` is
+a list, one entry per finding of the batch that was validated, each carrying the finding's `#`,
+the call, and the reason for it. Both are read by this command, because both are model output
+an agent has to be handed, and one reader is one place to keep the fence and the refusal.
+
+Verdicts list as one row per verdict in `#` order; `--show N` renders the verdict addressed to
+finding `#N`. `--all` has nothing to widen -- a verdict has no severity, so nothing is hidden
+from the default listing -- and `--return` is refused rather than approximated, because the
+merge helper reads a findings shape and a verdict is not one.
+
 THE TIERS, AND WHY
 ------------------
 Tier 0 is the review command's own summary line plus its exit status: a gating caller — CI,
@@ -73,7 +86,9 @@ DEFAULT_SEVERITIES = ("P0", "P1")
 # None that leaves behind turns a missing-argument message into an AttributeError.
 USAGE = (
     "usage: ce-persona-findings <artifact> [--list] [--all] [--show N] [--json]"
-    " [--return [--verify-quotes -C <dir>]]"
+    " [--return [--verify-quotes -C <dir>]]\n"
+    "       <artifact> is a findings artifact from a review, or the verdicts artifact"
+    " a validation wrote"
 )
 
 # Same vocabulary as the review commands, for the same reason: a caller has to tell "I asked
@@ -89,7 +104,8 @@ HELP = f"""{USAGE}
 
 Project a findings artifact at the detail level you need.
 
-  <artifact>    the JSON written by ce-grok-persona / ce-codex-persona
+  <artifact>    the JSON written by ce-grok-persona / ce-codex-persona (findings),
+                or by ce-grok-validate / ce-codex-validate (verdicts)
   --list        tier 1: triage rows, P0/P1 only (the default; naming it changes nothing)
   --all         tier 1 for every severity
   --show N      tier 2: finding N in full -- why it matters, evidence, suggested fix
@@ -113,6 +129,12 @@ Project a findings artifact at the detail level you need.
                 At least one citation must name the finding's own file.
                 A quote is never rewritten, and the artifact is never modified
 
+A VERDICTS artifact lists one row per verdict in # order -- `#N validated -- <reason>`
+or `#N REJECTED -- <reason>`, where N is the number of the finding it judges. --show N
+renders one of those rows, --all changes nothing (a verdict has no severity to hide
+behind), --json is the raw object, and --return is a usage error: it projects findings
+for the merge helper, and a verdict is not a finding.
+
 N in `--show N` is the number shown as #N in the listing, in either tier.
 Among the listing modes --show wins, then --list/--all; --json outranks both.
 --return is exclusive with --json and --show (giving both is a usage error).
@@ -123,12 +145,12 @@ handed to another agent as input. --json and --return are deliberately unfenced.
 
 exit status
   {EXIT_OK}  rendered
-  {EXIT_DATA}  the file is unreadable, is not a findings artifact, or could not be
-     projected into a usable return
-  {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding number,
-     --return together with --json or --show, --verify-quotes without --return or
-     without -C, -C without --verify-quotes, or a -C that is missing, is not a
-     directory, or names an unknown user
+  {EXIT_DATA}  the file is unreadable, is neither a findings nor a verdicts artifact, is
+     both at once, or could not be projected into a usable return
+  {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding or verdict
+     number, --return together with --json or --show, --return or --verify-quotes on a
+     verdicts artifact, --verify-quotes without --return or without -C, -C without
+     --verify-quotes, or a -C that is missing, is not a directory, or names an unknown user
   {EXIT_VACUOUS}  the artifact's provenance records a run that made no tool calls; nothing
      it reported is founded, so it is refused rather than rendered"""
 
@@ -141,10 +163,25 @@ class FindingsError(errors.AppError):
     Under AppError so the package has ONE error hierarchy rather than two, and so this class
     carries its status like every other. The status matches by meaning, not by coincidence:
     the review commands' exit 1 is "the answer was not schema-valid findings", and this is
-    the same judgement applied to an artifact on disk.
+    the same judgment applied to an artifact on disk.
     """
 
     exit_code = EXIT_DATA
+
+
+ARTIFACT_KEYS = ("findings", "verdicts")
+
+
+def _kinds(raw: JSONValue) -> tuple[str, ...]:
+    """Which of the two artifact shapes this object carries, in a fixed order.
+
+    One place decides what a file is, so `load`'s refusal and the reader's choice of mode
+    cannot come to disagree -- a file accepted as an artifact and then rendered as neither
+    shape would exit 0 having shown nothing.
+    """
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(key for key in ARTIFACT_KEYS if isinstance(raw.get(key), list))
 
 
 def load(path: str) -> JSONObject:
@@ -152,9 +189,18 @@ def load(path: str) -> JSONObject:
         raw = cast(JSONValue, json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError) as exc:
         raise FindingsError(f"cannot read findings artifact {path}: {exc}") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("findings"), list):
-        raise FindingsError(f"{path} is not a findings artifact")
-    return raw
+    kinds = _kinds(raw)
+    if not kinds:
+        raise FindingsError(f"{path} is not a findings or verdicts artifact")
+    if len(kinds) > 1:
+        # Refused rather than ranked. The two shapes answer different questions about
+        # different runs, so picking one would render half a file and call it the whole
+        # answer -- and the half left out is the one the caller did not know to ask for.
+        raise FindingsError(
+            f"{path} carries both findings and verdicts: a review artifact and a validation"
+            " artifact are separate files, and this one cannot be rendered as either"
+        )
+    return cast(JSONObject, raw)
 
 
 def numbered(artifact: JSONObject) -> list[tuple[int, Finding]]:
@@ -229,6 +275,39 @@ def render_detail(n: int, finding: Finding) -> str:
     if routing:
         lines.append("\nrouting: " + ", ".join(routing))
     return "\n".join(lines)
+
+
+def numbered_verdicts(artifact: JSONObject) -> list[tuple[int, Finding]]:
+    """Verdicts paired with the number of the finding each judges, in `#` order.
+
+    An entry the gate would have refused -- no `#`, or one that is not an integer -- is
+    numbered by its position rather than dropped, because a reader that silently omitted a
+    row would make a partial answer look like a complete one, which is the exact failure the
+    validate mode's coverage check exists to catch.
+    """
+    entries = artifact.get("verdicts")
+    rows: list[tuple[int, Finding]] = []
+    for position, entry in enumerate(entries if isinstance(entries, list) else [], 1):
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("#")
+        if not isinstance(number, int) or isinstance(number, bool):
+            # `isinstance(True, int)` is True in Python, so a `"#": true` would otherwise
+            # render as a verdict about finding #1.
+            number = position
+        rows.append((number, entry))
+    return sorted(rows, key=lambda pair: pair[0])
+
+
+def render_verdict(n: int, verdict: Finding) -> str:
+    """One row: the finding judged, the call, and the reason given for it.
+
+    `REJECTED` shouts and `validated` does not, because the rejections are the rows a caller
+    acts on -- a validated finding carries on exactly as it was.
+    """
+    flag = verdict.get("validated")
+    call = "validated" if flag is True else "REJECTED" if flag is False else f"?{_text(flag)}"
+    return f"#{n} {call} — {_text(verdict.get('reason', ''))}"
 
 
 # The keys the merge helper reads off a compact RETURN, which is a different shape from the
@@ -679,6 +758,38 @@ def _expand_repo(spec: str) -> Path | None:
         return None
 
 
+def _render_verdicts(
+    path: str, artifact: JSONObject, *, show: int | None, as_json: bool, as_return: bool
+) -> int:
+    """A verdicts artifact, at the only two detail levels it has.
+
+    No tiers here: a verdict is one line of judgment about somebody else's finding, so
+    there is no heavier projection to pay for and nothing to hide behind a severity.
+    """
+    if as_return:
+        return _usage_error(
+            f"--return projects a findings artifact into the merge helper's shape, and"
+            f" {path} is a verdicts artifact -- the helper has no verdict to merge"
+        )
+    if as_json:
+        json.dump(artifact, sys.stdout, indent=1)
+        print()
+        return EXIT_OK
+
+    rows = numbered_verdicts(artifact)
+    if show is not None:
+        wanted = [verdict for n, verdict in rows if n == show]
+        if not wanted:
+            return _usage_error(f"no verdict #{show} (artifact has {len(rows)})")
+        print(fence(render_verdict(show, wanted[0])))
+        return EXIT_OK
+    if not rows:
+        print("no verdicts")
+        return EXIT_OK
+    print(fence("\n".join(render_verdict(n, verdict) for n, verdict in rows)))
+    return EXIT_OK
+
+
 def _usage_error(message: str) -> int:
     print(f"ce-persona-findings: {message}", file=sys.stderr)
     print(USAGE, file=sys.stderr)
@@ -771,6 +882,11 @@ def main(argv: list[str] | None = None) -> int:
     if vacuous is not None:
         print(refusal_banner(path, vacuous), file=sys.stderr)
         return EXIT_VACUOUS
+
+    # After the refusal and before every output mode: which shape this file is decides
+    # what the modes mean, and the refusal is about the run rather than about the shape.
+    if _kinds(artifact) == ("verdicts",):
+        return _render_verdicts(path, artifact, show=show, as_json=as_json, as_return=as_return)
 
     if as_return:
         try:
