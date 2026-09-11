@@ -104,10 +104,13 @@ Project a findings artifact at the detail level you need.
                 A quote may span several lines. A citation whose RESOLVED path
                 leaves <dir> -- through .., an absolute path or a symlink -- is
                 dropped unread, and quoted text under 12 characters is dropped as
-                too short to check. Markdown decoration around a citation and a
-                :col suffix are ignored, a quote may cite several locations and
-                each is checked at its own line, and at least one citation must
-                name the finding's own file.
+                too short to check. Markdown decoration around a citation (a
+                backticked path, `f.py`:12) and a :col suffix are ignored.
+                A quote is checked whole first, with a repeated citation of the
+                same location counted once; a quote citing several locations that
+                each carry their own text is checked location by location, every
+                citation must resolve, and nothing may sit outside those segments.
+                At least one citation must name the finding's own file.
                 A quote is never rewritten, and the artifact is never modified
 
 N in `--show N` is the number shown as #N in the listing, in either tier.
@@ -353,6 +356,21 @@ class _Reference:
     end: int
 
 
+@dataclass(frozen=True)
+class _Cited:
+    """One citation-shaped span of the quote, with the reference it resolved to, if any.
+
+    A span that resolved to nothing is carried too, because in a quote citing several
+    locations it is a claim like the others and the one most worth refusing.
+    """
+
+    path: str
+    line: str
+    start: int
+    end: int
+    ref: _Reference | None
+
+
 def _resolve(quote: str, finding: Finding, repo: Path) -> tuple[list[_Reference], list[str]]:
     """Every citation in the quote naming a file inside this tree, and why any was refused.
 
@@ -416,13 +434,33 @@ def _unwrapped(rest: str) -> str:
     return span.group(1).strip() if span else rest
 
 
-def _compared(quote: str, ref: _Reference) -> str:
+def _cited(quote: str, found: list[_Reference]) -> list[_Cited]:
+    """Every citation-shaped span of the quote, in order, carrying what it resolved to."""
+    resolved = {(ref.start, ref.end): ref for ref in found}
+    return [
+        _Cited(
+            match.group(1),
+            match.group(2),
+            match.start(),
+            match.end(),
+            resolved.get((match.start(), match.end())),
+        )
+        for match in _REFERENCE.finditer(quote)
+    ]
+
+
+def _compared(quote: str, target: _Cited, cited: list[_Cited]) -> str:
     """The text this citation claims the tree carries: the quote without that citation.
 
-    Without the separator that joined the two. The whole remainder, which is what a quote
+    Without the separator that joined the two, and without every OTHER citation of the same
+    path and line: one location cited twice is one claim about it, and a copy left in the
+    remainder is text the line does not carry. The whole remainder, which is what a quote
     citing ONE location claims about it.
     """
-    rest = quote[: ref.start] + quote[ref.end :]
+    same = [c for c in cited if c.path == target.path and c.line == target.line]
+    rest = quote
+    for other in reversed(same):
+        rest = rest[: other.start] + rest[other.end :]
     return _unwrapped(_TRAILING_SEPARATOR.sub("", _SEPARATOR.sub("", rest)).strip())
 
 
@@ -432,7 +470,7 @@ def _segment(text: str) -> str:
     return _unwrapped(trimmed.strip(_SEGMENT_EDGE))
 
 
-def _segments(quote: str, found: list[_Reference]) -> list[tuple[_Reference, str]] | None:
+def _segments(quote: str, cited: list[_Cited]) -> list[tuple[_Cited, str]] | None:
     """Each citation paired with the text it owns, or None when the quote is not segmented.
 
     A lens may cite several locations in one quote, and each snippet is then a claim about
@@ -440,16 +478,25 @@ def _segments(quote: str, found: list[_Reference]) -> list[tuple[_Reference, str
     too, so a quote whose snippets are all true on their lines is dropped. Which text
     belongs to which citation is told by what follows the last one: `f.py:2 -- code`
     repeated, where a citation owns what comes after it, against `` `code` -- f.py:2 ``
-    repeated, where it owns what comes before. Citations that do not EACH carry their own
-    text are one claim wearing several citations, and keep the whole-remainder rule.
+    repeated, where it owns what comes before. Unresolved citations are segmented with the
+    rest, so an invented location beside true ones is a claim rather than a span skipped.
+
+    Citations that do not EACH own text long enough to check, or that leave text outside
+    the segments, are one claim wearing several citations and keep the whole-remainder
+    rule: in `a.py:1 and b.py:2 -- code` the word `and` answers for nothing, and reading it
+    as a.py:1's snippet would decide the quote on the connector.
     """
-    if len(found) < 2:
+    if len(cited) < 2:
         return None
-    between = [quote[found[i].end : found[i + 1].start] for i in range(len(found) - 1)]
-    after = [*between, quote[found[-1].end :]]
-    owned = after if _segment(after[-1]) else [quote[: found[0].start], *between]
-    segments = [(ref, _segment(text)) for ref, text in zip(found, owned, strict=True)]
-    return segments if all(text for _, text in segments) else None
+    between = [quote[cited[i].end : cited[i + 1].start] for i in range(len(cited) - 1)]
+    after = [*between, quote[cited[-1].end :]]
+    citation_first = bool(_segment(after[-1]))
+    owned = after if citation_first else [quote[: cited[0].start], *between]
+    outside = quote[: cited[0].start] if citation_first else quote[cited[-1].end :]
+    segments = [(cite, _segment(text)) for cite, text in zip(cited, owned, strict=True)]
+    if _segment(outside) or any(len(_normalized(t)) < _QUOTE_FLOOR for _, t in segments):
+        return None
+    return segments
 
 
 def _contradicted(compared: str, ref: _Reference) -> str | None:
@@ -474,16 +521,23 @@ def _contradicted(compared: str, ref: _Reference) -> str | None:
     return None
 
 
-def _founds(ref: _Reference, own: JSONValue | None) -> bool:
+def _founds(ref: _Reference, own: JSONValue | None, repo: Path) -> bool:
     """Whether this citation can found a finding whose `file` is `own`.
 
     A surviving first_evidence is what makes the finding's LOCATION trustworthy downstream,
     and every tree holds some real twelve-character line elsewhere, so a citation of another
-    file corroborates nothing about this one. Path equality rather than string equality, so
-    `./a` and `a` are one file. The LINE is free: quoting a neighboring line is ordinary.
+    file corroborates nothing about this one. The two paths are compared as the tree
+    resolves them, so an in-tree absolute path, a `..` and a link all name the finding's own
+    file rather than some other location; lexically when `own` resolves to nothing, which is
+    then all there is to compare. The LINE is free: quoting a neighboring line is ordinary.
     A finding carrying no `file` has no location to found, so any citation may corroborate.
     """
-    return not isinstance(own, str) or PurePosixPath(ref.path) == PurePosixPath(own)
+    if not isinstance(own, str):
+        return True
+    try:
+        return (repo / ref.path).resolve(strict=True) == (repo / own).resolve(strict=True)
+    except (OSError, ValueError):
+        return PurePosixPath(ref.path) == PurePosixPath(own)
 
 
 def _mislocated(ref: _Reference, own: JSONValue | None) -> str:
@@ -491,9 +545,35 @@ def _mislocated(ref: _Reference, own: JSONValue | None) -> str:
     return f"cites {ref.path}:{ref.line} but the finding is at {own}"
 
 
+def _unverified_segments(
+    segments: list[tuple[_Cited, str]], own: JSONValue | None, repo: Path
+) -> str:
+    """Why a quote read location by location is not corroborated, `""` when it is.
+
+    Every citation has to resolve: a location the tree does not have is a claim it cannot
+    answer, and skipping it lets an invented line ride on the true ones beside it.
+    """
+    resolved: list[_Reference] = []
+    for cite, text in segments:
+        ref = cite.ref
+        if ref is None:
+            return f"cites {cite.path}:{cite.line}, which does not resolve"
+        reason = _contradicted(text, ref)
+        if reason is not None:
+            return reason
+        resolved.append(ref)
+    if not any(_founds(ref, own, repo) for ref in resolved):
+        return _mislocated(resolved[0], own)
+    return ""
+
+
 def _unverified(quote: str, finding: Finding, repo: Path) -> str | None:
     """None when the tree corroborates the quote, else why it does not.
 
+    The quote is read WHOLE first — one claim about the location it cites, a repeated
+    citation of that location counted once — and only a quote whose citations EACH carry
+    their own snippet is read location by location. Taken the other way round, a quoted
+    source line that is itself citation-shaped is split into fragments too short to check.
     One corroborating citation of the finding's own file is enough and the first reason
     stands when none corroborates: open on this reader's own parse, closed on a tree that
     contradicts the quote and on a quote that founds some other location.
@@ -502,24 +582,21 @@ def _unverified(quote: str, finding: Finding, repo: Path) -> str | None:
     if not found:
         return refused[0] if refused else f"no file:line reference resolves under {repo}"
     own = finding.get("file")
-    segments = _segments(quote, found)
-    if segments is not None:
-        for ref, compared in segments:
-            reason = _contradicted(compared, ref)
-            if reason is not None:
-                return reason
-        if any(_founds(ref, own) for ref, _ in segments):
-            return None
-        return _mislocated(found[0], own)
-    corroborating = [ref for ref in found if _founds(ref, own)]
-    if not corroborating:
-        return _mislocated(found[0], own)
+    cited = _cited(quote, found)
     reasons: list[str] = []
-    for ref in corroborating:
-        reason = _contradicted(_compared(quote, ref), ref)
+    for cite in cited:
+        ref = cite.ref
+        if ref is None or not _founds(ref, own, repo):
+            continue
+        reason = _contradicted(_compared(quote, cite, cited), ref)
         if reason is None:
             return None
         reasons.append(reason)
+    segments = _segments(quote, cited)
+    if segments is not None:
+        return _unverified_segments(segments, own, repo) or None
+    if not reasons:
+        return _mislocated(found[0], own)
     return reasons[0]
 
 

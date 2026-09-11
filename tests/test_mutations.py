@@ -446,8 +446,8 @@ MUTATIONS: list[Mutation] = [
         # when a lens annotates it with a second one.
         "only the first resolving citation may corroborate a quote",
         "persona_review/findings.py",
-        r"    for ref in corroborating:",
-        "    for ref in corroborating[:1]:",
+        r"    for cite in cited:",
+        "    for cite in cited[:1]:",
     ),
     Mutation(
         # A surviving first_evidence is what makes the finding's LOCATION trustworthy, and
@@ -455,9 +455,18 @@ MUTATIONS: list[Mutation] = [
         # rule a quote of any README line founds a finding reported in another file.
         "a citation of any file may found a finding reported in another one",
         "persona_review/findings.py",
-        r"    return not isinstance\(own, str\) or "
-        r"PurePosixPath\(ref\.path\) == PurePosixPath\(own\)",
-        "    return True",
+        r"    if not isinstance\(own, str\):\n        return True",
+        "    if True:\n        return True",
+    ),
+    Mutation(
+        # A citation of the finding's own file by an in-tree absolute path or through `..`
+        # names some other location when the two are compared lexically, so a quote verbatim
+        # from the file the finding is reported at is dropped as founding somewhere else.
+        "a citation founds a finding only when it spells the path the same way",
+        "persona_review/findings.py",
+        r"        return \(repo / ref\.path\)\.resolve\(strict=True\) == "
+        r"\(repo / own\)\.resolve\(strict=True\)",
+        "        return PurePosixPath(ref.path) == PurePosixPath(own)",
     ),
     Mutation(
         # `__init__.py` names one file per package and the bare one at the repository root
@@ -474,8 +483,43 @@ MUTATIONS: list[Mutation] = [
         # snippets are all true on their lines is dropped.
         "a quote citing several locations is compared as one claim again",
         "persona_review/findings.py",
-        r"    if len\(found\) < 2:\n        return None",
+        r"    if len\(cited\) < 2:\n        return None",
         "    if True:\n        return None",
+    ),
+    Mutation(
+        # The whole quote is one claim about the location it cites. Read as segments first,
+        # a quoted source line that is itself citation-shaped -- a fixture, a log line -- is
+        # split, and the finding's own citation is left a fragment under the floor.
+        "a quote is split on its citations before being read whole",
+        "persona_review/findings.py",
+        r"        if ref is None or not _founds\(ref, own, repo\):",
+        "        if True:",
+    ),
+    Mutation(
+        # Segmenting on the citations that resolved skips the one that resolved to nothing,
+        # so a fabricated location prefixed to true snippets is never checked at all.
+        "a citation that resolves to nothing is left out of the segments",
+        "persona_review/findings.py",
+        r"    segments = _segments\(quote, cited\)",
+        "    segments = _segments(quote, [c for c in cited if c.ref is not None])",
+    ),
+    Mutation(
+        # What makes a quote segmented: each citation owning a snippet long enough to check,
+        # and nothing outside them. Without it `a.py:1 and b.py:2 -- code` is segmented on
+        # the connector `and`, which decides the quote on text that answers for nothing.
+        "a connector between two citations counts as a snippet of its own",
+        "persona_review/findings.py",
+        r"    if _segment\(outside\) or "
+        r"any\(len\(_normalized\(t\)\) < _QUOTE_FLOOR for _, t in segments\):\n        return None",
+        "    if False:\n        return None",
+    ),
+    Mutation(
+        # A location cited twice is one claim about it. Removing only the citation being
+        # checked leaves its twin in the remainder, where the line does not carry it.
+        "a doubled citation is two claims, so each leaves the other in the remainder",
+        "persona_review/findings.py",
+        r"    same = \[c for c in cited if c\.path == target\.path and c\.line == target\.line\]",
+        "    same = [target]",
     ),
     Mutation(
         # A backticked path closes before the colon in a shape lenses write, and without the

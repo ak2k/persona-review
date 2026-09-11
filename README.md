@@ -127,8 +127,10 @@ the object is identical to plain `--return`.
 What is checked is the quote minus the citation being checked: `f.py:12 -- code`, `f.py:12: code`
 and `` `code` -- f.py:12`` all work, as do a citation wearing markdown decoration
 (`**f.py:12**`, `(f.py:12)`, a backticked path, `` `f.py`:12``) and a `:col` suffix. Whitespace
-is collapsed on both sides, a quote may span several lines, a quote may cite several locations
-and each is checked at its own line, and at least one citation must name the finding's own
+is collapsed on both sides and a quote may span several lines. A quote is checked whole first,
+with a repeated citation of the same location counted once; a quote citing several locations
+that each carry their own text is checked location by location, every citation must resolve,
+and nothing may sit outside those segments. At least one citation must name the finding's own
 `file`. A backticked span is read as the quote only when the text outside the citation *is* that
 span — checking a backticked aside instead certified prose as a quoted line.
 
