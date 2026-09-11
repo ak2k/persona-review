@@ -2715,6 +2715,27 @@ class TestTheValidatorPrompt:
         assert "exactly one JSON object" in prompt
         assert prompt.rstrip().endswith(assets.BOUNDARY_VERDICTS)
 
+    def test_placeholder_text_inside_the_batch_reaches_the_validator_verbatim(self):
+        # The batch is another model's prose, so it may contain the template's own slot
+        # names. Filling in one pass keeps them text: a second pass would rewrite them and
+        # hand the validator a different batch from the one the caller assembled.
+        batch = json.dumps(
+            [batch_item(1, title="{diff}", suggested_fix="{scope_mode_and_remote_refs}")]
+        )
+        prompt = assets.build_validator_prompt(
+            batch_text=batch,
+            assets=self.assets,
+            schema_text=json.dumps(verdicts_schema()),
+            base="HEAD~3",
+            context="",
+        )
+        assert batch in prompt
+        # ...and the TEMPLATE's slots are still filled, so holding the batch intact did not
+        # cost the substitution.
+        assert "git diff HEAD~3..HEAD" in prompt
+        assert "local-aligned" in prompt
+        assert "{findings_json}" not in prompt
+
     def test_the_fill_is_replacement_so_the_templates_literal_braces_survive(self):
         # The example verdict is literal JSON. It must reach the model intact...
         assert '{"verdicts": [{"#": 1, "validated": true' in self._prompt()

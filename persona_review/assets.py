@@ -36,6 +36,10 @@ BOUNDARY_VERDICTS = "Return the verdicts object now."
 # cannot come from different plugin installs.
 VALIDATOR_TEMPLATE = "validator-batch-template.md"
 
+# The slots the validator template carries, filled in one pass so that a placeholder
+# occurring inside a filled value stays text.
+_PLACEHOLDER = re.compile(r"\{(findings_json|diff|scope_mode_and_remote_refs)\}")
+
 # The template is prose ABOUT a prompt wrapped around the prompt itself, in one fenced
 # block. Non-greedy to the first closing fence, and `^` anchored so a fence indented inside
 # the body cannot end it early.
@@ -258,9 +262,10 @@ def build_validator_prompt(
 ) -> str:
     """The plugin's validator prompt, filled in, with this package's answer contract added.
 
-    Substituted with `str.replace`, never `str.format`: the template's verdict example is
-    literal JSON, so `format` reads its braces as fields and raises before any substitution
-    happens.
+    Filled by one pass over the template, never `str.format`: the template's verdict example
+    is literal JSON, so `format` reads its braces as fields and raises before any
+    substitution happens. One pass because a substituted value is never re-scanned — a
+    placeholder occurring inside a filled value is text, not a slot.
 
     The batch goes in VERBATIM. It is the findings a reviewer already wrote, and
     re-serializing it here would hand the validator a different document from the one the
@@ -278,10 +283,10 @@ def build_validator_prompt(
     if context:
         scope += "\n\nAdditional validation context:\n" + context
 
-    body = validator_body(assets)
-    body = body.replace("{findings_json}", batch_text)
-    body = body.replace("{diff}", diff)
-    body = body.replace("{scope_mode_and_remote_refs}", scope)
+    values = {"findings_json": batch_text, "diff": diff, "scope_mode_and_remote_refs": scope}
+    # A lambda, not a replacement string: `re.sub` reads backslashes and `\g<...>` in a
+    # replacement STRING as references, and these values carry model-written text.
+    body = _PLACEHOLDER.sub(lambda m: values[m.group(1)], validator_body(assets))
 
     return "".join(
         [

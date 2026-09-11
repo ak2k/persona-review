@@ -320,6 +320,18 @@ MUTATIONS: list[Mutation] = [
         "    return int(part) if part.isdigit() else 0",
     ),
     Mutation(
+        # The batch is another model's text and may name the template's own slots. Reverting
+        # this re-scans it, so a placeholder inside the batch is rewritten by a later
+        # substitution and the validator judges a document the caller never assembled.
+        "a placeholder inside the batch is rewritten by a later substitution",
+        "persona_review/assets.py",
+        r"    body = _PLACEHOLDER\.sub\(lambda m: "
+        r"values\[m\.group\(1\)\], validator_body\(assets\)\)",
+        '    body = validator_body(assets).replace("{findings_json}", values["findings_json"])'
+        '.replace("{diff}", values["diff"])'
+        '.replace("{scope_mode_and_remote_refs}", values["scope_mode_and_remote_refs"])',
+    ),
+    Mutation(
         "the rubric never reaches the prompt",
         "persona_review/assets.py",
         r"    parts\.append\(rubric\(assets\)\)",
