@@ -2375,15 +2375,126 @@ class TestQuotesAreCheckedAgainstTheTree:
         assert "first_evidence" not in after
         assert "no file:line reference resolves" in err
 
-    def test_any_citation_in_the_quote_may_corroborate_it(self):
+    def test_any_citation_of_the_findings_own_file_may_corroborate_it(self):
         # The first citation resolves and contradicts; the second resolves and carries the
         # text. Committing to the first resolving citation dropped a quote the tree does
-        # hold -- and src/g.py is a line shaped like a citation, which is what a test fixture
+        # hold -- and line 3 is a line shaped like a citation, which is what a test fixture
         # or a log line in a reviewed tree looks like.
-        (self.tree / "src" / "g.py").write_text(
-            "src/f.py:99 -- return bill(account)\n", encoding="utf-8"
+        (self.tree / "src" / "f.py").write_text(
+            f"import billing\n{self.LINE}\n# src/f.py:99 -- return bill(account)\n",
+            encoding="utf-8",
         )
-        quote = "src/f.py:99 -- return bill(account) (src/g.py:1)"
+        quote = "src/f.py:99 -- return bill(account) (src/f.py:3)"
         _, err, after = self._run(quote)
-        assert after["first_evidence"] == quote
+        assert after["first_evidence"] == quote, err
         assert err.strip().endswith("0 dropped by --verify-quotes")
+
+    def test_a_citation_of_another_file_cannot_found_this_finding(self):
+        # A quote citing any real line in the tree used to keep first_evidence, so evidence
+        # for a location the finding is not at founded it anyway.
+        (self.tree / "README.md").write_text(
+            "persona-review working notes here\n", encoding="utf-8"
+        )
+        (self.tree / "src" / "pkg").mkdir()
+        (self.tree / "src" / "pkg" / "__init__.py").write_text(
+            "from .billing import bill\n", encoding="utf-8"
+        )
+        quote = "README.md:1 -- persona-review working notes here"
+        _, err, after = self._run(quote, file="src/pkg/__init__.py")
+        assert "first_evidence" not in after
+        assert "cites README.md:1 but the finding is at src/pkg/__init__.py" in err, err
+
+    def test_a_contradicted_same_file_citation_keeps_its_own_reason(self):
+        # The both-locations reason is for a quote that founds somewhere else, not for one
+        # that cites the right file and gets the line wrong.
+        _, err, after = self._run("src/f.py:2 -- return charge(account)")
+        assert "first_evidence" not in after
+        assert "quoted text is not on src/f.py:2" in err, err
+        assert "but the finding is at" not in err, err
+
+    def _package_tree(self, root_line: str, own_line: str) -> None:
+        """A bare `__init__.py` at the root and the finding's own one under `src/pkg`."""
+        (self.tree / "__init__.py").write_text(f"{root_line}\n", encoding="utf-8")
+        (self.tree / "src" / "pkg").mkdir()
+        (self.tree / "src" / "pkg" / "__init__.py").write_text(f"{own_line}\n", encoding="utf-8")
+
+    def test_a_basename_citation_tries_the_findings_own_path_first(self):
+        # `__init__.py` names one file per package, and the bare one at the root resolves
+        # first. Checking it instead dropped a quote verbatim from the finding's own file.
+        self._package_tree("# root package", "from .billing import bill")
+        quote = "__init__.py:1 -- from .billing import bill"
+        _, err, after = self._run(quote, file="src/pkg/__init__.py")
+        assert after["first_evidence"] == quote, err
+
+    def test_a_basename_citation_is_not_corroborated_by_the_file_at_the_root(self):
+        # The inverse: the root file carries the text and the finding's own file does not,
+        # so the quote founds a location this finding is not at.
+        self._package_tree("from .billing import bill", "# the package this finding is at")
+        _, err, after = self._run(
+            "__init__.py:1 -- from .billing import bill", file="src/pkg/__init__.py"
+        )
+        assert "first_evidence" not in after
+        assert "quoted text is not on src/pkg/__init__.py:1" in err, err
+
+    def _five_line_file(self) -> None:
+        """A file long enough for a quote to cite two separate lines of it."""
+        (self.tree / "src" / "f.py").write_text(
+            "def bill(account):\n    return bill(account)\n\n    return refund(account)\n# end\n",
+            encoding="utf-8",
+        )
+
+    def test_each_citation_is_checked_against_its_own_line(self):
+        # Two snippets, each cited at the line that carries it. Compared as one remainder
+        # against each citation in turn, neither can match, and a true quote was dropped.
+        self._five_line_file()
+        quote = "src/f.py:2 -- return bill(account)\nsrc/f.py:4 -- return refund(account)"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+        assert err.strip().endswith("0 dropped by --verify-quotes")
+
+    def test_a_multi_citation_quote_is_dropped_when_one_segment_is_wrong(self):
+        self._five_line_file()
+        quote = "src/f.py:2 -- return bill(account)\nsrc/f.py:4 -- return refund(customer)"
+        _, err, after = self._run(quote)
+        assert "first_evidence" not in after
+        assert "quoted text is not on src/f.py:4" in err, err
+
+    def test_a_quote_first_multi_citation_quote_is_checked_per_citation(self):
+        # The other shape lenses write: the text precedes the citation it belongs to.
+        self._five_line_file()
+        quote = "`return bill(account)` -- src/f.py:2; `return refund(account)` -- src/f.py:4"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+        assert err.strip().endswith("0 dropped by --verify-quotes")
+
+    def test_a_multi_citation_quote_still_founds_the_findings_own_file(self):
+        # Every segment true is not enough: none of them is at the finding's location.
+        self._five_line_file()
+        (self.tree / "README.md").write_text(
+            "persona-review working notes here\nthe second note in this file\n",
+            encoding="utf-8",
+        )
+        quote = "README.md:1 -- persona-review working notes here\n"
+        quote += "README.md:2 -- the second note in this file"
+        _, err, after = self._run(quote, file="src/f.py")
+        assert "first_evidence" not in after
+        assert "cites README.md:1 but the finding is at src/f.py" in err, err
+
+    def test_a_backticked_path_before_the_colon_resolves(self):
+        # `src/f.py`:2 -- the closing backtick sits between the path and the line number,
+        # and the whole citation used to resolve to nothing.
+        quote = "`src/f.py`:2 -- return bill(account)"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+
+    def test_a_newline_padded_quote_does_not_widen_the_window(self):
+        # The leading newline inside the backticks used to count as a line of the quote, so
+        # the window reached line 2 and the text there certified a citation of line 1.
+        _, err, after = self._run("src/f.py:1 -- `\n    return bill(account)`")
+        assert "first_evidence" not in after
+        assert "quoted text is not on src/f.py:1" in err, err
+
+    def test_a_padded_quote_is_kept_at_the_line_it_is_actually_on(self):
+        quote = "src/f.py:2 -- `\n    return bill(account)`"
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
