@@ -446,8 +446,54 @@ MUTATIONS: list[Mutation] = [
         # when a lens annotates it with a second one.
         "only the first resolving citation may corroborate a quote",
         "persona_review/findings.py",
-        r"    for ref in found:",
-        "    for ref in found[:1]:",
+        r"    for ref in corroborating:",
+        "    for ref in corroborating[:1]:",
+    ),
+    Mutation(
+        # A surviving first_evidence is what makes the finding's LOCATION trustworthy, and
+        # every tree holds some real twelve-character line elsewhere. Without the own-file
+        # rule a quote of any README line founds a finding reported in another file.
+        "a citation of any file may found a finding reported in another one",
+        "persona_review/findings.py",
+        r"    return not isinstance\(own, str\) or "
+        r"PurePosixPath\(ref\.path\) == PurePosixPath\(own\)",
+        "    return True",
+    ),
+    Mutation(
+        # `__init__.py` names one file per package and the bare one at the repository root
+        # resolves first, so the citation is checked against a file the finding is not at
+        # and a quote verbatim from the finding's own file is dropped.
+        "a basename citation is resolved against the root before the finding's own file",
+        "persona_review/findings.py",
+        r"            candidates = \[own, cited\]",
+        "            candidates = [cited, own]",
+    ),
+    Mutation(
+        # Each snippet of a multi-citation quote is a claim about its own line. Compared as
+        # one remainder, every snippet carries the others' text too, so a quote whose
+        # snippets are all true on their lines is dropped.
+        "a quote citing several locations is compared as one claim again",
+        "persona_review/findings.py",
+        r"    if len\(found\) < 2:\n        return None",
+        "    if True:\n        return None",
+    ),
+    Mutation(
+        # A backticked path closes before the colon in a shape lenses write, and without the
+        # optional backtick the whole citation resolves to nothing.
+        "a backtick between the path and the line number is unparseable again",
+        "persona_review/findings.py",
+        r"^_REFERENCE = re\.compile\(.*`\?:.*$",
+        r'''_REFERENCE = re.compile(r"""[(\\[*<`]*([^\\s`'"(\\[*<]+?):'''
+        r'''(\\d+)(?::\\d+)?\\b[*)\\]>`]*""")''',
+    ),
+    Mutation(
+        # A newline inside the backticks decorates the quote rather than belonging to it.
+        # Counted as a line, it widens the window past the line the citation names, and the
+        # text on the NEXT line then certifies the citation.
+        "padding inside the backticks widens the window past the cited line",
+        "persona_review/findings.py",
+        r"    return span\.group\(1\)\.strip\(\) if span else rest",
+        "    return span.group(1) if span else rest",
     ),
     Mutation(
         # The twin of the reviewer-name guard above. A non-list `residual_risks` makes the

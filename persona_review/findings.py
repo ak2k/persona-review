@@ -60,7 +60,7 @@ import re
 import secrets
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from . import errors, validate
@@ -105,8 +105,9 @@ Project a findings artifact at the detail level you need.
                 leaves <dir> -- through .., an absolute path or a symlink -- is
                 dropped unread, and quoted text under 12 characters is dropped as
                 too short to check. Markdown decoration around a citation and a
-                :col suffix are ignored, and any citation in the quote that
-                resolves may corroborate it.
+                :col suffix are ignored, a quote may cite several locations and
+                each is checked at its own line, and at least one citation must
+                name the finding's own file.
                 A quote is never rewritten, and the artifact is never modified
 
 N in `--show N` is the number shown as #N in the listing, in either tier.
@@ -317,10 +318,11 @@ def project(artifact: JSONObject) -> tuple[JSONObject, int]:
 # A `path:line` citation in the shapes the lenses actually write: `f.py:12 -- code`,
 # `f.py:12: code`, `` `code` -- f.py:12``, any of those wearing markdown decoration
 # (`**f.py:12**`, `(f.py:12)`, a backticked path) and an optional `:col` suffix. The
-# decoration is INSIDE the match, so neither the path nor the compared text carries it;
+# decoration is INSIDE the match, so neither the path nor the compared text carries it —
+# including a backtick closing the path before the colon (`` `f.py`:12 ``);
 # without that, shapes lenses write every day dropped a true quote on this reader's own
 # parse. Backticks and quotes end the path so a quoted span cannot be swallowed into it.
-_REFERENCE = re.compile(r"""[(\[*<`]*([^\s`'"(\[*<]+?):(\d+)(?::\d+)?\b[*)\]>`]*""")
+_REFERENCE = re.compile(r"""[(\[*<`]*([^\s`'"(\[*<]+?)`?:(\d+)(?::\d+)?\b[*)\]>`]*""")
 _BACKTICKED = re.compile(r"`([^`]*)`")
 _SEPARATOR = re.compile(r"^\s*(?::|--|—)\s*")
 _TRAILING_SEPARATOR = re.compile(r"\s*(?::|--|—)\s*$")
@@ -331,6 +333,10 @@ _TRAILING_SEPARATOR = re.compile(r"\s*(?::|--|—)\s*$")
 # cross-model promotion. 12 admits the shortest fragment a lens has been seen to quote
 # (`bill(account)`, 13 characters) and refuses a bare identifier.
 _QUOTE_FLOOR = 12
+
+# What joins one cited snippet to the next in a quote citing several locations, stripped
+# from a segment's edges so the text compared is the snippet rather than the punctuation.
+_SEGMENT_EDGE = " \t\n;,"
 
 
 def _normalized(text: str) -> str:
@@ -363,8 +369,11 @@ def _resolve(quote: str, finding: Finding, repo: Path) -> tuple[list[_Reference]
         cited = match.group(1)
         candidates = [cited]
         if isinstance(own, str) and (own == cited or own.endswith("/" + cited)):
-            # Lenses often cite a basename while `file` carries the repo-relative path.
-            candidates.append(own)
+            # Lenses often cite a basename while `file` carries the repo-relative path. The
+            # finding's own path goes FIRST: `__init__.py` names one file per package, so a
+            # bare one at the root resolves and the citation is checked against a file the
+            # finding is not at. The bare citation stays as the fallback.
+            candidates = [own, cited]
         for rel in candidates:
             # One try over the whole body: the resolution, the stat, the read and the line
             # number all fail on text a lens controls, and this function's contract is that an
@@ -394,23 +403,57 @@ def _resolve(quote: str, finding: Finding, repo: Path) -> tuple[list[_Reference]
     return found, refused
 
 
+def _unwrapped(rest: str) -> str:
+    """The compared text, unwrapped when what is left IS one backticked span.
+
+    Chosen by the quote's shape, not by a backtick occurring anywhere in it: reading the
+    span wherever one appeared checked a parenthesized aside instead of the quote, which
+    both certified prose and dropped verbatim lines. The span's padding goes with its
+    backticks — a newline inside them decorates the quote rather than belonging to it, and
+    counting it as a line widens the window past the line the citation names.
+    """
+    span = _BACKTICKED.fullmatch(rest)
+    return span.group(1).strip() if span else rest
+
+
 def _compared(quote: str, ref: _Reference) -> str:
     """The text this citation claims the tree carries: the quote without that citation.
 
-    Without the separator that joined the two, and unwrapped when what is left IS one
-    backticked span — chosen by the quote's shape, not by a backtick occurring anywhere in
-    it. Reading the span wherever one appeared checked a parenthesized aside instead of the
-    quote, which both certified prose and dropped verbatim lines.
+    Without the separator that joined the two. The whole remainder, which is what a quote
+    citing ONE location claims about it.
     """
     rest = quote[: ref.start] + quote[ref.end :]
-    rest = _TRAILING_SEPARATOR.sub("", _SEPARATOR.sub("", rest)).strip()
-    span = _BACKTICKED.fullmatch(rest)
-    return span.group(1) if span else rest
+    return _unwrapped(_TRAILING_SEPARATOR.sub("", _SEPARATOR.sub("", rest)).strip())
 
 
-def _contradicted(quote: str, ref: _Reference) -> str | None:
-    """None when this citation's lines carry the text cited at them, else why they do not."""
-    compared = _compared(quote, ref)
+def _segment(text: str) -> str:
+    """One citation's own text, without the punctuation joining it to its neighbors."""
+    trimmed = _TRAILING_SEPARATOR.sub("", _SEPARATOR.sub("", text.strip(_SEGMENT_EDGE)))
+    return _unwrapped(trimmed.strip(_SEGMENT_EDGE))
+
+
+def _segments(quote: str, found: list[_Reference]) -> list[tuple[_Reference, str]] | None:
+    """Each citation paired with the text it owns, or None when the quote is not segmented.
+
+    A lens may cite several locations in one quote, and each snippet is then a claim about
+    its OWN line. Compared as a single remainder, every snippet carries the others' text
+    too, so a quote whose snippets are all true on their lines is dropped. Which text
+    belongs to which citation is told by what follows the last one: `f.py:2 -- code`
+    repeated, where a citation owns what comes after it, against `` `code` -- f.py:2 ``
+    repeated, where it owns what comes before. Citations that do not EACH carry their own
+    text are one claim wearing several citations, and keep the whole-remainder rule.
+    """
+    if len(found) < 2:
+        return None
+    between = [quote[found[i].end : found[i + 1].start] for i in range(len(found) - 1)]
+    after = [*between, quote[found[-1].end :]]
+    owned = after if _segment(after[-1]) else [quote[: found[0].start], *between]
+    segments = [(ref, _segment(text)) for ref, text in zip(found, owned, strict=True)]
+    return segments if all(text for _, text in segments) else None
+
+
+def _contradicted(compared: str, ref: _Reference) -> str | None:
+    """None when this citation's lines carry the text compared against them, else why not."""
     quoted = _normalized(compared)
     if not quoted:
         return "quoted text is empty"
@@ -431,18 +474,49 @@ def _contradicted(quote: str, ref: _Reference) -> str | None:
     return None
 
 
+def _founds(ref: _Reference, own: JSONValue | None) -> bool:
+    """Whether this citation can found a finding whose `file` is `own`.
+
+    A surviving first_evidence is what makes the finding's LOCATION trustworthy downstream,
+    and every tree holds some real twelve-character line elsewhere, so a citation of another
+    file corroborates nothing about this one. Path equality rather than string equality, so
+    `./a` and `a` are one file. The LINE is free: quoting a neighboring line is ordinary.
+    A finding carrying no `file` has no location to found, so any citation may corroborate.
+    """
+    return not isinstance(own, str) or PurePosixPath(ref.path) == PurePosixPath(own)
+
+
+def _mislocated(ref: _Reference, own: JSONValue | None) -> str:
+    """Why a quote the tree does carry still does not found THIS finding."""
+    return f"cites {ref.path}:{ref.line} but the finding is at {own}"
+
+
 def _unverified(quote: str, finding: Finding, repo: Path) -> str | None:
     """None when the tree corroborates the quote, else why it does not.
 
-    One corroborating citation is enough and the first reason stands when none corroborates:
-    open on this reader's own parse, closed on a tree that contradicts the quote.
+    One corroborating citation of the finding's own file is enough and the first reason
+    stands when none corroborates: open on this reader's own parse, closed on a tree that
+    contradicts the quote and on a quote that founds some other location.
     """
     found, refused = _resolve(quote, finding, repo)
     if not found:
         return refused[0] if refused else f"no file:line reference resolves under {repo}"
+    own = finding.get("file")
+    segments = _segments(quote, found)
+    if segments is not None:
+        for ref, compared in segments:
+            reason = _contradicted(compared, ref)
+            if reason is not None:
+                return reason
+        if any(_founds(ref, own) for ref, _ in segments):
+            return None
+        return _mislocated(found[0], own)
+    corroborating = [ref for ref in found if _founds(ref, own)]
+    if not corroborating:
+        return _mislocated(found[0], own)
     reasons: list[str] = []
-    for ref in found:
-        reason = _contradicted(quote, ref)
+    for ref in corroborating:
+        reason = _contradicted(_compared(quote, ref), ref)
         if reason is None:
             return None
         reasons.append(reason)

@@ -126,16 +126,18 @@ the object is identical to plain `--return`.
 
 What is checked is the quote minus the citation being checked: `f.py:12 -- code`, `f.py:12: code`
 and `` `code` -- f.py:12`` all work, as do a citation wearing markdown decoration
-(`**f.py:12**`, `(f.py:12)`, a backticked path) and a `:col` suffix. Whitespace is collapsed on
-both sides, a quote may span several lines, and any citation in the quote that resolves may
-corroborate it. A backticked span is read as the quote only when the text outside the citation
-*is* that span — checking a backticked aside instead certified prose as a quoted line.
+(`**f.py:12**`, `(f.py:12)`, a backticked path, `` `f.py`:12``) and a `:col` suffix. Whitespace
+is collapsed on both sides, a quote may span several lines, a quote may cite several locations
+and each is checked at its own line, and at least one citation must name the finding's own
+`file`. A backticked span is read as the quote only when the text outside the citation *is* that
+span — checking a backticked aside instead certified prose as a quoted line.
 
 A quote is dropped when no citation resolves, when its citation resolves **outside** `<dir>`
 (the check is on the resolved path, so `..`, an absolute path and a symlink pointing out of the
 tree are one case and the file is never read), when the cited lines are out of range, when the
-text is empty, when the tree contradicts it, or when the compared text is **shorter than 12
-characters** — a one-word fragment is on the line as a substring while saying nothing about the
+text is empty, when the tree contradicts it, when no citation names the finding's own `file` —
+the quote founds some other location, not this one — or when the compared text is **shorter than
+12 characters** — a one-word fragment is on the line as a substring while saying nothing about the
 finding, and verification that cannot fail is worse than none.
 
 ## How the findings are extracted
