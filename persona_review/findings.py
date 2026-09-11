@@ -25,7 +25,7 @@ the finding you are about to act on, not for the four you are not.
 `--return` is a tier of its own, for one machine consumer: the compound-engineering plugin's
 `findings-mechanics.py`, which merges reviewer COMPACT RETURNS rather than artifacts. It
 projects the artifact into that shape, so a merge input can be built from what a lens wrote
-to disk. Its one judgement is the `first_evidence` fallback tier 1 already applies for
+to disk. Its one judgment is the `first_evidence` fallback tier 1 already applies for
 display -- the plugin's own contract makes `evidence[0]` that same quote, and the helper
 demotes a finding whose `first_evidence` is missing.
 
@@ -146,8 +146,8 @@ def load(path: str) -> JSONObject:
 def numbered(artifact: JSONObject) -> list[tuple[int, Finding]]:
     """Findings paired with their stable number.
 
-    One source for the numbering, used by both the listing and `--show`, so `--show N` and
-    row `#N` cannot drift into meaning different findings.
+    One source for the numbering -- the listing, `--show`, and the `--verify-quotes` drop
+    lines all read it -- so `#N` cannot drift into meaning different findings.
     """
     entries = artifact.get("findings")
     rows: list[tuple[int, Finding]] = []
@@ -178,8 +178,13 @@ def _text(value: JSONValue) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
+def _where(finding: Finding) -> str:
+    """The `file:line` label. One shape, so a drop on stderr names the row the listing does."""
+    return f"{_text(finding.get('file', '?'))}:{_text(finding.get('line', '?'))}"
+
+
 def render_row(n: int, finding: Finding) -> str:
-    where = f"{_text(finding.get('file', '?'))}:{_text(finding.get('line', '?'))}"
+    where = _where(finding)
     conf = finding.get("confidence")
     head = (
         f"#{n} {_text(finding.get('severity', '??'))} {where} — {_text(finding.get('title', ''))}"
@@ -271,13 +276,11 @@ def project(artifact: JSONObject) -> tuple[JSONObject, int]:
     reviewer = artifact.get("reviewer")
     if not isinstance(reviewer, str) or not reviewer.strip():
         raise FindingsError("no reviewer name: the merge helper drops a return without one")
-    for key in ("residual_risks", "testing_gaps"):
-        if key in artifact and not isinstance(artifact[key], list):
-            raise FindingsError(f"{key} is not a list: the merge helper drops such a return")
 
-    out: JSONObject = {key: [] if key == "findings" else value for key, value in artifact.items()}
+    out: JSONObject = dict(artifact)
     for key in ("residual_risks", "testing_gaps"):
-        out.setdefault(key, [])
+        if not isinstance(out.setdefault(key, []), list):
+            raise FindingsError(f"{key} is not a list: the merge helper drops such a return")
 
     entries = artifact.get("findings")
     projected: list[JSONValue] = []
@@ -378,11 +381,8 @@ def verify_quotes(projected: JSONObject, repo: Path) -> int:
     finding on the same rule it applies to a lens that quoted nothing at all, and the
     artifact on disk is untouched either way.
     """
-    entries = projected.get("findings")
     dropped = 0
-    for n, finding in enumerate(entries if isinstance(entries, list) else [], 1):
-        if not isinstance(finding, dict):
-            continue
+    for n, finding in numbered(projected):
         quote = finding.get("first_evidence")
         if not isinstance(quote, str):
             continue
@@ -391,7 +391,7 @@ def verify_quotes(projected: JSONObject, repo: Path) -> int:
             continue
         del finding["first_evidence"]
         dropped += 1
-        where = f"{_text(finding.get('file', '?'))}:{_text(finding.get('line', '?'))}"
+        where = _where(finding)
         print(
             f"ce-persona-findings: verify-quotes: finding #{n} ({where}): {reason}",
             file=sys.stderr,
