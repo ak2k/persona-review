@@ -30,6 +30,7 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it. P0/P1 only; `--all` for every severity |
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
 | — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
+| — | whole artifact | `ce-persona-findings <artifact> --return` — the compact **return** object compound-engineering's merge helper expects, unfenced |
 
 `N` in `--show N` is the number rendered as `#N` in the listing. Numbering follows the
 artifact's own order; the listing is *displayed* most-severe-first, so `#1` is not
@@ -73,16 +74,47 @@ the code, and there is no mode in which this package certifies a review of text 
 tie to a file. Use the model directly for that.
 
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
-`1` the file is unreadable or is not a findings artifact, `2` usage error, and `6` when the
-artifact's provenance records a run that made no tool calls. That last one matters because a
-refusal has to survive being handed on: the review command keeps the dud artifact as
-evidence, and without the check this package would launder its own refusal into an ordinary
-listing at exit `0`, one command later.
+`1` the file is unreadable, is not a findings artifact, or could not be projected into a
+usable return, `2` usage error — including `--return` with `--json` or `--show`,
+`--verify-quotes` without `--return` or without `-C`, and a `-C` that is missing, is not a
+directory, or names an unknown user — and `6` when the artifact's provenance records a run
+that made no tool calls. That last one matters because a refusal has to survive being handed
+on: the review command keeps the dud artifact as evidence, and without the check this package
+would launder its own refusal into an ordinary listing at exit `0`, one command later.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
 per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
-as *its* input; the fence is what lets the consumer tell data from instructions. `--json` is
-unfenced, because a programmatic caller parses it rather than reading it.
+as *its* input; the fence is what lets the consumer tell data from instructions. `--json` and
+`--return` are unfenced, because a programmatic caller parses them rather than reading them.
+
+### `--return`: an artifact as a merge input
+
+Compound-engineering's `/ce-code-review` merges reviewer **compact returns**, not artifacts, and
+its `findings-mechanics.py` demotes any finding whose `first_evidence` is missing to confidence
+50 — where the gate suppresses it. A lens that filled only the `evidence` array therefore reads
+as having found nothing. `--return` projects an artifact into that return shape so the merge can
+be run from what the lenses wrote to disk:
+
+```console
+$ ce-persona-findings correctness.json --return > return.json
+ce-persona-findings: correctness: 4 findings, 4 first_evidence backfilled from evidence[0]
+```
+
+Every top-level key except `findings` is copied verbatim (`independence_verified` included — the
+helper reads it to decide cross-model promotion), and each finding keeps only the keys the helper
+reads. `first_evidence` is the artifact's own value when it has one, otherwise `evidence[0]`,
+which the plugin's contract makes the same string; it is never emitted empty. The one line on
+stderr says how many were backfilled, so stdout stays parseable. Exit `1` when the artifact would
+make a return the helper drops whole — no `reviewer`, or a `residual_risks` / `testing_gaps` that
+is not a list. One artifact gives one object; assemble several with `jq -s .`.
+
+`--verify-quotes -C <dir>` additionally checks each quote against the file and line it cites,
+read from the **working tree** under `<dir>` (in the plugin's local-aligned mode that tree is the
+reviewed head, and this keeps git out of a reader). A quote the tree does not corroborate is
+**dropped**, never rewritten — rewriting would manufacture evidence the lens did not give, and
+dropping it lets the helper demote the finding on its own rule. Each drop prints its reason on
+stderr; the artifact on disk is not touched, the exit status stays `0`, and every other byte of
+the object is identical to plain `--return`.
 
 ## How the findings are extracted
 
