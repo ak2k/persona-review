@@ -1,0 +1,52 @@
+name: Check
+
+# The entire suite for this repo is `nix flake check` — lint, types, unit,
+# process and mutations are all flake checks — so one matrix job gates
+# everything. The matrix is the three systems flake.nix declares, and `main`'s
+# protection requires exactly these three contexts: `nix (ubuntu-latest)`,
+# `nix (ubuntu-24.04-arm)`, `nix (macos-14)`.
+
+# Deliberately NO `paths:` filter. A path-filtered workflow does not merely
+# skip — it never REPORTS, so a required status check by that name stays
+# permanently pending and the PR is unmergeable.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    name: nix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # Every platform's result, not just the first failure: a check that is
+      # red on one system and unrun on the others cannot be told apart from
+      # one that is red everywhere.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest # x86_64-linux
+          - ubuntu-24.04-arm # aarch64-linux
+          - macos-14 # aarch64-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          # The flake inputs are fetched from github.com, where an anonymous
+          # runner shares a per-IP rate limit with every other one.
+          extra_nix_config: |
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+
+      - name: nix flake check
+        run: nix flake check -L
