@@ -16,6 +16,7 @@ parameterised suite makes that impossible rather than merely unlikely.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -133,6 +134,18 @@ VERDICTS_INCOMPLETE = json.dumps(
     {"verdicts": [{"#": 1, "validated": True, "reason": "confirmed at f.py:2"}]}
 )
 
+# Schema-valid verdicts that ALSO carry a findings list: the gate passed it and the reader
+# this package ships refuses the file it wrote.
+VERDICTS_AND_FINDINGS = json.dumps(
+    {
+        "verdicts": [
+            {"#": 1, "validated": True, "reason": "confirmed at f.py:2"},
+            {"#": 2, "validated": False, "reason": "the handler re-raises one line down"},
+        ],
+        "findings": [],
+    }
+)
+
 TYPE_INVALID = json.dumps(
     {
         "reviewer": "a",
@@ -181,6 +194,11 @@ if spec.get("stdout"):
 if last is not None and spec.get("last") is not None:
     with open(last, "w") as fh:
         fh.write(spec["last"])
+# A file the provider replaces WHILE the run is in flight, so a test can tell what the
+# wrapper read from what is on disk afterwards.
+for _path, _text in (spec.get("overwrite") or {{}}).items():
+    with open(_path, "w") as fh:
+        fh.write(_text)
 if spec.get("stubborn_child"):
     # A helper that ignores SIGTERM, like the real provider CLIs' subprocesses. The parent
     # dying is not evidence the group did.
@@ -442,7 +460,9 @@ class Harness:
             check=False,
         )
 
-    def good_verdicts(self, provider: str, payload: str = VERDICTS, *, tool_call: bool = True):
+    def good_verdicts(
+        self, provider: str, payload: str = VERDICTS, *, tool_call: bool = True, **extra: Any
+    ):
         """Spec a stub that returns verdicts through this provider's own channel.
 
         A TOOL CALL by default, for the reason `good_answer` carries one: a validator that
@@ -450,9 +470,9 @@ class Harness:
         it against the refusal path by accident.
         """
         if provider == "grok":
-            self.set_spec(stdout=grok_stream(payload, tool_call=tool_call))
+            self.set_spec(stdout=grok_stream(payload, tool_call=tool_call), **extra)
         else:
-            self.set_spec(stdout=codex_stream(tool_call=tool_call), last=payload)
+            self.set_spec(stdout=codex_stream(tool_call=tool_call), last=payload, **extra)
 
     def write_batch(self, text: str) -> None:
         self.batch.write_text(text, encoding="utf-8")
@@ -1572,8 +1592,6 @@ class TestValidatorMode(Harness):
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_sidecar_says_which_mode_ran_and_hashes_the_batch(self, provider: str):
-        import hashlib
-
         want = hashlib.sha256(self.batch.read_bytes()).hexdigest()
         self.good_verdicts(provider)
         assert self.validate(provider, str(self.batch)).returncode == 0
@@ -1597,6 +1615,31 @@ class TestValidatorMode(Harness):
         proc = self.validate(provider, str(self.batch))
         assert proc.returncode == 1, proc.stdout
         assert "#2" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_batch_is_attested_as_the_bytes_the_run_was_given(self, provider: str):
+        # Provenance re-read the path after the run, so a batch replaced while the model
+        # was working was attested as the one the validator saw -- the one thing the
+        # sidecar exists to make checkable.
+        original = self.batch.read_bytes()
+        want = hashlib.sha256(original).hexdigest()
+        self.good_verdicts(provider, overwrite={str(self.batch): "[]"})
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        assert self.batch.read_bytes() != original, "the stub did not replace the batch"
+        record = json.loads(self.validator_provenance(provider).read_text(encoding="utf-8"))
+        assert record["batch_sha256"] == want
+        assert record["batch_file"] == str(self.batch)
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_an_answer_carrying_findings_as_well_as_verdicts_is_refused(self, provider: str):
+        # The producer must not report success for an answer `ce-persona-findings` refuses:
+        # a file carrying both lists is neither artifact, and the documented reader exits 1
+        # on it. Caught here, where the run can still be refused.
+        self.good_verdicts(provider, VERDICTS_AND_FINDINGS)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 1, proc.stdout
+        assert "findings" in proc.stderr, proc.stderr
+        assert "ce-persona-findings" in proc.stderr, proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_validation_that_inspected_nothing_is_refused_with_its_artifacts_kept(

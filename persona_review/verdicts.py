@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import errors
+from . import errors, findings
 from .validate import Artifact, fail, loads
 
 # Shipped as package data rather than read from the plugin. `findings-schema.json` is the
@@ -118,6 +118,27 @@ def check_coverage(found: Artifact, expected: list[int]) -> None:
             f"the verdicts do not cover the batch one for one ({'; '.join(problems)}). "
             f"The batch carried {len(wanted)} finding(s); a finding with no verdict would "
             "be carried as validated by a run that never judged it."
+        )
+
+
+def check_single_shape(found: Artifact) -> None:
+    """Raises `GateError` when the answer is a verdicts artifact AND a findings one.
+
+    The schema says only that `verdicts` is well formed, so an answer that also returns a
+    `findings` list passes the gate, is written out, and is then refused by
+    `ce-persona-findings` -- the one reader this package documents. The producer would be
+    reporting success for a file nobody can read, so the reader's own rule is asked here,
+    at the last point where the run can still be refused. The rule is imported rather than
+    restated: two copies are two things to drift apart.
+
+    The model's answer is refused, never repaired. Stripping the extra list would certify
+    an object the model did not return.
+    """
+    if len(findings.artifact_kinds(found)) > 1:
+        fail(
+            "the answer carries a findings list as well as verdicts, so it is neither "
+            "artifact: `ce-persona-findings` refuses a file that is both, and this run "
+            "would have reported success for verdicts nothing can render."
         )
 
 

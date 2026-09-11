@@ -713,7 +713,22 @@ def _sha256(filename: str) -> str:
         return f"unreadable: {exc}"
 
 
-def write_provenance(path: Path, pairs: list[str], files: dict[str, str], stats: RunStats) -> None:
+def digest_bytes(data: bytes) -> str:
+    """The provenance hash of bytes a caller already holds, in the same form `_sha256` writes.
+
+    So a caller that read an input can attest THOSE bytes rather than the path they came
+    from, without a second hashing convention to keep in step with this one.
+    """
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_provenance(
+    path: Path,
+    pairs: list[str],
+    files: dict[str, str],
+    stats: RunStats,
+    digests: dict[str, str] | None = None,
+) -> None:
     """Record which brief and schema this run used, by content hash, and what it did.
 
     Two arms are only comparable if they ran the same brief, and briefs live in a plugin
@@ -731,7 +746,9 @@ def write_provenance(path: Path, pairs: list[str], files: dict[str, str], stats:
         record[key] = value
     for key, filename in files.items():
         record[f"{key}_file"] = filename
-        record[f"{key}_sha256"] = _sha256(filename)
+        # A digest the caller computed when it READ the input wins over re-reading the path:
+        # the record must say what the run used, not what happens to be there now.
+        record[f"{key}_sha256"] = (digests or {}).get(key) or _sha256(filename)
     # WHAT THE RUN DID, beside what produced it. `tool_calls` decides the exit status, so it
     # is written down rather than only acted on: a refusal a caller cannot audit afterwards
     # is one it has to take on trust.
@@ -837,6 +854,7 @@ def gate(
     provenance_out: Path,
     prov_pairs: list[str],
     prov_files: dict[str, str],
+    prov_digests: dict[str, str] | None = None,
     evidence: Evidence,
     label: str,
     key: str = "findings",
@@ -887,7 +905,7 @@ def gate(
     # Findings first, provenance second: the sidecar's job is attesting THIS artifact, so it
     # must never be the only thing on disk.
     findings_out.write_text(json.dumps(found, indent=1), encoding="utf-8")
-    write_provenance(provenance_out, prov_pairs, prov_files, stats)
+    write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)
 
     # A reviewer that made ZERO tool calls never opened the diff, so it has no verdict to
     # summarize: empty findings and a page of them are equally unfounded. Decided here, ahead

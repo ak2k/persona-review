@@ -133,7 +133,7 @@ class BudgetError(AppError):
 # Descriptions may span lines; continuation lines are indented by the renderer.
 EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
     (0, ("schema-valid {answer} ({ok})",)),
-    (GateError.exit_code, ("the answer was not schema-valid {answer}",)),
+    (GateError.exit_code, ("the answer was not schema-valid {answer}{also}",)),
     (
         UsageError.exit_code,
         (
@@ -166,11 +166,15 @@ REVIEW_WORDS: Mapping[str, str] = {
     "answer": "findings",
     "ok": "an empty findings array is valid",
     "bad_argument": "unknown or markdown-only persona",
+    # What ELSE makes an answer unusable in this flow. Empty for a review: findings are the
+    # shape it is meant to return, so there is no second list it could collide with.
+    "also": "",
 }
 VALIDATE_WORDS: Mapping[str, str] = {
     "answer": "verdicts",
     "ok": "one verdict for every input #, exactly once",
     "bad_argument": "a batch that is not an array of findings carrying a `#` each",
+    "also": ", or also carries a findings list",
 }
 
 

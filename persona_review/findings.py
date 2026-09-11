@@ -172,12 +172,14 @@ class FindingsError(errors.AppError):
 ARTIFACT_KEYS = ("findings", "verdicts")
 
 
-def _kinds(raw: JSONValue) -> tuple[str, ...]:
+def artifact_kinds(raw: JSONValue) -> tuple[str, ...]:
     """Which of the two artifact shapes this object carries, in a fixed order.
 
     One place decides what a file is, so `load`'s refusal and the reader's choice of mode
     cannot come to disagree -- a file accepted as an artifact and then rendered as neither
-    shape would exit 0 having shown nothing.
+    shape would exit 0 having shown nothing. Public because the WRITING side asks it too:
+    the validator gate refuses an answer this reader could not render, and a second copy of
+    the rule is a second place for the two ends to drift apart.
     """
     if not isinstance(raw, dict):
         return ()
@@ -189,7 +191,7 @@ def load(path: str) -> JSONObject:
         raw = cast(JSONValue, json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError) as exc:
         raise FindingsError(f"cannot read findings artifact {path}: {exc}") from exc
-    kinds = _kinds(raw)
+    kinds = artifact_kinds(raw)
     if not kinds:
         raise FindingsError(f"{path} is not a findings or verdicts artifact")
     if len(kinds) > 1:
@@ -885,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # After the refusal and before every output mode: which shape this file is decides
     # what the modes mean, and the refusal is about the run rather than about the shape.
-    if _kinds(artifact) == ("verdicts",):
+    if artifact_kinds(artifact) == ("verdicts",):
         return _render_verdicts(path, artifact, show=show, as_json=as_json, as_return=as_return)
 
     if as_return:
