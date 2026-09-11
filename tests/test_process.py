@@ -67,6 +67,72 @@ ANSWER = json.dumps(
         "testing_gaps": [],
     }
 )
+# The plugin's validator batch template, as the installed plugin ships it: a fenced prompt
+# with a prose wrapper around it. The wrapper is here on purpose — the fence extraction is
+# what stops the dispatcher's own notes being sent to the model as instructions.
+VALIDATOR_TEMPLATE = """# Validator batch
+
+Dispatch this to a second model when a review's findings need independent judgment.
+
+```
+You are validating findings that another reviewer reported.
+
+Scope: {scope_mode_and_remote_refs}
+
+Diff: {diff}
+
+Findings to validate:
+
+{findings_json}
+
+Return one verdict per finding, in this shape:
+
+{"verdicts": [{"#": 1, "validated": true, "reason": "confirmed at f.py:2"}]}
+```
+
+Notes for the dispatcher, which are not part of the prompt and must not reach the model.
+"""
+
+BATCH = [
+    {
+        "#": 1,
+        "title": "unchecked index",
+        "severity": "P1",
+        "file": "f.py",
+        "line": 2,
+        "confidence": "high",
+        "why_it_matters": "it crashes",
+        "evidence": ["f.py:2 -- xs[0]"],
+        "first_evidence": "f.py:2 -- xs[0]",
+        "suggested_fix": "check it",
+    },
+    {
+        "#": 2,
+        "title": "silent except",
+        "severity": "P2",
+        "file": "g.py",
+        "line": 9,
+        "confidence": "medium",
+        "why_it_matters": "it hides failures",
+        "evidence": ["g.py:9 -- except: pass"],
+        "first_evidence": "g.py:9 -- except: pass",
+        "suggested_fix": "name the exception",
+    },
+]
+VERDICTS = json.dumps(
+    {
+        "verdicts": [
+            {"#": 1, "validated": True, "reason": "confirmed at f.py:2"},
+            {"#": 2, "validated": False, "reason": "the handler re-raises one line down"},
+        ]
+    }
+)
+# One verdict short. The failure the whole mode exists to stop: a finding nobody judged,
+# carried by a run that otherwise reads as a completed validation.
+VERDICTS_INCOMPLETE = json.dumps(
+    {"verdicts": [{"#": 1, "validated": True, "reason": "confirmed at f.py:2"}]}
+)
+
 TYPE_INVALID = json.dumps(
     {
         "reviewer": "a",
@@ -240,6 +306,14 @@ class Harness:
             "# Outside\n\nReturn findings matching the findings schema.\n", encoding="utf-8"
         )
         (self.assets / "findings-schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        # Beside personas/ and the findings schema, exactly as the plugin installs it. The
+        # verdicts schema is NOT here: that one is package data, so a validation reads it
+        # from the installed library rather than from a directory the caller points at.
+        (self.assets / "validator-batch-template.md").write_text(
+            VALIDATOR_TEMPLATE, encoding="utf-8"
+        )
+        self.batch = self.work / "validator-input.json"
+        self.batch.write_text(json.dumps(BATCH), encoding="utf-8")
 
         self.bindir = self.work / "bin"
         self.bindir.mkdir()
@@ -260,11 +334,18 @@ class Harness:
 
         installed = os.environ.get("PERSONA_REVIEW_BIN")
         self.commands: dict[str, Path] = {}
+        # The validate mode's entry points, built the same way and from the same loop: the
+        # two modes share one code path, and a harness that reached only one of them is how
+        # a guard ends up tested in a single mode.
+        self.validate_commands: dict[str, Path] = {}
         for provider in PROVIDERS:
-            name = f"ce-{provider}-persona"
-            if installed:
-                self.commands[provider] = Path(installed) / name
-            else:
+            for name, entry, table in (
+                (f"ce-{provider}-persona", f"{provider}_main", self.commands),
+                (f"ce-{provider}-validate", f"{provider}_validate_main", self.validate_commands),
+            ):
+                if installed:
+                    table[provider] = Path(installed) / name
+                    continue
                 # Local development: stand in for the console script the packaging
                 # generates, with the same "own directory on sys.path" property.
                 shim = self.bindir / name
@@ -274,12 +355,12 @@ class Harness:
                     f"#!{sys.executable}\n"
                     "import sys\n"
                     f"sys.path.insert(0, {str(SRC)!r})\n"
-                    f"from persona_review.cli import {provider}_main\n"
-                    f"sys.exit({provider}_main())\n",
+                    f"from persona_review.cli import {entry}\n"
+                    f"sys.exit({entry}())\n",
                     encoding="utf-8",
                 )
                 shim.chmod(0o755)
-                self.commands[provider] = shim
+                table[provider] = shim
             stub = self.bindir / provider
             stub.write_text(STUB, encoding="utf-8")
             stub.chmod(0o755)
@@ -340,6 +421,47 @@ class Harness:
             timeout=timeout,
             check=False,
         )
+
+    def validate(
+        self,
+        provider: str,
+        *args: str,
+        timeout: float = 120,
+        env_extra: dict[str, str] | None = None,
+        **envextra: str,
+    ) -> subprocess.CompletedProcess[str]:
+        """The validate mode, driven exactly as `review` drives the review mode."""
+        merged = {**(env_extra or {}), **envextra}
+        return subprocess.run(
+            [str(self.validate_commands[provider]), *args],
+            capture_output=True,
+            text=True,
+            env=self.env(**merged),
+            cwd=self.work,
+            timeout=timeout,
+            check=False,
+        )
+
+    def good_verdicts(self, provider: str, payload: str = VERDICTS, *, tool_call: bool = True):
+        """Spec a stub that returns verdicts through this provider's own channel.
+
+        A TOOL CALL by default, for the reason `good_answer` carries one: a validator that
+        inspected nothing is refused, so a fixture without one would put every test built on
+        it against the refusal path by accident.
+        """
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(payload, tool_call=tool_call))
+        else:
+            self.set_spec(stdout=codex_stream(tool_call=tool_call), last=payload)
+
+    def write_batch(self, text: str) -> None:
+        self.batch.write_text(text, encoding="utf-8")
+
+    def validator_artifact(self, provider: str) -> Path:
+        return self.run_dir / f"validator-{provider}.json"
+
+    def validator_provenance(self, provider: str) -> Path:
+        return self.run_dir / f"validator-{provider}-provenance.json"
 
     def good_answer(self, provider: str) -> None:
         """Spec a stub that returns a valid review through this provider's own channel.
@@ -414,14 +536,17 @@ class Harness:
         self._git(repo, "commit", "-qm", "big")
         return repo, base
 
-    def assert_run_dir_clean(self, provider: str) -> None:
+    def assert_run_dir_clean(self, provider: str, stem: str | None = None) -> None:
         """No artifact from an earlier run survives.
 
         Named files are not enough: asserting only `.json` and `-provenance.json` left a
         stale `-stderr.log` — the one artifact the failure path reads back — sitting in a
         directory the code promises to have cleared, and the test stayed green.
+
+        `stem` defaults to the persona review's; a validation writes under its own, and the
+        clear is one frame shared by both, so both are checked through this.
         """
-        stem = f"adversarial-reviewer-{provider}"
+        stem = stem if stem is not None else f"adversarial-reviewer-{provider}"
         # The `.lock` file is coordination, not an artifact: it holds no run output, it is
         # created before the clear rather than by it, and unlinking it would race a waiter
         # that had already opened the path. Excluded BY EXACT NAME rather than by extension,
@@ -1419,3 +1544,176 @@ class TestFindingsCommand(Harness):
         proc = self.findings(str(self.artifact("grok")), "--json")
         assert proc.returncode == 0, proc.stderr
         assert json.loads(proc.stdout)["findings"][0]["severity"] == "P1"
+
+
+class TestValidatorMode(Harness):
+    """`ce-<provider>-validate`: the same frame, a different question.
+
+    Every case runs for BOTH providers, for the reason the review cases do — and for one
+    more: the two modes now share `_dispatch`, the lock and the gate, so a case that passed
+    in only one mode would say nothing about whether the shared frame reached it.
+    """
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_complete_verdicts_object_exits_zero_with_one_stdout_line(self, provider: str):
+        self.good_verdicts(provider)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 0, proc.stderr
+        lines = proc.stdout.strip().splitlines()
+        assert len(lines) == 1, proc.stdout
+        # `.resolve()`: the run dir is resolved before the artifact paths are built, and on
+        # macOS /tmp is a symlink — so the literal CE_PERSONA_RUN_DIR is not what is printed.
+        assert lines[0] == (
+            f"ce-{provider}-validate: 2 verdicts (1 validated, 1 rejected) -> "
+            f"{self.validator_artifact(provider).resolve()}"
+        )
+        written = json.loads(self.validator_artifact(provider).read_text(encoding="utf-8"))
+        assert [v["#"] for v in written["verdicts"]] == [1, 2]
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_sidecar_says_which_mode_ran_and_hashes_the_batch(self, provider: str):
+        import hashlib
+
+        want = hashlib.sha256(self.batch.read_bytes()).hexdigest()
+        self.good_verdicts(provider)
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        record = json.loads(self.validator_provenance(provider).read_text(encoding="utf-8"))
+        # `kind` is what lets a consumer tell a verdicts sidecar from a review's without
+        # parsing the artifact's filename.
+        assert record["kind"] == "validator"
+        assert record["batch_sha256"] == want
+        assert record["batch_file"] == str(self.batch)
+        assert record["template_sha256"]
+        assert record["schema_sha256"]
+        assert record["provider"] == provider
+        assert record["runner_status"] == "0"
+        assert record["run_stats"]["tool_calls"] == 1
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_batch_with_a_finding_nobody_judged_is_refused(self, provider: str):
+        # The failure this mode exists to stop: two findings went out, one verdict came
+        # back, and without the coverage check the unjudged one is carried as validated.
+        self.good_verdicts(provider, VERDICTS_INCOMPLETE)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 1, proc.stdout
+        assert "#2" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_validation_that_inspected_nothing_is_refused_with_its_artifacts_kept(
+        self, provider: str
+    ):
+        # `validated: true` across the board from a run that opened nothing is exactly the
+        # rubber stamp this command exists to refuse.
+        self.good_verdicts(provider, tool_call=False)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 6, proc.stdout
+        assert proc.stdout.strip() == ""
+        assert self.validator_artifact(provider).is_file()
+        assert self.validator_provenance(provider).is_file()
+        assert str(self.validator_provenance(provider)) in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize(
+        ("name", "text"),
+        [
+            ("not an array", json.dumps({"verdicts": []})),
+            ("duplicate numbers", json.dumps([BATCH[0], {**BATCH[1], "#": 1}])),
+            ("empty array", "[]"),
+            ("not json", "{nope"),
+        ],
+    )
+    def test_a_malformed_batch_is_a_usage_error_that_leaves_nothing_behind(
+        self, provider: str, name: str, text: str
+    ):
+        # Seeded first: the batch is parsed AFTER the clear, so this refusal is exactly the
+        # case where a previous run's verdicts could be left beside a fresh event stream.
+        self.good_verdicts(provider)
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        self.write_batch(text)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 2, (name, proc.stderr)
+        self.assert_run_dir_clean(provider, f"validator-{provider}")
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_missing_batch_file_is_a_usage_error(self, provider: str):
+        self.good_verdicts(provider)
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        proc = self.validate(provider, str(self.work / "no-such-batch.json"))
+        assert proc.returncode == 2, proc.stderr
+        self.assert_run_dir_clean(provider, f"validator-{provider}")
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_runner_failure_is_reported_as_4(self, provider: str):
+        self.set_spec(stdout="boom\n", exit=9)
+        assert self.validate(provider, str(self.batch)).returncode == 4
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_silent_validator_is_killed_and_reported_as_a_timeout(self, provider: str):
+        self.set_spec(stdout="starting\n", silent_for=90)
+        proc = self.validate(provider, str(self.batch), timeout=60, CE_PERSONA_IDLE_SECS="3")
+        assert proc.returncode == 5, proc.stderr
+        assert "no output for" in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_missing_template_is_an_environment_error(self, provider: str):
+        # The template is the plugin's file, not this package's: its absence is a machine
+        # that is not set up, which no different argument would fix.
+        (self.assets / "validator-batch-template.md").unlink()
+        self.good_verdicts(provider)
+        proc = self.validate(provider, str(self.batch))
+        assert proc.returncode == 3, proc.stderr
+        assert "validator-batch-template.md" in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_tiny_budget_refuses_before_the_runner_is_called(self, provider: str):
+        self.set_spec(stdout="the model must never be called\n")
+        proc = self.validate(provider, str(self.batch), CE_PERSONA_MAX_PROMPT_TOKENS="1")
+        assert proc.returncode == 78, proc.stderr
+        assert not self.argv_log.exists()
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_prompt_the_RUNNER_RECEIVED_carries_the_template_batch_and_schema(
+        self, provider: str
+    ):
+        # Read from what the stub was handed, not from the -prompt.md the CLI wrote: those
+        # are different claims and only the first one is the product.
+        self.prompt_seen.unlink(missing_ok=True)
+        self.good_verdicts(provider)
+        assert self.validate(provider, str(self.batch)).returncode == 0
+        prompt = self.prompt_seen.read_text(encoding="utf-8")
+        assert "You are validating findings that another reviewer reported." in prompt
+        # The prose around the fence is the dispatcher's, and must not reach the model.
+        assert "Notes for the dispatcher" not in prompt
+        # The batch VERBATIM rather than re-serialized: the caller assembled that document.
+        assert self.batch.read_text(encoding="utf-8") in prompt
+        assert '"title": "Validator Verdicts"' in prompt
+        assert "exactly one JSON object" in prompt
+        assert prompt.rstrip().endswith(assets.BOUNDARY_VERDICTS)
+
+    @pytest.mark.parametrize(
+        ("provider", "expected"),
+        [
+            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+        ],
+    )
+    def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
+        self.good_verdicts(provider)
+        self.validate(provider, str(self.batch), "-e", "sentinel-effort", "-m", "sentinel-model")
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        for token in expected:
+            assert token in argv, argv
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_help_exits_zero_and_documents_the_validate_exit_table(self, provider: str):
+        proc = self.validate(provider, "--help")
+        assert proc.returncode == 0, proc.stderr
+        for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "78 "):
+            assert code in proc.stdout
+        assert "CE_PERSONA_IDLE_SECS" in proc.stdout
+        # The NOUNS, not just the numbers: the review's table describes findings and an
+        # argument this command does not take, so rendering it here would be a wrong
+        # contract published in the one place a caller goes to read the contract.
+        assert "schema-valid verdicts" in proc.stdout
+        assert "one verdict for every input #, exactly once" in proc.stdout
+        assert "unknown or markdown-only persona" not in proc.stdout
