@@ -132,6 +132,17 @@ class Provider:
         """The console command that drives this provider."""
         return f"ce-{self.name}-persona"
 
+    @property
+    def validate_command(self) -> str:
+        """The console command that validates a findings batch through this provider.
+
+        A LABEL only. `argv` is unchanged between the two modes: `Invocation.schema_text`
+        carries whichever schema is being enforced, and only grok's `--json-schema` reads
+        it, so a validation is the same invocation with a different prompt and a different
+        schema rather than a second runner to keep in step.
+        """
+        return f"ce-{self.name}-validate"
+
 
 GROK = Provider(
     name="grok",

@@ -60,7 +60,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, cast
@@ -288,66 +288,93 @@ def _check_type(label: str, value: JSONValue, spec: JSONObject) -> None:
             fail(f"{label} is {len(value)} characters, over the schema's maxLength of {max_len}")
 
 
-def validate(found: Artifact, schema: JSONObject) -> int:
+def check_object(
+    found: Artifact, schema: JSONObject, key: str = "findings", *, demand_item_rules: bool = False
+) -> int:
+    """Hold one answer object to one schema, and return how many entries it carried.
+
+    The generic walk, shared by the findings gate and the verdicts gate: the schema's own
+    top-level `required`, the types of every top-level property, and each element of the
+    `key` array against `properties.<key>.items`. Nothing here knows what a finding or a
+    verdict means — the rules come from the schema in every case.
+
+    `demand_item_rules` is the findings gate's extra demand and is off by default, because
+    the two assertions behind it (`required` and `enum` declared on an item) are statements
+    about the PLUGIN's schema rather than about JSON Schema: the verdicts schema declares no
+    enums at all, so a walk that insisted on them would fail closed on every validation.
+    """
+    # What ONE element is called, for messages a person reads: "finding 3 missing title",
+    # "verdict 3 missing reason". Both keys this gate is given are regular plurals.
+    item_noun = key.removesuffix("s") or key
     check_schema_supported(schema)
 
     required = schema.get("required")
     if isinstance(required, list):
         missing = [k for k in required if isinstance(k, str) and k not in found]
         if missing:
-            fail(f"findings JSON missing required keys: {', '.join(missing)}")
-    entries = found.get("findings")
+            fail(f"{key} JSON missing required keys: {', '.join(missing)}")
+    entries = found.get(key)
     if not isinstance(entries, list):
-        fail("findings must be an array")
+        fail(f"{key} must be an array")
 
     top_properties = schema.get("properties")
     if not isinstance(top_properties, dict):
-        fail("findings schema has no properties object")
-    for key, spec in top_properties.items():
-        if key != "findings" and key in found and isinstance(spec, dict):
-            _check_type(key, found[key], spec)
+        fail(f"{key} schema has no properties object")
+    for name, spec in top_properties.items():
+        if name != key and name in found and isinstance(spec, dict):
+            _check_type(name, found[name], spec)
 
-    findings_spec = _as_object(top_properties.get("findings"), "findings schema")
-    item = findings_spec.get("items")
+    entries_spec = _as_object(top_properties.get(key), f"{key} schema")
+    item = entries_spec.get("items")
     if not isinstance(item, dict):
-        fail("findings schema has no properties.findings.items object")
+        fail(f"{key} schema has no properties.{key}.items object")
     properties = item.get("properties")
     if not isinstance(properties, dict) or not properties:
-        fail("findings schema has no properties.findings.items.properties object")
+        fail(f"{key} schema has no properties.{key}.items.properties object")
     item_required = item.get("required")
-    if not isinstance(item_required, list) or not item_required:
+    if demand_item_rules and (not isinstance(item_required, list) or not item_required):
         fail("findings schema declares no required finding fields")
+    required_fields = item_required if isinstance(item_required, list) else []
 
     # Every enum the schema declares, not just severity. The shape this replaced taught
     # `autofix_class: safe_auto` and `owner: review-fixer`, neither of which the current
     # schema allows, so a model repeating either must not pass.
     enums: dict[str, list[JSONValue]] = {}
-    for key, spec in properties.items():
+    for name, spec in properties.items():
         if isinstance(spec, dict):
             allowed = spec.get("enum")
             if isinstance(allowed, list) and allowed:
-                enums[key] = allowed
-    if not enums:
+                enums[name] = allowed
+    if demand_item_rules and not enums:
         fail("findings schema declares no finding enums")
 
-    for n, finding in enumerate(entries, 1):
-        if not isinstance(finding, dict):
-            fail(f"finding {n} is not an object")
-        absent = [k for k in item_required if isinstance(k, str) and k not in finding]
+    for n, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            fail(f"{item_noun} {n} is not an object")
+        absent = [k for k in required_fields if isinstance(k, str) and k not in entry]
         if absent:
-            fail(f"finding {n} missing {', '.join(absent)}")
-        for key, allowed in enums.items():
-            if key in finding and finding[key] not in allowed:
-                fail(f"finding {n} has {key}={finding[key]!r}, not one of {allowed}")
-        for key, spec in properties.items():
+            fail(f"{item_noun} {n} missing {', '.join(absent)}")
+        for name, allowed in enums.items():
+            if name in entry and entry[name] not in allowed:
+                fail(f"{item_noun} {n} has {name}={entry[name]!r}, not one of {allowed}")
+        for name, spec in properties.items():
             # Guarded the same way the top-level loop is: a non-object property spec is a
             # malformed schema, not something to walk into.
-            if key in finding and isinstance(spec, dict):
-                _check_type(f"finding {n} field {key}", finding[key], spec)
+            if name in entry and isinstance(spec, dict):
+                _check_type(f"{item_noun} {n} field {name}", entry[name], spec)
     return len(entries)
 
 
-def from_object_file(text: str) -> Artifact:
+def validate(found: Artifact, schema: JSONObject) -> int:
+    """The findings gate: the generic walk, plus what the plugin's schema must declare.
+
+    Kept as its own name because it is `gate`'s default `check` and three call sites already
+    pass it; the demands it adds are the ones that only make sense about findings.
+    """
+    return check_object(found, schema, "findings", demand_item_rules=True)
+
+
+def from_object_file(text: str, key: str = "findings") -> Artifact:
     """The findings object from a file that is the final message and nothing else.
 
     Strict by design. `codex exec -o` writes only the final message and the prompt demands
@@ -362,8 +389,8 @@ def from_object_file(text: str) -> Artifact:
             f"final message is not a single JSON object: {exc}. The prompt requires the "
             f"final message to be exactly one JSON object with no prose or code fences."
         )
-    if not isinstance(decoded, dict) or "findings" not in decoded:
-        fail("final message is JSON but carries no findings key")
+    if not isinstance(decoded, dict) or key not in decoded:
+        fail(f"final message is JSON but carries no {key} key")
     return decoded
 
 
@@ -389,7 +416,7 @@ BAD_STOP_REASONS = frozenset(
 )
 
 
-def from_grok_events(text: str) -> Artifact:
+def from_grok_events(text: str, key: str = "findings") -> Artifact:
     """The findings object from grok's NDJSON `result` event.
 
     The run's own terminal status is checked before its answer is believed. That matters
@@ -439,9 +466,9 @@ def from_grok_events(text: str) -> Artifact:
         # the raw text when `--json-schema` was in force means the schema-constrained channel
         # produced something unexpected and the gate quietly used a different one instead —
         # the answer it returns is then from a channel nobody asked for.
-        if not isinstance(obj, dict) or "findings" not in obj:
+        if not isinstance(obj, dict) or key not in obj:
             fail(
-                "grok's result event carries a structured_output that is not a findings "
+                f"grok's result event carries a structured_output that is not a {key} "
                 f"object ({type(obj).__name__}); --json-schema was requested, so this is a "
                 "malformed answer rather than a reason to read the raw text"
             )
@@ -450,7 +477,7 @@ def from_grok_events(text: str) -> Artifact:
     # the only channel left. Strict, like codex's.
     raw = result.get("result")
     if isinstance(raw, str) and raw.strip():
-        return from_object_file(raw)
+        return from_object_file(raw, key)
     fail("grok's result event carried no structured output")
 
 
@@ -762,7 +789,7 @@ def _seconds(value: JSONValue) -> float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def extract(mode: str, text: str) -> Artifact:
+def extract(mode: str, text: str, key: str = "findings") -> Artifact:
     """Recover the model's answer through the channel its runner actually provides.
 
     Both modes read a channel the RUNNER defines — grok's terminal event, codex's
@@ -771,12 +798,34 @@ def extract(mode: str, text: str) -> Artifact:
     the model quoted" by scanning output is not a decidable problem, and the attempt hosted
     six separate false-passes before it was removed. A runner offering only plain text is
     not supported rather than supported badly.
+
+    `key` is the top-level key the answer must carry. It is a parameter rather than a
+    constant because a validation's answer is `{"verdicts": [...]}`: without it, a perfectly
+    good verdicts object was refused at exit 1 on BOTH providers, before the schema that
+    would have judged it was ever applied.
     """
     if mode == "object":
-        return from_object_file(text)
+        return from_object_file(text, key)
     if mode == "grok-events":
-        return from_grok_events(text)
+        return from_grok_events(text, key)
     fail(f"unknown extraction mode {mode!r}")
+
+
+def severity_tally(found: Artifact, count: int) -> str:
+    """Findings by severity for the one stdout line: `1 P0, 2 P1`, or empty when there are none.
+
+    `count` is unused here and is part of the signature anyway, because this and the verdicts
+    summary are the two values of one `gate` parameter: a summary that had to be called
+    differently depending on the mode would put the mode back inside `gate`.
+    """
+    entries = found.get("findings")
+    tally: dict[str, int] = {}
+    if isinstance(entries, list):
+        for finding in entries:
+            severity = finding.get("severity") if isinstance(finding, dict) else None
+            name = severity if isinstance(severity, str) else "?"
+            tally[name] = tally.get(name, 0) + 1
+    return ", ".join(f"{n} {sev}" for sev, n in sorted(tally.items()))
 
 
 def gate(
@@ -790,6 +839,10 @@ def gate(
     prov_files: dict[str, str],
     evidence: Evidence,
     label: str,
+    key: str = "findings",
+    check: Callable[[Artifact, JSONObject], int] = validate,
+    summarize: Callable[[Artifact, int], str] = severity_tally,
+    noun: str = "findings",
 ) -> int:
     """Validate a run's answer and write its artifacts. Returns the process exit status.
 
@@ -797,15 +850,21 @@ def gate(
     because that dud IS the evidence and a caller has to be able to look at what it refused.
     Raises `EnvError` when the stream cannot be counted at all, which is a fact about this
     build or the provider CLI rather than about the model, and must not be told as one.
+
+    `key`, `check`, `summarize` and `noun` are what a validation varies: the top-level key its
+    answer carries, the rules its answer is held to, the one-line summary and the word for what
+    it returned. All four default to the review, because the run frame around them — the status
+    checks, the artifact order, the vacuous-run refusal — is the part neither mode may have its
+    own copy of. Two gates would mean two places for the refusal to be forgotten in.
     """
     try:
         text = answer_file.read_text(encoding="utf-8", errors="replace")
         try:
-            schema = _as_object(loads(schema_path.read_text(encoding="utf-8")), "findings schema")
+            schema = _as_object(loads(schema_path.read_text(encoding="utf-8")), f"{noun} schema")
         except (OSError, ValueError) as exc:
-            fail(f"cannot read findings schema {schema_path}: {exc}")
-        found = extract(mode, text)
-        count = validate(found, schema)
+            fail(f"cannot read {noun} schema {schema_path}: {exc}")
+        found = extract(mode, text, key)
+        count = check(found, schema)
     except GateError as exc:
         print(f"{label}: {exc}", file=sys.stderr)
         return 1
@@ -845,19 +904,12 @@ def gate(
         # `ce-persona-findings` would render it as an ordinary review. The sidecar is the
         # record of WHY it was refused, and it is the only one of the two safe to read.
         raise errors.VacuousRun(
-            f"refusing to report {count} findings from a run that made no tool calls "
+            f"refusing to report {count} {noun} from a run that made no tool calls "
             f"({describe_run(stats)}). The model never opened the diff, so nothing it "
             f"reported is founded; the evidence is {provenance_out}."
         )
 
-    entries = found.get("findings")
-    tally: dict[str, int] = {}
-    if isinstance(entries, list):
-        for finding in entries:
-            severity = finding.get("severity") if isinstance(finding, dict) else None
-            key = severity if isinstance(severity, str) else "?"
-            tally[key] = tally.get(key, 0) + 1
-    breakdown = ", ".join(f"{n} {sev}" for sev, n in sorted(tally.items()))
+    breakdown = summarize(found, count)
 
     # stdout is the caller's context: one line, never the transcript. Severity counts first
     # so a caller can triage without opening the artifact at all.
@@ -867,9 +919,7 @@ def gate(
     # flush would then raise where no handler can catch it and exit 120 — reporting failure
     # for a review that succeeded and whose artifacts are already on disk.
     try:
-        print(
-            f"{label}: {count} findings{f' ({breakdown})' if breakdown else ''} -> {findings_out}"
-        )
+        print(f"{label}: {count} {noun}{f' ({breakdown})' if breakdown else ''} -> {findings_out}")
         sys.stdout.flush()
     except BrokenPipeError:
         # Point the interpreter's shutdown flush at /dev/null, closing the fd we opened to

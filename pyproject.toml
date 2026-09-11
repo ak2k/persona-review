@@ -32,6 +32,12 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["persona_review"]
 
+# The verdicts schema is code, not documentation: the gate reads it from beside the module
+# at run time. Without this it is in the source tree and absent from the wheel, which the
+# checks would catch only where they run the BUILT package -- not locally.
+[tool.setuptools.package-data]
+persona_review = ["verdicts-schema.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Load-bearing, not decoration: this already caught a leaked pair of pipe handles in the
