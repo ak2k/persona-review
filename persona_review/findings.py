@@ -53,7 +53,9 @@ included; a programmatic caller is the one most likely to act on it unread.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import secrets
 import sys
@@ -99,6 +101,12 @@ Project a findings artifact at the detail level you need.
   --verify-quotes -C <dir>
                 only with --return: check each first_evidence against the file and
                 line it cites under <dir>, and DROP the ones that do not match.
+                A quote may span several lines. A citation whose RESOLVED path
+                leaves <dir> -- through .., an absolute path or a symlink -- is
+                dropped unread, and quoted text under 12 characters is dropped as
+                too short to check. Markdown decoration around a citation and a
+                :col suffix are ignored, and any citation in the quote that
+                resolves may corroborate it.
                 A quote is never rewritten, and the artifact is never modified
 
 N in `--show N` is the number shown as #N in the listing, in either tier.
@@ -111,10 +119,12 @@ handed to another agent as input. --json and --return are deliberately unfenced.
 
 exit status
   {EXIT_OK}  rendered
-  {EXIT_DATA}  the file is unreadable or is not a findings artifact
+  {EXIT_DATA}  the file is unreadable, is not a findings artifact, or could not be
+     projected into a usable return
   {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding number,
      --return together with --json or --show, --verify-quotes without --return or
-     without -C, or a -C that is missing, is not a directory, or names an unknown user
+     without -C, -C without --verify-quotes, or a -C that is missing, is not a
+     directory, or names an unknown user
   {EXIT_VACUOUS}  the artifact's provenance records a run that made no tool calls; nothing
      it reported is founded, so it is refused rather than rendered"""
 
@@ -219,9 +229,12 @@ def render_detail(n: int, finding: Finding) -> str:
 
 # The keys the merge helper reads off a compact RETURN, which is a different shape from the
 # artifact: `why_it_matters` and `evidence` are absent because a return does not carry them.
-# The last three are merge state the helper writes into a return and reads back out of one --
-# a settled conflict, a merged reviewer list, and the independent reviewers that decide
-# cross-model promotion — so dropping them would quietly change a merge.
+# Exactly the eleven the reviewer contract enumerates. `settled_conflict`, `reviewers` and
+# `independent_reviewers` are deliberately NOT among them: they are merge state the
+# orchestrator stamps on its own reconciled returns, and a truthy `settled_conflict` exempts a
+# finding from the helper's confidence gate — so copying one out of a lens artifact would
+# carry a finding whose quote this command had just dropped straight past the gate this
+# projection exists to feed.
 RETURN_KEYS = (
     "title",
     "severity",
@@ -234,9 +247,6 @@ RETURN_KEYS = (
     "pre_existing",
     "suggested_fix",
     "first_evidence",
-    "settled_conflict",
-    "reviewers",
-    "independent_reviewers",
 )
 
 
@@ -305,11 +315,22 @@ def project(artifact: JSONObject) -> tuple[JSONObject, int]:
 
 
 # A `path:line` citation in the shapes the lenses actually write: `f.py:12 -- code`,
-# `f.py:12: code`, and `` `code` -- f.py:12``. Backticks and quotes end the path so a quoted
-# span cannot be swallowed into it.
-_REFERENCE = re.compile(r"([^\s`'\"]+?):(\d+)\b")
+# `f.py:12: code`, `` `code` -- f.py:12``, any of those wearing markdown decoration
+# (`**f.py:12**`, `(f.py:12)`, a backticked path) and an optional `:col` suffix. The
+# decoration is INSIDE the match, so neither the path nor the compared text carries it;
+# without that, shapes lenses write every day dropped a true quote on this reader's own
+# parse. Backticks and quotes end the path so a quoted span cannot be swallowed into it.
+_REFERENCE = re.compile(r"""[(\[*<`]*([^\s`'"(\[*<]+?):(\d+)(?::\d+)?\b[*)\]>`]*""")
 _BACKTICKED = re.compile(r"`([^`]*)`")
 _SEPARATOR = re.compile(r"^\s*(?::|--|—)\s*")
+_TRAILING_SEPARATOR = re.compile(r"\s*(?::|--|—)\s*$")
+
+# How short the normalized compared text may be and still be checked. A substring test with
+# no floor is verification that cannot fail: on a line reading `return bill(account)` the
+# quotes `account` and `r` both "verify", and a surviving first_evidence is also what unlocks
+# cross-model promotion. 12 admits the shortest fragment a lens has been seen to quote
+# (`bill(account)`, 13 characters) and refuses a bare identifier.
+_QUOTE_FLOOR = 12
 
 
 def _normalized(text: str) -> str:
@@ -322,17 +343,22 @@ class _Reference:
     path: str
     lines: tuple[str, ...]
     line: int
+    start: int
     end: int
 
 
-def _resolve(quote: str, finding: Finding, repo: Path) -> _Reference | None:
-    """The first citation in the quote that names a file this tree can read.
+def _resolve(quote: str, finding: Finding, repo: Path) -> tuple[list[_Reference], list[str]]:
+    """Every citation in the quote naming a file inside this tree, and why any was refused.
 
     Read from the WORKING TREE, not from git: the reviewed head is what is checked out when
     a lens runs locally, and reaching for git would put a second source of truth — and a
-    second failure mode — inside a reader.
+    second failure mode — inside a reader. Every citation is offered rather than only the
+    first to resolve, so an annotated quote is not dropped on this reader's choice of which
+    citation to try.
     """
     own = finding.get("file")
+    found: list[_Reference] = []
+    refused: list[str] = []
     for match in _REFERENCE.finditer(quote):
         cited = match.group(1)
         candidates = [cited]
@@ -340,37 +366,87 @@ def _resolve(quote: str, finding: Finding, repo: Path) -> _Reference | None:
             # Lenses often cite a basename while `file` carries the repo-relative path.
             candidates.append(own)
         for rel in candidates:
-            if Path(rel).is_absolute() or ".." in Path(rel).parts:
-                # The citation is model-written text, so it is an input, not a destination:
-                # `/etc/passwd:1` would otherwise make this reader confirm the contents of a
-                # file the caller never pointed it at.
-                continue
-            target = repo / rel
-            if not target.is_file():
-                continue
+            # One try over the whole body: the resolution, the stat, the read and the line
+            # number all fail on text a lens controls, and this function's contract is that an
+            # unresolvable citation is dropped with a reason. A traceback out of here exits 1,
+            # which already means "not a findings artifact".
             try:
+                target = (repo / rel).resolve(strict=True)
+                if not target.is_relative_to(repo):
+                    # The citation is model-written text, so it is an input, not a
+                    # destination. Containment is tested on the RESOLVED path because a
+                    # symlink is an ordinary git object a reviewed tree may carry: checking
+                    # the cited string refuses `/etc/passwd:1` and `../x:1` while admitting a
+                    # link whose target is outside, and reading one turns this command into a
+                    # one-bit oracle over every file its caller can read.
+                    refused.append("cites a path outside the reviewed tree")
+                    continue
+                if not target.is_file():
+                    continue
                 text = target.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                line = int(match.group(2))
+            except (OSError, ValueError):
                 continue
-            return _Reference(rel, tuple(text.splitlines()), int(match.group(2)), match.end())
+            found.append(
+                _Reference(rel, tuple(text.splitlines()), line, match.start(), match.end())
+            )
+            break
+    return found, refused
+
+
+def _compared(quote: str, ref: _Reference) -> str:
+    """The text this citation claims the tree carries: the quote without that citation.
+
+    Without the separator that joined the two, and unwrapped when what is left IS one
+    backticked span — chosen by the quote's shape, not by a backtick occurring anywhere in
+    it. Reading the span wherever one appeared checked a parenthesized aside instead of the
+    quote, which both certified prose and dropped verbatim lines.
+    """
+    rest = quote[: ref.start] + quote[ref.end :]
+    rest = _TRAILING_SEPARATOR.sub("", _SEPARATOR.sub("", rest)).strip()
+    span = _BACKTICKED.fullmatch(rest)
+    return span.group(1) if span else rest
+
+
+def _contradicted(quote: str, ref: _Reference) -> str | None:
+    """None when this citation's lines carry the text cited at them, else why they do not."""
+    compared = _compared(quote, ref)
+    quoted = _normalized(compared)
+    if not quoted:
+        return "quoted text is empty"
+    if len(quoted) < _QUOTE_FLOOR:
+        return f"quoted text is too short to check ({len(quoted)} chars, floor {_QUOTE_FLOOR})"
+    # Sized to the quote, and counted before normalizing collapses the newlines: the evidence
+    # contract is the motivating LINE(S), and a two-line quote tested against a single line
+    # can never match however true it is.
+    span = compared.count("\n") + 1
+    if ref.line < 1 or ref.line - 1 + span > len(ref.lines):
+        if span == 1:
+            return f"line {ref.line} is out of range for {ref.path} ({len(ref.lines)} lines)"
+        last = ref.line + span - 1
+        return f"lines {ref.line}-{last} are out of range for {ref.path} ({len(ref.lines)} lines)"
+    window = ref.lines[ref.line - 1 : ref.line - 1 + span]
+    if quoted not in _normalized("\n".join(window)):
+        return f"quoted text is not on {ref.path}:{ref.line}"
     return None
 
 
 def _unverified(quote: str, finding: Finding, repo: Path) -> str | None:
-    """None when the tree corroborates the quote, else why it does not."""
-    ref = _resolve(quote, finding, repo)
-    if ref is None:
-        return f"no file:line reference resolves under {repo}"
-    backticked = _BACKTICKED.search(quote)
-    raw = backticked.group(1) if backticked else _SEPARATOR.sub("", quote[ref.end :])
-    quoted = _normalized(raw)
-    if not quoted:
-        return "quoted text is empty"
-    if not 1 <= ref.line <= len(ref.lines):
-        return f"line {ref.line} is out of range for {ref.path} ({len(ref.lines)} lines)"
-    if quoted not in _normalized(ref.lines[ref.line - 1]):
-        return f"quoted text is not on {ref.path}:{ref.line}"
-    return None
+    """None when the tree corroborates the quote, else why it does not.
+
+    One corroborating citation is enough and the first reason stands when none corroborates:
+    open on this reader's own parse, closed on a tree that contradicts the quote.
+    """
+    found, refused = _resolve(quote, finding, repo)
+    if not found:
+        return refused[0] if refused else f"no file:line reference resolves under {repo}"
+    reasons: list[str] = []
+    for ref in found:
+        reason = _contradicted(quote, ref)
+        if reason is None:
+            return None
+        reasons.append(reason)
+    return reasons[0]
 
 
 def verify_quotes(projected: JSONObject, repo: Path) -> int:
@@ -381,6 +457,10 @@ def verify_quotes(projected: JSONObject, repo: Path) -> int:
     finding on the same rule it applies to a lens that quoted nothing at all, and the
     artifact on disk is untouched either way.
     """
+    # Resolved here, where containment is decided: a caller's `-C` may reach the tree through
+    # a symlink (on macOS `/var` is one, to `/private/var`), and comparing a resolved target
+    # against an unresolved root puts every contained file outside it.
+    repo = repo.resolve()
     dropped = 0
     for n, finding in numbered(projected):
         quote = finding.get("first_evidence")
@@ -521,7 +601,11 @@ def main(argv: list[str] | None = None) -> int:
             return _usage_error(f"-C '{repo_spec}' names a home directory that does not exist")
         if not repo.is_dir():
             return _usage_error(f"-C '{repo_spec}' is not a directory")
-        repo = repo.resolve()
+    elif repo_spec is not None:
+        # The mirror of the arm above, for the same reason: without it `--return -C <dir>`
+        # emits the plain projection at exit 0, byte-identical to an unverified one, and a
+        # machine caller has no channel on which to notice it got no verification.
+        return _usage_error("-C only applies to --verify-quotes")
 
     try:
         artifact = load(path)
@@ -544,8 +628,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ce-persona-findings: {exc}", file=sys.stderr)
             return EXIT_DATA
         dropped = verify_quotes(projected, repo) if repo is not None else None
-        json.dump(projected, sys.stdout, indent=1)
-        print()
+        # Flushed here and a broken pipe swallowed, the pattern `validate.py` uses on its own
+        # summary line and for the same reason: the documented way to consume this mode pipes
+        # it into `jq -s .`, and a reader that stops early would leave the interpreter's
+        # shutdown flush to raise where no handler can catch it and exit 120 — failure
+        # reported for a projection that completed.
+        try:
+            json.dump(projected, sys.stdout, indent=1)
+            print()
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # Point the shutdown flush at /dev/null, closing the fd we opened to do it: dup2
+            # duplicates, it does not consume.
+            with contextlib.suppress(OSError):
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                try:
+                    os.dup2(devnull, sys.stdout.fileno())
+                finally:
+                    os.close(devnull)
         emitted = projected["findings"]
         summary = (
             f"ce-persona-findings: {_text(projected.get('reviewer'))}: "

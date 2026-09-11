@@ -76,11 +76,12 @@ tie to a file. Use the model directly for that.
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered,
 `1` the file is unreadable, is not a findings artifact, or could not be projected into a
 usable return, `2` usage error — including `--return` with `--json` or `--show`,
-`--verify-quotes` without `--return` or without `-C`, and a `-C` that is missing, is not a
-directory, or names an unknown user — and `6` when the artifact's provenance records a run
-that made no tool calls. That last one matters because a refusal has to survive being handed
-on: the review command keeps the dud artifact as evidence, and without the check this package
-would launder its own refusal into an ordinary listing at exit `0`, one command later.
+`--verify-quotes` without `--return` or without `-C`, a `-C` given without `--verify-quotes`,
+and a `-C` that is missing, is not a directory, or names an unknown user — and `6` when the
+artifact's provenance records a run that made no tool calls. That last one matters because a
+refusal has to survive being handed on: the review command keeps the dud artifact as
+evidence, and without the check this package would launder its own refusal into an
+ordinary listing at exit `0`, one command later.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
 per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
@@ -101,12 +102,19 @@ ce-persona-findings: correctness: 4 findings, 4 first_evidence backfilled from e
 ```
 
 Every top-level key except `findings` is copied verbatim (`independence_verified` included — the
-helper reads it to decide cross-model promotion), and each finding keeps only the keys the helper
-reads. `first_evidence` is the artifact's own value when it has one, otherwise `evidence[0]`,
-which the plugin's contract makes the same string; it is never emitted empty. The one line on
-stderr says how many were backfilled, so stdout stays parseable. Exit `1` when the artifact would
-make a return the helper drops whole — no `reviewer`, or a `residual_risks` / `testing_gaps` that
-is not a list. One artifact gives one object; assemble several with `jq -s .`.
+helper reads it to decide cross-model promotion), and each finding keeps only the eleven
+merge-tier keys the helper reads. `first_evidence` is the artifact's own value when it has one,
+otherwise `evidence[0]`, which the plugin's contract makes the same string; it is never emitted
+empty. The one line on stderr says how many were backfilled, so stdout stays parseable. Exit `1`
+when the artifact would make a return the helper drops whole — no `reviewer`, or a
+`residual_risks` / `testing_gaps` that is not a list. One artifact gives one object; assemble
+several with `jq -s .`.
+
+**Merge state is not among those keys.** `settled_conflict`, `reviewers` and
+`independent_reviewers` are the orchestrator's to stamp on its own reconciled returns, and are
+never copied out of a lens artifact. A truthy `settled_conflict` exempts a finding from the
+helper's confidence gate, so carrying one in would walk a finding whose quote was just dropped
+straight past the gate this projection exists to feed.
 
 `--verify-quotes -C <dir>` additionally checks each quote against the file and line it cites,
 read from the **working tree** under `<dir>` (in the plugin's local-aligned mode that tree is the
@@ -115,6 +123,20 @@ reviewed head, and this keeps git out of a reader). A quote the tree does not co
 dropping it lets the helper demote the finding on its own rule. Each drop prints its reason on
 stderr; the artifact on disk is not touched, the exit status stays `0`, and every other byte of
 the object is identical to plain `--return`.
+
+What is checked is the quote minus the citation being checked: `f.py:12 -- code`, `f.py:12: code`
+and `` `code` -- f.py:12`` all work, as do a citation wearing markdown decoration
+(`**f.py:12**`, `(f.py:12)`, a backticked path) and a `:col` suffix. Whitespace is collapsed on
+both sides, a quote may span several lines, and any citation in the quote that resolves may
+corroborate it. A backticked span is read as the quote only when the text outside the citation
+*is* that span — checking a backticked aside instead certified prose as a quoted line.
+
+A quote is dropped when no citation resolves, when its citation resolves **outside** `<dir>`
+(the check is on the resolved path, so `..`, an absolute path and a symlink pointing out of the
+tree are one case and the file is never read), when the cited lines are out of range, when the
+text is empty, when the tree contradicts it, or when the compared text is **shorter than 12
+characters** — a one-word fragment is on the line as a substring while saying nothing about the
+finding, and verification that cannot fail is worse than none.
 
 ## How the findings are extracted
 
