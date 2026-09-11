@@ -358,6 +358,48 @@ MUTATIONS: list[Mutation] = [
         "            if n == show + 1:",
     ),
     Mutation(
+        # The whole reason --return exists: the merge helper demotes a 75/100 finding with no
+        # `first_evidence` to 50, where its confidence gate suppresses it, so a lens that
+        # filled only the evidence array reads as having found nothing.
+        "a lens that filled only evidence[0] is projected as having quoted nothing",
+        "persona_review/findings.py",
+        r"    return _quote\(items\[0\]\) if isinstance\(items, list\) and items else None",
+        "    return None",
+    ),
+    Mutation(
+        # The helper drops a malformed return WITH every finding in it and says nothing, so
+        # emitting one turns a whole reviewer's pass into silence downstream.
+        "a return the merge helper would drop whole is emitted anyway",
+        "persona_review/findings.py",
+        r"    if not isinstance\(reviewer, str\) or not reviewer\.strip\(\):",
+        "    if False:",
+    ),
+    Mutation(
+        # Verification that cannot fail is worse than none: it certifies quotes it never
+        # checked, and the merge then treats a fabricated line as founded evidence.
+        "--verify-quotes keeps a quote the reviewed tree does not carry",
+        "persona_review/findings.py",
+        r"    if quoted not in _normalized\(ref\.lines\[ref\.line - 1\]\):",
+        "    if False:",
+    ),
+    Mutation(
+        # A quote is model-written text, so the path inside it is an input and not a
+        # destination. Reverting this lets `/etc/passwd:1 -- root:x:0:0` make the reader
+        # confirm a line in a file the caller never pointed it at.
+        "a quote can steer the verifier at a file outside the reviewed tree",
+        "persona_review/findings.py",
+        r'            if Path\(rel\)\.is_absolute\(\) or "\.\." in Path\(rel\)\.parts:',
+        "            if False:",
+    ),
+    Mutation(
+        # The laundering route in the mode a machine consumes. --return feeds a merge
+        # directly, so a refused run reaching it is the refusal being undone by a reader.
+        "the vacuous-run refusal stops preceding --return",
+        "persona_review/findings.py",
+        r"^    vacuous = validate\.refused_run\(Path\(path\)\)$",
+        "    vacuous = None if as_return else validate.refused_run(Path(path))",
+    ),
+    Mutation(
         "usage errors collapse back onto the data exit code",
         "persona_review/findings.py",
         r"^EXIT_USAGE = 2$",

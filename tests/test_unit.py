@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hypothesis import given, settings
@@ -1828,3 +1828,447 @@ class TestPersonaNamesAreBare:
         assert bare == Path(bare).name
         assert not bare.startswith(".")
         assert (Path("/run") / f"{bare}-grok.json").parent == Path("/run")
+
+
+# The merge-tier projection lives at the end of this file because its property test reuses
+# PROPERTY and `json_values` above.
+
+
+def _return_finding(**over: Any) -> dict[str, Any]:
+    """A finding carrying every key the merge helper reads, plus the ones it must not get."""
+    base: dict[str, Any] = {
+        "title": "a stale account id is billed",
+        "severity": "P1",
+        "file": "src/f.py",
+        "line": 2,
+        "confidence": 75,
+        "autofix_class": "manual",
+        "owner": "human",
+        "requires_verification": True,
+        "pre_existing": False,
+        "suggested_fix": "read the id from the request",
+        "settled_conflict": "kept as P1 over the peer's P2",
+        "reviewers": ["correctness", "api-contract"],
+        "independent_reviewers": ["api-contract"],
+        "evidence": ["src/f.py:2 -- return  bill(account)", "src/f.py:9 -- corroboration"],
+        "why_it_matters": "Callers bill the wrong account.",
+        "an_unknown_key": {"the helper": "never reads this"},
+    }
+    base.update(over)
+    return base
+
+
+class TestTheMergeTierProjection:
+    """`--return`: the artifact as the compact RETURN the plugin's merge helper consumes.
+
+    The helper merges reviewer returns, not artifacts, and demotes a 75/100 finding whose
+    `first_evidence` is missing to 50 — where its own confidence gate suppresses it. A lens
+    that filled only `evidence` therefore reads as having found nothing, so the projection's
+    one judgement is the `evidence[0]` fallback tier 1 already applies for display.
+    """
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.path = str(self.dir / "correctness.json")
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _write(self, art: dict[str, Any]) -> None:
+        Path(self.path).write_text(json.dumps(art), encoding="utf-8")
+
+    def _run(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def _project(self, art: dict[str, Any], *args: str) -> tuple[dict[str, Any], str]:
+        self._write(art)
+        code, out, err = self._run(self.path, "--return", *args)
+        assert code == 0, err
+        obj: dict[str, Any] = json.loads(out)
+        return obj, err
+
+    def _one(self, art: dict[str, Any], *args: str) -> dict[str, Any]:
+        obj, _ = self._project(art, *args)
+        first: dict[str, Any] = obj["findings"][0]
+        return first
+
+    def test_only_the_keys_the_helper_reads_survive(self):
+        row = self._one(artifact(_return_finding()))
+        assert set(row) == {
+            "title",
+            "severity",
+            "file",
+            "line",
+            "confidence",
+            "autofix_class",
+            "owner",
+            "requires_verification",
+            "pre_existing",
+            "suggested_fix",
+            "first_evidence",
+            "settled_conflict",
+            "reviewers",
+            "independent_reviewers",
+        }, row
+
+    def test_the_merge_state_keys_are_carried_verbatim(self):
+        # `settled_conflict`, `reviewers` and `independent_reviewers` are written INTO a
+        # return by the helper and read back OUT of one: dropping them silently reopens a
+        # settled conflict and disables cross-model promotion.
+        row = self._one(artifact(_return_finding()))
+        assert row["settled_conflict"] == "kept as P1 over the peer's P2"
+        assert row["reviewers"] == ["correctness", "api-contract"]
+        assert row["independent_reviewers"] == ["api-contract"]
+
+    def test_the_artifact_only_keys_are_dropped(self):
+        # A return is a different shape from an artifact, not a subset of one: the helper's
+        # REQUIRED_FINDING has no `why_it_matters` and no `evidence`, and the tokens they
+        # cost buy the merge nothing.
+        row = self._one(artifact(_return_finding()))
+        assert "why_it_matters" not in row
+        assert "evidence" not in row
+        assert "an_unknown_key" not in row
+
+    def test_a_lens_written_first_evidence_is_kept_verbatim(self):
+        row = self._one(artifact(_return_finding(first_evidence="src/f.py:2 --  bill(account)  ")))
+        assert row["first_evidence"] == "src/f.py:2 --  bill(account)  "
+
+    def test_a_missing_first_evidence_is_backfilled_from_evidence_zero(self):
+        # THE POINT OF THE COMMAND. Without this the helper demotes the finding to 50 and
+        # the gate suppresses it, so a real P1 reads as a clean review.
+        row = self._one(artifact(_return_finding()))
+        assert row["first_evidence"] == "src/f.py:2 -- return  bill(account)"
+
+    def test_a_blank_first_evidence_is_treated_as_absent(self):
+        # The helper marks a finding whose `first_evidence` is present but blank MALFORMED
+        # and drops it, which is worse than the demotion the backfill exists to avoid.
+        row = self._one(artifact(_return_finding(first_evidence="   \n ")))
+        assert row["first_evidence"] == "src/f.py:2 -- return  bill(account)"
+
+    @pytest.mark.parametrize(
+        "evidence", [[], "src/f.py:2 -- not a list", [None], [""], [{"quote": "x"}]]
+    )
+    def test_no_usable_quote_leaves_the_key_absent_rather_than_empty(self, evidence: Any):
+        row = self._one(artifact(_return_finding(first_evidence=" ", evidence=evidence)))
+        assert "first_evidence" not in row
+
+    def test_a_finding_that_is_not_an_object_passes_through_and_order_is_kept(self):
+        # The helper counts a non-object finding malformed. Projecting it away would hide a
+        # defect in the artifact behind a return that reads as clean.
+        art = artifact(_return_finding(title="first"), _return_finding(title="third"))
+        art["findings"].insert(1, "not an object")
+        obj, _ = self._project(art)
+        rows = obj["findings"]
+        assert rows[1] == "not an object"
+        assert [rows[0]["title"], rows[2]["title"]] == ["first", "third"]
+
+    def test_every_other_top_level_key_is_copied_verbatim(self):
+        # `independence_verified` decides cross-model promotion for an `adversarial-*`
+        # reviewer, so a projection that dropped unknown metadata would change the merge.
+        art = artifact(_return_finding())
+        art["independence_verified"] = True
+        art["residual_risks"] = ["the cache path is untested"]
+        obj, _ = self._project(art)
+        assert obj["independence_verified"] is True
+        assert obj["residual_risks"] == ["the cache path is untested"]
+        assert obj["reviewer"] == "adversarial-reviewer"
+
+    def test_absent_list_fields_are_emitted_empty(self):
+        art = artifact(_return_finding())
+        del art["residual_risks"]
+        del art["testing_gaps"]
+        obj, _ = self._project(art)
+        assert obj["residual_risks"] == []
+        assert obj["testing_gaps"] == []
+
+    @pytest.mark.parametrize(
+        ("art", "expected"),
+        [
+            ({"findings": []}, "no reviewer name"),
+            ({"reviewer": None, "findings": []}, "no reviewer name"),
+            ({"reviewer": "  ", "findings": []}, "no reviewer name"),
+            ({"reviewer": "r", "findings": [], "residual_risks": {}}, "residual_risks"),
+            ({"reviewer": "r", "findings": [], "testing_gaps": "none"}, "testing_gaps"),
+        ],
+    )
+    def test_a_return_the_helper_would_drop_whole_is_refused(
+        self, art: dict[str, Any], expected: str
+    ):
+        # LITERAL 1: these numbers are a published contract, and an assertion written
+        # against the module's own constant moves with it. The helper drops a malformed
+        # return WITH every finding in it and says nothing, so emitting one would turn a
+        # reviewer's whole pass into silence.
+        self._write(art)
+        code, out, err = self._run(self.path, "--return")
+        assert code == 1, out
+        assert expected in err
+        assert out == ""
+
+    def test_the_summary_line_counts_the_findings_and_the_backfills(self):
+        # stdout is the object and nothing else; the counts a caller needs to audit the
+        # projection go to stderr.
+        art = artifact(
+            _return_finding(),
+            _return_finding(first_evidence="src/f.py:2 -- kept"),
+            _return_finding(first_evidence=" ", evidence=[]),
+        )
+        _, err = self._project(art)
+        assert (
+            err.strip() == "ce-persona-findings: adversarial-reviewer: 3 findings, "
+            "1 first_evidence backfilled from evidence[0]"
+        )
+
+    def test_the_object_is_unfenced_so_a_caller_can_parse_it(self):
+        self._write(artifact(_return_finding()))
+        _, out, _ = self._run(self.path, "--return")
+        assert "UNTRUSTED" not in out
+        assert json.loads(out)["reviewer"] == "adversarial-reviewer"
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((ARTIFACT, "--return", "--json"), "cannot be combined"),
+            ((ARTIFACT, "--json", "--return"), "cannot be combined"),
+            ((ARTIFACT, "--return", "--show", "1"), "cannot be combined"),
+            ((ARTIFACT, "--verify-quotes"), "only applies to --return"),
+            ((ARTIFACT, "--return", "--verify-quotes"), "wants -C"),
+            ((ARTIFACT, "--return", "--verify-quotes", "-C"), "-C wants a directory"),
+        ],
+    )
+    def test_a_mode_that_does_not_exist_is_a_usage_error(
+        self, args: tuple[str, ...], expected: str
+    ):
+        self._write(artifact(_return_finding()))
+        code, out, err = self._run(*(self.path if a is ARTIFACT else a for a in args))
+        assert code == 2, err
+        assert expected in err
+        assert out == ""
+
+    def test_a_c_that_is_not_a_usable_directory_is_a_usage_error(self):
+        self._write(artifact(_return_finding()))
+        not_a_dir = str(Path(self.tmp.name) / "correctness.json")
+        for spec, expected in (
+            (not_a_dir, "is not a directory"),
+            (str(Path(self.tmp.name) / "nope"), "is not a directory"),
+            # expanduser raises RuntimeError for an unknown user -- not OSError, and not a
+            # type a caller would think to catch, so it used to leave as a traceback.
+            ("~nosuchuser0123/x", "names a home directory that does not exist"),
+        ):
+            code, out, err = self._run(self.path, "--return", "--verify-quotes", "-C", spec)
+            assert code == 2, err
+            assert expected in err, err
+            assert out == ""
+            assert "Traceback" not in err
+
+    def test_the_vacuous_run_refusal_precedes_the_projection(self):
+        # The laundering route, in the mode a machine consumes: exit 6 keeps the artifact as
+        # evidence, and a return built from it would feed a review nobody performed straight
+        # into a merge.
+        art = self.dir / "adversarial-reviewer-grok.json"
+        art.write_text(json.dumps(artifact(_return_finding())), encoding="utf-8")
+        (self.dir / ("adversarial-reviewer-grok" + validate.PROVENANCE_SUFFIX)).write_text(
+            json.dumps({"provider": "grok", "run_stats": {"tool_calls": 0, "turns": 1}}),
+            encoding="utf-8",
+        )
+        code, out, err = self._run(str(art), "--return")
+        assert code == 6, out
+        assert out == ""
+        assert "no tool calls" in err
+
+    def test_help_documents_the_new_modes(self):
+        code, out, _ = self._run("--help")
+        assert code == 0
+        for token in ("--return", "--verify-quotes", "-C <dir>"):
+            assert token in out
+
+    @PROPERTY
+    @given(
+        raw=st.dictionaries(
+            st.sampled_from([*findings.RETURN_KEYS, "why_it_matters", "evidence", "junk"]),
+            json_values,
+            max_size=8,
+        )
+    )
+    def test_a_projected_finding_never_carries_a_key_the_helper_cannot_read(
+        self, raw: dict[str, Any]
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.json"
+            path.write_text(json.dumps({"reviewer": "r", "findings": [raw]}), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = findings.main([str(path), "--return"])
+        assert code == 0
+        row = json.loads(out.getvalue())["findings"][0]
+        assert set(row) <= set(findings.RETURN_KEYS)
+        if "first_evidence" in row:
+            # An empty one is worse than none: the helper marks that finding malformed.
+            assert isinstance(row["first_evidence"], str) and row["first_evidence"].strip()
+
+
+class TestQuotesAreCheckedAgainstTheTree:
+    """`--verify-quotes -C <dir>`: a quote the reviewed tree does not carry is dropped.
+
+    Dropped, never rewritten. Rewriting a quote to whatever the file holds would manufacture
+    evidence the lens did not give; removing it lets the merge helper demote the finding on
+    the same rule it applies to a lens that quoted nothing at all.
+    """
+
+    LINE = "    return bill(account)"
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.path = str(self.dir / "correctness.json")
+        self.tree = self.dir / "tree"
+        (self.tree / "src").mkdir(parents=True)
+        (self.tree / "src" / "f.py").write_text(f"import billing\n{self.LINE}\n", encoding="utf-8")
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _run(self, quote: str, **over: Any) -> tuple[dict[str, Any], str, dict[str, Any]]:
+        """The finding as `--return` alone gives it, the stderr, and as verified."""
+        art = artifact(_return_finding(first_evidence=quote, **over))
+        Path(self.path).write_text(json.dumps(art), encoding="utf-8")
+        plain, verified, err = io.StringIO(), io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(plain), contextlib.redirect_stderr(io.StringIO()):
+            assert findings.main([self.path, "--return"]) == 0
+        with contextlib.redirect_stdout(verified), contextlib.redirect_stderr(err):
+            code = findings.main([self.path, "--return", "--verify-quotes", "-C", str(self.tree)])
+        assert code == 0, err.getvalue()
+        before: dict[str, Any] = json.loads(plain.getvalue())
+        after: dict[str, Any] = json.loads(verified.getvalue())
+        # THE INVARIANT, asserted on every case rather than once: removing a first_evidence
+        # is the ONLY difference this mode may make to the object.
+        assert [k for k in after] == [k for k in before]
+        assert all(before[k] == after[k] for k in before if k != "findings")
+        plain_rows: list[Any] = before["findings"]
+        checked_rows: list[Any] = after["findings"]
+        for plain_row, checked in zip(plain_rows, checked_rows, strict=True):
+            if not isinstance(plain_row, dict):
+                assert checked == plain_row
+                continue
+            row = cast(dict[str, Any], plain_row)
+            kept = {
+                key: value
+                for key, value in row.items()
+                if key != "first_evidence" or key in checked
+            }
+            assert checked == kept
+        return before["findings"][0], err.getvalue(), after["findings"][0]
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            "src/f.py:2 -- return bill(account)",
+            "src/f.py:2: return bill(account)",
+            "`return bill(account)` -- src/f.py:2",
+            # Whitespace is collapsed on both sides, so a re-indented quote still matches.
+            "src/f.py:2 --     return   bill(account)",
+            # A substring of the line is enough: lenses quote the fragment that matters.
+            "src/f.py:2 -- bill(account)",
+        ],
+    )
+    def test_a_quote_the_tree_carries_is_kept(self, quote: str):
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote
+        assert err.strip().endswith("0 dropped by --verify-quotes")
+
+    def test_a_basename_citation_is_resolved_through_the_findings_own_file(self):
+        # Lenses routinely cite `f.py:2` while `file` carries the repo-relative path.
+        _, _, after = self._run("f.py:2 -- return bill(account)", file="src/f.py")
+        assert after["first_evidence"] == "f.py:2 -- return bill(account)"
+
+    @pytest.mark.parametrize(
+        ("quote", "over", "reason"),
+        [
+            (
+                "src/f.py:2 -- return charge(account)",
+                {},
+                "quoted text is not on src/f.py:2",
+            ),
+            ("src/f.py:1 -- return bill(account)", {}, "quoted text is not on src/f.py:1"),
+            ("src/f.py:99 -- return bill(account)", {}, "line 99 is out of range for src/f.py"),
+            ("src/gone.py:2 -- return bill(account)", {}, "no file:line reference resolves"),
+            ("a finding with no citation at all", {}, "no file:line reference resolves"),
+            ("src/f.py:2 --", {}, "quoted text is empty"),
+            ("`` -- src/f.py:2", {}, "quoted text is empty"),
+        ],
+    )
+    def test_a_quote_the_tree_does_not_carry_is_dropped_with_its_reason(
+        self, quote: str, over: dict[str, Any], reason: str
+    ):
+        before, err, after = self._run(quote, **over)
+        assert before["first_evidence"] == quote, "the plain projection must still carry it"
+        assert "first_evidence" not in after
+        assert reason in err, err
+        assert "verify-quotes: finding #1 (src/f.py:2)" in err
+        assert err.strip().endswith("1 dropped by --verify-quotes")
+
+    def test_an_unreadable_file_drops_the_quote_rather_than_crashing(self):
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file, so the case cannot be produced")
+        secret = self.tree / "src" / "secret.py"
+        secret.write_text("x = 1\n", encoding="utf-8")
+        secret.chmod(0o000)
+        try:
+            _, err, after = self._run("src/secret.py:1 -- x = 1")
+        finally:
+            secret.chmod(0o600)
+        assert "first_evidence" not in after
+        assert "no file:line reference resolves" in err
+
+    def test_the_artifact_on_disk_is_never_modified(self):
+        original = Path(self.path)
+        self._run("src/f.py:2 -- return charge(account)")
+        art = json.loads(original.read_text(encoding="utf-8"))
+        assert art["findings"][0]["first_evidence"] == "src/f.py:2 -- return charge(account)"
+
+    def test_a_backfilled_quote_is_verified_too(self):
+        # The backfill is where most quotes come from, so verifying only lens-written ones
+        # would leave the common case unchecked.
+        art = artifact(
+            _return_finding(evidence=["src/f.py:2 -- return nothing_like_this(x)"]),
+        )
+        Path(self.path).write_text(json.dumps(art), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main([self.path, "--return", "--verify-quotes", "-C", str(self.tree)])
+        assert code == 0
+        assert "first_evidence" not in json.loads(out.getvalue())["findings"][0]
+        assert "quoted text is not on src/f.py:2" in err.getvalue()
+
+    def test_findings_with_no_quote_to_check_are_left_alone_and_numbering_holds(self):
+        # #N must stay the artifact's own numbering, so a stderr line names the same finding
+        # the listing and `--show N` do.
+        art = artifact(
+            _return_finding(first_evidence=" ", evidence=[]),
+            _return_finding(first_evidence="src/f.py:2 -- return charge(account)"),
+        )
+        art["findings"].insert(1, "not an object")
+        Path(self.path).write_text(json.dumps(art), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main([self.path, "--return", "--verify-quotes", "-C", str(self.tree)])
+        assert code == 0
+        rows = json.loads(out.getvalue())["findings"]
+        assert "first_evidence" not in rows[0]
+        assert rows[1] == "not an object"
+        assert "first_evidence" not in rows[2]
+        assert "finding #3 (src/f.py:2)" in err.getvalue(), err.getvalue()
+        assert err.getvalue().strip().endswith("1 dropped by --verify-quotes")
+
+    def test_a_citation_cannot_steer_the_reader_out_of_the_tree(self):
+        # The quote is model-written text: an input, not a destination. Both of these name a
+        # real file whose line matches, and both must still be dropped.
+        outside = self.dir / "outside.py"
+        outside.write_text("the secret line\n", encoding="utf-8")
+        for citation in (f"{outside}:1 -- the secret line", "../outside.py:1 -- the secret line"):
+            _, err, after = self._run(citation)
+            assert "first_evidence" not in after, citation
+            assert "no file:line reference resolves" in err, citation

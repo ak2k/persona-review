@@ -687,6 +687,15 @@ class TestVacuousRuns(Harness):
         assert proc.stdout.strip() == "", proc.stdout
 
     @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_refuses_return_too(self, provider: str):
+        # --return feeds a merge directly, with no person between the artifact and the
+        # verdict, so it is the mode in which a laundered refusal does the most damage.
+        assert self.review_dud(provider, ANSWER).returncode == 6
+        proc = self.findings(str(self.artifact(provider)), "--return")
+        assert proc.returncode == 6, proc.stdout
+        assert proc.stdout.strip() == "", proc.stdout
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reader_still_renders_a_review_that_happened(self, provider: str):
         # The control for the three above: without it they are all satisfied by a reader that
         # refuses every artifact.
@@ -695,6 +704,72 @@ class TestVacuousRuns(Harness):
         proc = self.findings(str(self.artifact(provider)))
         assert proc.returncode == 0, proc.stderr
         assert "#1 P1" in proc.stdout
+
+
+class TestTheMergeTierReturn(Harness):
+    """`--return`, through the installed command, over an artifact a real run produced.
+
+    The plugin's merge helper reads compact RETURNS and demotes a finding whose
+    `first_evidence` is missing to confidence 50, where its gate suppresses it. The lens
+    artifacts carry the quote in `evidence[0]`, so this is the projection that lets a merge
+    be built from what a run actually wrote.
+    """
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_return_carries_a_backfilled_quote_for_every_finding(self, provider: str):
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        proc = self.findings(str(self.artifact(provider)), "--return")
+        assert proc.returncode == 0, proc.stderr
+        obj = json.loads(proc.stdout)
+        assert obj["reviewer"] == "adversarial-reviewer"
+        assert [row["first_evidence"] for row in obj["findings"]] == ["f.py:1 -- x"]
+        # The evidence array is an artifact field, not a return field.
+        assert "evidence" not in obj["findings"][0]
+        assert "1 first_evidence backfilled from evidence[0]" in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_quote_the_tree_carries_survives_and_one_it_does_not_is_dropped(self, provider: str):
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        tree = self.work / "reviewed"
+        tree.mkdir()
+        (tree / "f.py").write_text("x\n", encoding="utf-8")
+        kept = self.findings(
+            str(self.artifact(provider)), "--return", "--verify-quotes", "-C", str(tree)
+        )
+        assert kept.returncode == 0, kept.stderr
+        assert json.loads(kept.stdout)["findings"][0]["first_evidence"] == "f.py:1 -- x"
+        assert "0 dropped by --verify-quotes" in kept.stderr
+
+        (tree / "f.py").write_text("something else entirely\n", encoding="utf-8")
+        dropped = self.findings(
+            str(self.artifact(provider)), "--return", "--verify-quotes", "-C", str(tree)
+        )
+        # Still 0: the caller gets the return, minus a quote the tree does not support. The
+        # helper demotes the finding on its own rule, and the artifact is untouched.
+        assert dropped.returncode == 0, dropped.stderr
+        assert "first_evidence" not in json.loads(dropped.stdout)["findings"][0]
+        assert "quoted text is not on f.py:1" in dropped.stderr
+        assert "1 dropped by --verify-quotes" in dropped.stderr
+        assert json.loads(self.artifact(provider).read_text(encoding="utf-8"))["findings"][0][
+            "evidence"
+        ] == ["f.py:1 -- x"]
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_verify_quotes_without_a_usable_tree_is_a_usage_error(self, provider: str):
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        artifact = str(self.artifact(provider))
+        for args in (
+            (artifact, "--verify-quotes"),
+            (artifact, "--return", "--verify-quotes"),
+            (artifact, "--return", "--verify-quotes", "-C", artifact),
+            (artifact, "--return", "--json"),
+        ):
+            proc = self.findings(*args)
+            assert proc.returncode == 2, (args, proc.stdout, proc.stderr)
+            assert proc.stdout.strip() == "", args
 
 
 class TestVocabularyDriftIsNotBlamedOnTheModel(Harness):
