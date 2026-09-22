@@ -147,7 +147,7 @@ class Provider:
 GROK = Provider(
     name="grok",
     binary="grok",
-    default_model="grok-4.6",
+    default_model="grok-4.7",
     # The top tier; the TUI labels it "Deep / Maximum reasoning". Not `max`: grok's
     # ReasoningEffort enum carries it and clap parses it, but the builds reject it during
     # validation. The value goes through verbatim, so a build whose accepted set catches up
@@ -166,7 +166,7 @@ GROK = Provider(
 CODEX = Provider(
     name="codex",
     binary="codex",
-    default_model="gpt-5.6-sol",
+    default_model="gpt-6-astra",
     # Empty means "whatever ~/.codex/config.toml sets in model_reasoning_effort" — the
     # provider's own default, rather than one invented here.
     default_effort="",

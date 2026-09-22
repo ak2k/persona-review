@@ -310,6 +310,13 @@ day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to 
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
 
+## Changes in 0.3.1
+
+Defaults only; every command, flag and exit status is unchanged.
+
+- **Default models moved.** `ce-grok-persona` now defaults to `grok-4.7` (was `grok-4.6`) and
+  `ce-codex-persona` to `gpt-6-astra` (was `gpt-5.6-sol`). `-m` overrides either, as before.
+
 ## Changes in 0.3.0
 
 Additions only; every existing command, flag and exit status is unchanged.
