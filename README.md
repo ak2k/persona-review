@@ -310,6 +310,13 @@ day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to 
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
 
+## Changes in 0.3.2
+
+Defaults only; every command, flag and exit status is unchanged.
+
+- **Codex default model moved.** `ce-codex-persona` now defaults to `gpt-6-sol` (was
+  `gpt-6-astra`). `-m` overrides it, as before.
+
 ## Changes in 0.3.1
 
 Defaults only; every command, flag and exit status is unchanged.
