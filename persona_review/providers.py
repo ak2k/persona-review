@@ -166,7 +166,7 @@ GROK = Provider(
 CODEX = Provider(
     name="codex",
     binary="codex",
-    default_model="gpt-6-astra",
+    default_model="gpt-6-sol",
     # Empty means "whatever ~/.codex/config.toml sets in model_reasoning_effort" — the
     # provider's own default, rather than one invented here.
     default_effort="",
