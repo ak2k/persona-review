@@ -389,6 +389,52 @@ MUTATIONS: list[Mutation] = [
         "            if n == show + 1:",
     ),
     Mutation(
+        # The mode exists so a caller relaying every finding pays for one fence. Reverting
+        # it to the per-finding path makes `all` an unknown finding number.
+        "--show all is read as a finding number",
+        "persona_review/findings.py",
+        r"    if show == SHOW_ALL:\n        if not rows:",
+        "    if False:\n        if not rows:",
+    ),
+    Mutation(
+        # One fence per finding costs two lines each and hands the consumer N nonces to
+        # track, which is the per-finding cost the mode was added to remove.
+        "--show all fences each finding separately",
+        "persona_review/findings.py",
+        r"        print\(fence\(separator\.join\(render_detail\(n, finding\) "
+        r"for n, finding in rows\)\)\)",
+        "        print(separator.join(fence(render_detail(n, finding)) for n, finding in rows))",
+    ),
+    Mutation(
+        # Every tier-2 render already holds blank lines, so without the separator line a
+        # reader cannot tell where one finding's fix ends and the next finding begins.
+        "--show all runs the findings together without the separator line",
+        "persona_review/findings.py",
+        r'        separator = f"\\n\{SHOW_ALL_SEPARATOR\}\\n"',
+        r'        separator = "\\n"',
+    ),
+    Mutation(
+        # `#` order is what lines the entries up with the numbers the caller already holds.
+        "--show all renders in display order instead of # order",
+        "persona_review/findings.py",
+        r"render_detail\(n, finding\) for n, finding in rows\)",
+        "render_detail(n, finding) for n, finding in ordered(rows))",
+    ),
+    Mutation(
+        # An empty fence at exit 0 reads as "rendered, and here it is" where `--all` says
+        # plainly that there is nothing.
+        "--show all on an empty artifact prints an empty fence",
+        "persona_review/findings.py",
+        r'        if not rows:\n            print\("no findings"\)',
+        '        if False:\n            print("no findings")',
+    ),
+    Mutation(
+        "--show all on a verdicts artifact is read as a verdict number",
+        "persona_review/findings.py",
+        r"    if isinstance\(show, int\):",
+        "    if show is not None:",
+    ),
+    Mutation(
         # The whole reason --return exists: the merge helper demotes a 75/100 finding with no
         # `first_evidence` to 50, where its confidence gate suppresses it, so a lens that
         # filled only the evidence array reads as having found nothing.

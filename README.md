@@ -29,10 +29,11 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 0 | one line + exit status | counts by severity, artifact path. A gating caller reads nothing else. |
 | 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it. P0/P1 only; `--all` for every severity |
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
+| 2 | every finding | `ce-persona-findings <artifact> --show all` — the same render for every finding, every severity, in `#` order, inside one fence, each separated from the next by a line reading `----` |
 | — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
 | — | whole artifact | `ce-persona-findings <artifact> --return` — the compact **return** object compound-engineering's merge helper expects, unfenced |
 | — | ~10 tokens/verdict | `ce-persona-findings <verdicts-artifact>` — one row per verdict in `#` order: `#N validated — <reason>` or `#N REJECTED — <reason>` |
-| — | one verdict | `ce-persona-findings <verdicts-artifact> --show N` — the verdict addressed to finding `#N` |
+| — | one verdict | `ce-persona-findings <verdicts-artifact> --show N` — the verdict addressed to finding `#N`; `--show all` is the listing above, accepted for symmetry |
 
 The same command reads both artifact shapes, because both are model output being handed to an
 agent and one reader is one place to keep the fence and the refusal. On a verdicts artifact
@@ -44,7 +45,10 @@ either half would report a complete result.
 
 `N` in `--show N` is the number rendered as `#N` in the listing. Numbering follows the
 artifact's own order; the listing is *displayed* most-severe-first, so `#1` is not
-necessarily the top row.
+necessarily the top row. `--show all` follows the numbering rather than the display order,
+and takes the same precedence as `--show N`: it wins over `--list`/`--all`, `--json`
+outranks it, and it cannot be combined with `--return`. On an artifact with no entries it
+prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 
 **Exit status is the verdict.** For `ce-grok-persona` / `ce-codex-persona`:
 

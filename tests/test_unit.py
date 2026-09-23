@@ -920,7 +920,12 @@ class TestARefusalSurvivesBeingHandedOn:
                 Path(tmp),
                 {"tool_calls": 0, "turns": 1, "output_tokens": 151, "duration_s": 4.5},
             )
-            for args in ([str(art)], [str(art), "--all"], [str(art), "--json"]):
+            for args in (
+                [str(art)],
+                [str(art), "--all"],
+                [str(art), "--json"],
+                [str(art), "--show", "all"],
+            ):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = findings.main(args)
@@ -1242,6 +1247,8 @@ class TestFindingsRetrieval:
             # documented flag as unknown.
             ((ARTIFACT, "--show"), "wants a finding number"),
             ((ARTIFACT, "--show", "x"), "wants a finding number"),
+            # Only the lowercase word is the sentinel; anything else is still a number.
+            ((ARTIFACT, "--show", "ALL"), "wants a finding number"),
             ((ARTIFACT, "--show", "99"), "no finding #99"),
         ],
     )
@@ -1265,6 +1272,50 @@ class TestFindingsRetrieval:
         _, out, _ = self._run(self.path, "--show", "1")
         overhead = [ln for ln in out.splitlines() if "UNTRUSTED MODEL OUTPUT" in ln]
         assert len(overhead) == 2, "the fence should cost two lines, not a paragraph"
+
+    def test_show_all_is_every_tier_2_render_inside_one_fence(self):
+        # One fence, not one per finding: the point of the mode is that a caller relaying
+        # every finding pays one invocation and one fence rather than one of each per finding.
+        code, out, err = self._run(self.path, "--show", "all")
+        assert code == 0, err
+        lines = out.splitlines()
+        assert len([ln for ln in lines if "UNTRUSTED MODEL OUTPUT" in ln]) == 2, out
+        assert lines[0].startswith("--- BEGIN UNTRUSTED MODEL OUTPUT"), out
+        assert lines[-1].startswith("--- END UNTRUSTED MODEL OUTPUT"), out
+        body = "\n".join(lines[2:-1])
+        # Byte-for-byte the renders `--show N` produces, joined by the separator line, so
+        # the two modes cannot come to render a finding differently.
+        singles: list[str] = []
+        for n in (1, 2):
+            _, one, _ = self._run(self.path, "--show", str(n))
+            singles.append("\n".join(one.splitlines()[2:-1]))
+        assert body == f"\n{findings.SHOW_ALL_SEPARATOR}\n".join(singles), out
+        assert "a p2" in body and "why: Callers read a stale value" in body
+
+    def test_show_all_is_in_number_order_not_severity_order(self):
+        # #1 is the P2 on disk. `#` order is what makes the entries line up with the numbers
+        # a caller already holds; severity order would reshuffle them.
+        _, out, _ = self._run(self.path, "--show", "all")
+        heads = [ln.split()[0] for ln in out.splitlines() if ln.startswith("#")]
+        assert heads == ["#1", "#2"], out
+        assert out.count(f"\n{findings.SHOW_ALL_SEPARATOR}\n") == 1, out
+
+    def test_show_all_on_an_empty_artifact_says_so_as_all_does(self):
+        Path(self.path).write_text(json.dumps(artifact()), encoding="utf-8")
+        code, out, _ = self._run(self.path, "--show", "all")
+        _, listed, _ = self._run(self.path, "--all")
+        assert code == 0
+        assert out == listed == "no findings\n"
+
+    def test_json_outranks_show_all(self):
+        code, out, _ = self._run(self.path, "--show", "all", "--json")
+        assert code == 0
+        assert json.loads(out) == json.loads(Path(self.path).read_text(encoding="utf-8"))
+
+    def test_show_all_wins_over_the_listing_modes(self):
+        _, out, _ = self._run(self.path, "--list", "--show", "all")
+        assert "why: Callers read a stale value" in out
+        assert "hidden" not in out
 
 
 class TestProvenance:
@@ -2057,6 +2108,7 @@ class TestTheMergeTierProjection:
             ((ARTIFACT, "--return", "--json"), "cannot be combined"),
             ((ARTIFACT, "--json", "--return"), "cannot be combined"),
             ((ARTIFACT, "--return", "--show", "1"), "cannot be combined"),
+            ((ARTIFACT, "--return", "--show", "all"), "cannot be combined"),
             ((ARTIFACT, "--verify-quotes"), "only applies to --return"),
             ((ARTIFACT, "--return", "--verify-quotes"), "wants -C"),
             ((ARTIFACT, "--return", "--verify-quotes", "-C"), "-C wants a directory"),
@@ -3137,6 +3189,23 @@ class TestTheReaderRendersVerdicts:
         assert code == 2
         assert "no verdict #9" in err
 
+    def test_show_all_renders_the_default_listing(self):
+        # Accepted for symmetry with a findings artifact: a verdict row is already its full
+        # detail, so there is no heavier render to widen into.
+        _, plain, _ = self._run(self.path)
+        code, shown, err = self._run(self.path, "--show", "all")
+        assert code == 0, err
+        rows = [ln for ln in shown.splitlines() if ln.startswith("#")]
+        assert rows == [ln for ln in plain.splitlines() if ln.startswith("#")]
+        assert len(rows) == 2
+        assert "BEGIN UNTRUSTED MODEL OUTPUT" in shown
+
+    def test_show_all_on_an_empty_verdicts_artifact_says_so(self):
+        self._write(verdicts_of())
+        code, out, _ = self._run(self.path, "--show", "all")
+        assert code == 0
+        assert out == "no verdicts\n"
+
     def test_all_changes_nothing_because_no_verdict_is_hidden(self):
         _, plain, _ = self._run(self.path)
         _, widened, _ = self._run(self.path, "--all")
@@ -3187,7 +3256,7 @@ class TestTheReaderRendersVerdicts:
             ),
             encoding="utf-8",
         )
-        for args in ((), ("--json",), ("--show", "1"), ("--return",)):
+        for args in ((), ("--json",), ("--show", "1"), ("--show", "all"), ("--return",)):
             code, out, err = self._run(self.path, *args)
             assert code == 6, (args, err)
             assert out == "", args
