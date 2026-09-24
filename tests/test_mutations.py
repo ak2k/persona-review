@@ -52,8 +52,8 @@ replace claims about coverage with checks. Four modules had no entry at all.
 unnoticed: one with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails
 the suite. Two modules are exempt and say why.
 
-WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py has
-3 entries against a dozen raise sites; validate.py has 15 against three dozen. So "every
+WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py and
+validate.py each have fewer entries than raise sites. So "every
 module is represented" is enforced, and "every guard can fail" is not — the table is a
 growing floor, not a proof of completeness, and the honest way to extend it is still to ask
 which guard has no entry and write one. Saying otherwise here would be the same
@@ -344,8 +344,16 @@ MUTATIONS: list[Mutation] = [
         # has a sidecar at all, which is every artifact this package writes.
         "the reader refuses on any provenance rather than on a counted zero",
         "persona_review/validate.py",
-        r"    if local != 0:",
+        r"    if calls != 0 and local != 0:",
         "    if False:",
+    ),
+    Mutation(
+        # A sidecar recording zero calls in all was refused before `local_tool_calls`
+        # existed; a local count beside it, well-formed or not, must not render it now.
+        "a zero total no longer refuses when a local count is recorded",
+        "persona_review/validate.py",
+        r"    if calls != 0 and local != 0:",
+        "    if local != 0:",
     ),
     Mutation(
         # The artifact exit 6 kept from a run that only searched the web records calls, so

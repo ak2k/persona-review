@@ -122,6 +122,8 @@ Project a findings artifact at the detail level you need.
   --show N      tier 2: finding N in full -- why it matters, evidence, suggested fix
   --show all    tier 2 for every finding, every severity, in # order, in ONE fence,
                 each entry separated from the next by a line reading {SHOW_ALL_SEPARATOR}
+                (a reading aid, not a boundary: finding text can contain the same line,
+                and the fence is the only boundary)
   --json        the raw artifact, unchanged and unfenced, for a programmatic caller
   --return      the compact RETURN object the compound-engineering merge helper
                 expects, unfenced: the artifact's non-findings keys verbatim, and

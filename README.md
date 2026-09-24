@@ -29,7 +29,7 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 0 | one line + exit status | counts by severity, artifact path. A gating caller reads nothing else. |
 | 1 | ~20 tokens/finding | `ce-persona-findings <artifact>` — severity, `file:line`, title, confidence, and the one quoted line that motivates it. P0/P1 only; `--all` for every severity |
 | 2 | per finding | `ce-persona-findings <artifact> --show N` — why it matters, full evidence, suggested fix |
-| 2 | every finding | `ce-persona-findings <artifact> --show all` — the same render for every finding, every severity, in `#` order, inside one fence, each separated from the next by a line reading `----` |
+| 2 | every finding | `ce-persona-findings <artifact> --show all` — the same render for every finding, every severity, in `#` order, inside one fence, each separated from the next by a line reading `----`. The separator is a reading aid: finding text can contain the same line, so the fence, not the separator, is the boundary |
 | — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
 | — | whole artifact | `ce-persona-findings <artifact> --return` — the compact **return** object compound-engineering's merge helper expects, unfenced |
 | — | ~10 tokens/verdict | `ce-persona-findings <verdicts-artifact>` — one row per verdict in `#` order: `#N validated — <reason>` or `#N REJECTED — <reason>` |
@@ -320,8 +320,9 @@ about. Reviewing a directory that is not a git repository is fine; the SHA field
 
 ## Changes in 0.3.3
 
-One addition, and exit `6` now covers a run that searched the web but never touched the
-repository. Every other command, flag and exit status is unchanged.
+One addition; exit `6` now covers a run that searched the web but never touched the
+repository, and exit `3` a codex run that paired web searches with an unrecognized tool kind.
+Every other command, flag and exit status is unchanged.
 
 - **`ce-persona-findings <artifact> --show all`** renders tier 2 for every finding, every
   severity, in `#` order, inside one fence, entries separated by a `----` line. It follows the

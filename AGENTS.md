@@ -170,8 +170,9 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   the other half of the refusal: exit `6` KEEPS the artifact as evidence, and an artifact on
   disk is exactly what this command renders — so without the check the package laundered its
   own verdict into an ordinary listing at exit `0`, one command later. Only a positive reading
-  of zero refuses; no sidecar, or a malformed one, renders as before. A sidecar written before
-  `local_tool_calls` existed is read by the rule it was written under: zero `tool_calls`.
+  of zero refuses; no sidecar, or a malformed one, renders as before. Zero `tool_calls` refuses on
+  its own, whatever `local_tool_calls` says, so no sidecar refused before that field existed
+  renders now.
 - **One schema ships with this package while the other is read from the plugin.**
   `findings-schema.json` is the plugin's file: this package reads it at run time, hashes it into
   provenance, and has no authority to change what a finding means. `verdicts-schema.json` is

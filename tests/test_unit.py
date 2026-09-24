@@ -965,6 +965,15 @@ class TestARefusalSurvivesBeingHandedOn:
         assert stats is not None
         assert (stats.tool_calls, stats.local_tool_calls, stats.turns) == (calls, 0, 2)
 
+    @pytest.mark.parametrize("local", [3, "0", True, False, -1, 0.0, None])
+    def test_a_zero_total_refuses_whatever_the_local_count_says(self, local: Any):
+        # Every sidecar the reader refused before the field existed is still refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 0, "local_tool_calls": local})
+            stats = validate.refused_run(art)
+        assert stats is not None
+        assert (stats.tool_calls, stats.local_tool_calls) == (0, 0)
+
     @pytest.mark.parametrize(
         "stats",
         [
@@ -976,13 +985,14 @@ class TestARefusalSurvivesBeingHandedOn:
             {"tool_calls": -1},
             {"tool_calls": 0.0},
             {},
-            # Present, so it is what the reading relies on, and it is not a whole number.
-            {"tool_calls": 0, "local_tool_calls": "0"},
-            {"tool_calls": 0, "local_tool_calls": True},
-            {"tool_calls": 0, "local_tool_calls": False},
-            {"tool_calls": 0, "local_tool_calls": -1},
-            {"tool_calls": 0, "local_tool_calls": 0.0},
-            {"tool_calls": 0, "local_tool_calls": None},
+            # Present beside a nonzero total, so it is what the reading relies on, and it is
+            # not a whole number.
+            {"tool_calls": 3, "local_tool_calls": "0"},
+            {"tool_calls": 3, "local_tool_calls": True},
+            {"tool_calls": 3, "local_tool_calls": False},
+            {"tool_calls": 3, "local_tool_calls": -1},
+            {"tool_calls": 3, "local_tool_calls": 0.0},
+            {"tool_calls": 3, "local_tool_calls": None},
             {"tool_calls": 3, "local_tool_calls": 1},
             # A zero local count beside a total that is not a count is a malformed record.
             {"tool_calls": "3", "local_tool_calls": 0},

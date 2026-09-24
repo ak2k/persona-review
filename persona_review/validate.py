@@ -605,8 +605,8 @@ def _grok_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, int
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
-    # Every grok call is counted as local. `_grok_argv` passes `--disable-web-search`, so the
-    # tool that reads the internet instead of the repository is not offered. A `tool_use`
+    # Every grok call is counted as local. `_grok_argv` passes `--disable-web-search`, which
+    # removes grok's web search and web fetch tools. A `tool_use`
     # block does not say where the tool it names runs, so any other remote tool — a
     # configured MCP server — is counted local on the same reasoning as codex's
     # `mcp_tool_call`, rather than by a list of tool names that could go stale.
@@ -825,9 +825,9 @@ def refused_run(artifact: Path) -> RunStats | None:
     refuses, because the sidecar is a record rather than a gate — an artifact written before
     this field existed, or one a person assembled by hand, must still render.
 
-    A sidecar with no `local_tool_calls` predates the field, and is read by the rule it was
-    written under: zero `tool_calls` refuses. One whose counts are present but are not whole
-    non-negative numbers is malformed, and renders.
+    Zero `tool_calls` refuses on its own, which is the whole rule for a sidecar written
+    before `local_tool_calls` existed. Otherwise zero `local_tool_calls` refuses. A count
+    that is present but not a whole non-negative number is not a reading of zero.
     """
     sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
     try:
@@ -843,7 +843,9 @@ def refused_run(artifact: Path) -> RunStats | None:
     if calls is None or calls < 0:
         return None
     local = _whole_number(stats.get("local_tool_calls")) if "local_tool_calls" in stats else calls
-    if local != 0:
+    # A total of zero refuses whatever the local count says, so no sidecar the reader
+    # refused before `local_tool_calls` existed renders now.
+    if calls != 0 and local != 0:
         return None
     return RunStats(
         tool_calls=calls,
