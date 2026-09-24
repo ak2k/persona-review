@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -146,7 +147,9 @@ EMPTY_EXAMPLE = json.dumps(artifact())
 # A run that DID inspect something. Every provenance test that is not about the tool-call
 # refusal has to carry one, because a run with zero tool calls is refused before the summary
 # line — so a zero here would quietly turn those tests into assertions about the refusal.
-STATS = validate.RunStats(tool_calls=7, turns=4, output_tokens=4096, duration_s=61.5)
+STATS = validate.RunStats(
+    tool_calls=7, local_tool_calls=7, turns=4, output_tokens=4096, duration_s=61.5
+)
 
 
 # Event fixtures in each provider's own vocabulary, at module scope because both the counter's
@@ -202,6 +205,15 @@ CODEX_ONE_CALL = codex_stream(
     codex_item("item.completed", "command_execution"),
 )
 CODEX_NO_CALLS = codex_stream(codex_item("item.completed", "agent_message", "item_0"))
+# Tool kinds that are calls but do not prove the tree was read: the internet, or a tool that
+# does not say where it runs.
+NOT_LOCAL_KINDS = ["custom_tool_call", "function_call", "mcp_tool_call", "web_search"]
+# Calls, and none of them local: the run read the internet and never opened the repository.
+CODEX_ONLY_SEARCHED = codex_stream(
+    codex_item("item.started", "web_search", "ws_1"),
+    codex_item("item.completed", "web_search", "ws_1"),
+    codex_item("item.completed", "web_search", "ws_2"),
+)
 
 # A placeholder for a per-test fixture path inside a parametrize table, which is evaluated at
 # import time and so cannot see instance state. Compared with `is`, never `==`.
@@ -624,6 +636,49 @@ class TestRunEvidence:
         assert stats.tool_calls == 3
         assert (stats.turns, stats.output_tokens) == (1, 151)
 
+    def test_web_searches_are_calls_but_not_local_ones(self):
+        # A run that only searched the web read the internet, not the repository: it made
+        # calls, so `tool_calls` says so, and none of them acted on the tree it reviewed.
+        stats = self._codex(
+            codex_item("item.started", "web_search", "ws_1"),
+            codex_item("item.completed", "web_search", "ws_1"),
+            codex_item("item.completed", "command_execution", "item_2"),
+            codex_item("item.completed", "web_search", None),
+        )
+        assert (stats.tool_calls, stats.local_tool_calls) == (3, 1)
+
+    @pytest.mark.parametrize("kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS))
+    def test_every_local_kind_is_counted_as_local(self, kind: str):
+        # With an id and without, so both counting arms carry the local tally.
+        assert self._codex(codex_item("item.completed", kind, "item_1")).local_tool_calls == 1
+        assert self._codex(codex_item("item.completed", kind, None)).local_tool_calls == 1
+
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    def test_a_kind_that_does_not_prove_the_tree_was_read_is_a_call_but_not_local(self, kind: str):
+        stats = self._codex(codex_item("item.completed", kind, "item_1"))
+        assert (stats.tool_calls, stats.local_tool_calls) == (1, 0)
+
+    def test_the_local_kinds_are_the_ones_that_act_on_the_working_directory(self):
+        local = validate.CODEX_LOCAL_TOOL_ITEMS
+        assert local == {"command_execution", "file_change", "local_shell_call", "patch_apply"}
+        not_local = validate.CODEX_TOOL_ITEMS - local
+        assert not_local == set(NOT_LOCAL_KINDS)
+
+    def test_grok_counts_every_call_as_local(self):
+        # The argv disables grok's web tools, so no call left is one known to leave the machine.
+        assert "--disable-web-search" in providers.GROK.argv(
+            providers.Invocation(
+                model="m",
+                effort="e",
+                repo=Path("."),
+                prompt_file=Path("p"),
+                schema_text="{}",
+                last_file=None,
+            )
+        )
+        stats = self._grok(grok_tool_call("grep"), grok_tool_call("read_file"), grok_result())
+        assert (stats.tool_calls, stats.local_tool_calls) == (2, 2)
+
     def test_an_id_less_call_counts_once_never_twice(self):
         # Stated on its own as well, because the rule is not "dedupe": without an id the two
         # events cannot be paired, so the terminal one is counted and the start is not.
@@ -714,6 +769,31 @@ class TestDriftIsNotBlamedOnTheModel:
         assert "shell_call_v2" in message and "file_patch_v2" in message, message
         assert "drift" in message
 
+    def test_the_drift_recovery_names_both_kind_lists(self):
+        # Following a recovery that names only the tool list silences this check for a
+        # renamed tree-reading kind, and every run then exits 6. Names are read back out of
+        # the message and resolved, so renaming either constant fails here.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(codex_stream(codex_item("item.completed", "shell_call_v2", "item_1")))
+        message = str(caught.value)
+        named = set(re.findall(r"validate\.([A-Z_]+)", message))
+        assert named == {"CODEX_TOOL_ITEMS", "CODEX_LOCAL_TOOL_ITEMS"}, message
+        assert validate.CODEX_LOCAL_TOOL_ITEMS <= validate.CODEX_TOOL_ITEMS
+        assert "exits 6" in message, message
+
+    def test_a_web_search_beside_a_renamed_kind_is_still_drift(self):
+        # The refusal reads the LOCAL count, so the drift check must too: otherwise a search
+        # beside a renamed local kind counts one call, skips this check, and the rename is
+        # reported as a model that never opened the diff.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(
+                codex_stream(
+                    codex_item("item.completed", "web_search", "ws_1"),
+                    codex_item("item.completed", "shell_call_v2", "item_1"),
+                )
+            )
+        assert "shell_call_v2" in str(caught.value)
+
     def test_a_recognised_kind_alongside_them_is_still_a_review(self):
         # The control that keeps the check from firing on every mixed stream: one kind we do
         # understand is evidence the vocabulary still overlaps ours, so this is not drift.
@@ -786,7 +866,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
             code, out, message = self._gate(Path(tmp), answer, CODEX_NO_CALLS)
             assert code == 6, message
             assert out == "", "the summary line must not be printed for a refused run"
-            assert "no tool calls" in message
+            assert "no local tool calls" in message
             # The artifacts survive: the dud IS the evidence of what was refused.
             record = json.loads((Path(tmp) / "out-provenance.json").read_text(encoding="utf-8"))
             # And the refusal points at the SIDECAR, never at the findings file: naming the
@@ -794,6 +874,29 @@ class TestTheGateRefusesARunThatInspectedNothing:
             assert str(Path(tmp) / "out-provenance.json") in message
             assert str(Path(tmp) / "out.json") not in message
         assert record["run_stats"]["tool_calls"] == 0
+
+    def test_a_run_that_only_searched_the_web_is_refused(self):
+        # It made calls, so a total count passed it. None acted on the repository, so it is
+        # the same unfounded answer, and the refusal says what the run did instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), EMPTY_EXAMPLE, CODEX_ONLY_SEARCHED)
+            record = json.loads((Path(tmp) / "out-provenance.json").read_text(encoding="utf-8"))
+        assert code == 6, message
+        assert out == ""
+        assert "no local tool calls" in message
+        assert "2 tool calls (0 local)" in message, message
+        assert record["run_stats"]["tool_calls"] == 2
+        assert record["run_stats"]["local_tool_calls"] == 0
+
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    def test_a_run_whose_only_calls_are_not_local_is_refused(self, kind: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(
+                Path(tmp), EMPTY_EXAMPLE, codex_stream(codex_item("item.completed", kind, "i1"))
+            )
+        assert code == 6, message
+        assert out == ""
+        assert "1 tool call (0 local)" in message, message
 
     def test_one_tool_call_is_enough(self):
         # The control. Without it every assertion above holds for a gate that refuses
@@ -874,6 +977,7 @@ class TestARefusalSurvivesBeingHandedOn:
         return art
 
     def test_a_sidecar_recording_no_tool_calls_is_a_refusal(self):
+        # Written before `local_tool_calls` existed: read by the rule it was written under.
         with tempfile.TemporaryDirectory() as tmp:
             art = self._artifact(
                 Path(tmp),
@@ -881,7 +985,27 @@ class TestARefusalSurvivesBeingHandedOn:
             )
             stats = validate.refused_run(art)
         assert stats is not None
-        assert (stats.tool_calls, stats.turns, stats.output_tokens) == (0, 1, 151)
+        assert (stats.tool_calls, stats.local_tool_calls) == (0, 0)
+        assert (stats.turns, stats.output_tokens) == (1, 151)
+
+    @pytest.mark.parametrize("calls", [0, 3])
+    def test_a_sidecar_recording_no_local_tool_calls_is_a_refusal(self, calls: int):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(
+                Path(tmp), {"tool_calls": calls, "local_tool_calls": 0, "turns": 2}
+            )
+            stats = validate.refused_run(art)
+        assert stats is not None
+        assert (stats.tool_calls, stats.local_tool_calls, stats.turns) == (calls, 0, 2)
+
+    @pytest.mark.parametrize("local", [3, "0", True, False, -1, 0.0, None])
+    def test_a_zero_total_refuses_whatever_the_local_count_says(self, local: Any):
+        # Every sidecar the reader refused before the field existed is still refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 0, "local_tool_calls": local})
+            stats = validate.refused_run(art)
+        assert stats is not None
+        assert (stats.tool_calls, stats.local_tool_calls) == (0, 0)
 
     @pytest.mark.parametrize(
         "stats",
@@ -891,7 +1015,22 @@ class TestARefusalSurvivesBeingHandedOn:
             # A malformed count is not a positive reading of zero.
             {"tool_calls": "0"},
             {"tool_calls": True},
+            {"tool_calls": -1},
+            {"tool_calls": 0.0},
             {},
+            # Present beside a nonzero total, so it is what the reading relies on, and it is
+            # not a whole number.
+            {"tool_calls": 3, "local_tool_calls": "0"},
+            {"tool_calls": 3, "local_tool_calls": True},
+            {"tool_calls": 3, "local_tool_calls": False},
+            {"tool_calls": 3, "local_tool_calls": -1},
+            {"tool_calls": 3, "local_tool_calls": 0.0},
+            {"tool_calls": 3, "local_tool_calls": None},
+            {"tool_calls": 3, "local_tool_calls": 1},
+            # A zero local count beside a total that is not a count is a malformed record.
+            {"tool_calls": "3", "local_tool_calls": 0},
+            {"tool_calls": -1, "local_tool_calls": 0},
+            {"local_tool_calls": 0},
         ],
     )
     def test_anything_short_of_a_positive_zero_renders_normally(self, stats: dict[str, Any]):
@@ -920,20 +1059,37 @@ class TestARefusalSurvivesBeingHandedOn:
                 Path(tmp),
                 {"tool_calls": 0, "turns": 1, "output_tokens": 151, "duration_s": 4.5},
             )
-            for args in ([str(art)], [str(art), "--all"], [str(art), "--json"]):
+            for args in (
+                [str(art)],
+                [str(art), "--all"],
+                [str(art), "--json"],
+                [str(art), "--show", "all"],
+            ):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = findings.main(args)
                 assert code == 6, args
                 assert out.getvalue() == "", args
-                assert "no tool calls" in err.getvalue(), args
+                assert "no local tool calls" in err.getvalue(), args
                 assert "adversarial-reviewer-grok-provenance.json" in err.getvalue(), args
 
-    def test_the_same_artifact_with_a_real_run_behind_it_renders(self):
+    def test_the_command_refuses_a_run_that_only_searched_the_web(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 4, "local_tool_calls": 0})
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = findings.main([str(art)])
+        assert code == 6
+        assert "4 tool calls (0 local)" in err.getvalue(), err.getvalue()
+
+    @pytest.mark.parametrize(
+        "stats", [{"tool_calls": 12}, {"tool_calls": 12, "local_tool_calls": 12}]
+    )
+    def test_the_same_artifact_with_a_real_run_behind_it_renders(self, stats: dict[str, Any]):
         # The control for the whole class: without it every assertion above is satisfied by a
         # command that refuses everything.
         with tempfile.TemporaryDirectory() as tmp:
-            art = self._artifact(Path(tmp), {"tool_calls": 12})
+            art = self._artifact(Path(tmp), stats)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = findings.main([str(art)])
@@ -1242,6 +1398,8 @@ class TestFindingsRetrieval:
             # documented flag as unknown.
             ((ARTIFACT, "--show"), "wants a finding number"),
             ((ARTIFACT, "--show", "x"), "wants a finding number"),
+            # Only the lowercase word is the sentinel; anything else is still a number.
+            ((ARTIFACT, "--show", "ALL"), "wants a finding number"),
             ((ARTIFACT, "--show", "99"), "no finding #99"),
         ],
     )
@@ -1265,6 +1423,50 @@ class TestFindingsRetrieval:
         _, out, _ = self._run(self.path, "--show", "1")
         overhead = [ln for ln in out.splitlines() if "UNTRUSTED MODEL OUTPUT" in ln]
         assert len(overhead) == 2, "the fence should cost two lines, not a paragraph"
+
+    def test_show_all_is_every_tier_2_render_inside_one_fence(self):
+        # One fence, not one per finding: the point of the mode is that a caller relaying
+        # every finding pays one invocation and one fence rather than one of each per finding.
+        code, out, err = self._run(self.path, "--show", "all")
+        assert code == 0, err
+        lines = out.splitlines()
+        assert len([ln for ln in lines if "UNTRUSTED MODEL OUTPUT" in ln]) == 2, out
+        assert lines[0].startswith("--- BEGIN UNTRUSTED MODEL OUTPUT"), out
+        assert lines[-1].startswith("--- END UNTRUSTED MODEL OUTPUT"), out
+        body = "\n".join(lines[2:-1])
+        # Byte-for-byte the renders `--show N` produces, joined by the separator line, so
+        # the two modes cannot come to render a finding differently.
+        singles: list[str] = []
+        for n in (1, 2):
+            _, one, _ = self._run(self.path, "--show", str(n))
+            singles.append("\n".join(one.splitlines()[2:-1]))
+        assert body == f"\n{findings.SHOW_ALL_SEPARATOR}\n".join(singles), out
+        assert "a p2" in body and "why: Callers read a stale value" in body
+
+    def test_show_all_is_in_number_order_not_severity_order(self):
+        # #1 is the P2 on disk. `#` order is what makes the entries line up with the numbers
+        # a caller already holds; severity order would reshuffle them.
+        _, out, _ = self._run(self.path, "--show", "all")
+        heads = [ln.split()[0] for ln in out.splitlines() if ln.startswith("#")]
+        assert heads == ["#1", "#2"], out
+        assert out.count(f"\n{findings.SHOW_ALL_SEPARATOR}\n") == 1, out
+
+    def test_show_all_on_an_empty_artifact_says_so_as_all_does(self):
+        Path(self.path).write_text(json.dumps(artifact()), encoding="utf-8")
+        code, out, _ = self._run(self.path, "--show", "all")
+        _, listed, _ = self._run(self.path, "--all")
+        assert code == 0
+        assert out == listed == "no findings\n"
+
+    def test_json_outranks_show_all(self):
+        code, out, _ = self._run(self.path, "--show", "all", "--json")
+        assert code == 0
+        assert json.loads(out) == json.loads(Path(self.path).read_text(encoding="utf-8"))
+
+    def test_show_all_wins_over_the_listing_modes(self):
+        _, out, _ = self._run(self.path, "--list", "--show", "all")
+        assert "why: Callers read a stale value" in out
+        assert "hidden" not in out
 
 
 class TestProvenance:
@@ -1320,10 +1522,11 @@ class TestProvenance:
         # a refusal a caller cannot check is one it has to take on trust.
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "prov.json"
-            validate.write_provenance(out, [], {}, validate.RunStats(0, 1, 151, 4.5))
+            validate.write_provenance(out, [], {}, validate.RunStats(2, 0, 1, 151, 4.5))
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["run_stats"] == {
-            "tool_calls": 0,
+            "tool_calls": 2,
+            "local_tool_calls": 0,
             "turns": 1,
             "output_tokens": 151,
             "duration_s": 4.5,
@@ -2057,6 +2260,7 @@ class TestTheMergeTierProjection:
             ((ARTIFACT, "--return", "--json"), "cannot be combined"),
             ((ARTIFACT, "--json", "--return"), "cannot be combined"),
             ((ARTIFACT, "--return", "--show", "1"), "cannot be combined"),
+            ((ARTIFACT, "--return", "--show", "all"), "cannot be combined"),
             ((ARTIFACT, "--verify-quotes"), "only applies to --return"),
             ((ARTIFACT, "--return", "--verify-quotes"), "wants -C"),
             ((ARTIFACT, "--return", "--verify-quotes", "-C"), "-C wants a directory"),
@@ -2105,7 +2309,7 @@ class TestTheMergeTierProjection:
         code, out, err = self._run(str(art), "--return")
         assert code == 6, out
         assert out == ""
-        assert "no tool calls" in err
+        assert "no local tool calls" in err
 
     def test_help_documents_the_new_modes(self):
         code, out, _ = self._run("--help")
@@ -3137,6 +3341,23 @@ class TestTheReaderRendersVerdicts:
         assert code == 2
         assert "no verdict #9" in err
 
+    def test_show_all_renders_the_default_listing(self):
+        # Accepted for symmetry with a findings artifact: a verdict row is already its full
+        # detail, so there is no heavier render to widen into.
+        _, plain, _ = self._run(self.path)
+        code, shown, err = self._run(self.path, "--show", "all")
+        assert code == 0, err
+        rows = [ln for ln in shown.splitlines() if ln.startswith("#")]
+        assert rows == [ln for ln in plain.splitlines() if ln.startswith("#")]
+        assert len(rows) == 2
+        assert "BEGIN UNTRUSTED MODEL OUTPUT" in shown
+
+    def test_show_all_on_an_empty_verdicts_artifact_says_so(self):
+        self._write(verdicts_of())
+        code, out, _ = self._run(self.path, "--show", "all")
+        assert code == 0
+        assert out == "no verdicts\n"
+
     def test_all_changes_nothing_because_no_verdict_is_hidden(self):
         _, plain, _ = self._run(self.path)
         _, widened, _ = self._run(self.path, "--all")
@@ -3187,11 +3408,11 @@ class TestTheReaderRendersVerdicts:
             ),
             encoding="utf-8",
         )
-        for args in ((), ("--json",), ("--show", "1"), ("--return",)):
+        for args in ((), ("--json",), ("--show", "1"), ("--show", "all"), ("--return",)):
             code, out, err = self._run(self.path, *args)
             assert code == 6, (args, err)
             assert out == "", args
-            assert "no tool calls" in err, args
+            assert "no local tool calls" in err, args
             assert "validator-grok-provenance.json" in err, args
 
     def test_the_help_documents_the_verdicts_rows(self):

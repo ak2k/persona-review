@@ -91,7 +91,7 @@ class RunTimeout(AppError):
 
 
 class VacuousRun(AppError):
-    """The provider answered without making a single tool call. It inspected nothing.
+    """The provider answered without making a single local tool call. It inspected nothing.
 
     Not a gate failure: the answer can be perfectly schema-valid, and usually is, because
     schema-constrained decoding produces a well-formed object whether or not the model read
@@ -154,8 +154,10 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         VacuousRun.exit_code,
         (
-            "the model answered without making a single tool call: it inspected",
+            "the model answered without making a single local tool call: it inspected",
             "nothing, so its {answer} -- empty or not -- attest to nothing",
+            "(through codex, a local call is a shell command or a file change or patch;",
+            "a web search, MCP call or function call is not one)",
         ),
     ),
     (BudgetError.exit_code, ("over CE_PERSONA_MAX_PROMPT_TOKENS; refused, never summarized",)),

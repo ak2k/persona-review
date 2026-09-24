@@ -52,8 +52,8 @@ replace claims about coverage with checks. Four modules had no entry at all.
 unnoticed: one with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails
 the suite. Two modules are exempt and say why.
 
-WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py has
-3 entries against a dozen raise sites; validate.py has 15 against three dozen. So "every
+WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py and
+validate.py each have fewer entries than raise sites. So "every
 module is represented" is enforced, and "every guard can fail" is not — the table is a
 growing floor, not a proof of completeness, and the honest way to extend it is still to ask
 which guard has no entry and write one. Saying otherwise here would be the same
@@ -217,8 +217,66 @@ MUTATIONS: list[Mutation] = [
         # answer, because the answer is fine — it is the RUN that never happened.
         "a run that made no tool calls certifies a clean review again",
         "persona_review/validate.py",
-        r"    if stats\.tool_calls == 0:",
+        r"    if stats\.local_tool_calls == 0:",
         "    if False:",
+    ),
+    Mutation(
+        # A run whose only calls were web searches read the internet, not the repository.
+        # Refusing on the total passes it, because searches are calls.
+        "the refusal counts web searches as having inspected the repository",
+        "persona_review/validate.py",
+        r"    if stats\.local_tool_calls == 0:",
+        "    if stats.tool_calls == 0:",
+    ),
+    Mutation(
+        # The refusal names local calls; a run that made other calls has to say so, or the
+        # message reads "3 tool calls" beside "made no local tool calls" with no way to see why.
+        "the refusal's run description drops the local count",
+        "persona_review/validate.py",
+        r"    if stats\.local_tool_calls != stats\.tool_calls:",
+        "    if False:",
+    ),
+    Mutation(
+        "web_search is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "web_search",\n    }\n)',
+    ),
+    Mutation(
+        # An MCP server may be remote; a run whose only calls went to one has not been shown
+        # to have read the tree, and counting it local passes it silently.
+        "mcp_tool_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "mcp_tool_call",\n    }\n)',
+    ),
+    Mutation(
+        "function_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "function_call",\n    }\n)',
+    ),
+    Mutation(
+        "custom_tool_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "custom_tool_call",\n    }\n)',
+    ),
+    Mutation(
+        # The id-less arm carries the local tally too; without it an id-less local call
+        # counts as a call and not as a local one, refusing a run that did inspect the tree.
+        "an id-less codex call is never counted as local",
+        "persona_review/validate.py",
+        r"                calls \+= 1\n                local \+= is_local",
+        "                calls += 1",
+    ),
+    Mutation(
+        # Every grok call is local because the argv disables grok's web tools. Reporting
+        # none as local would refuse every grok run, which is the refusal made meaningless.
+        "grok calls are not counted as local",
+        "persona_review/validate.py",
+        r"    return calls, calls, turns, output_tokens",
+        "    return calls, 0, turns, output_tokens",
     ),
     Mutation(
         # Counting every content block rather than the tool_use ones counts thinking and
@@ -259,8 +317,27 @@ MUTATIONS: list[Mutation] = [
         # after a provider-CLI rename — a falsehood about the one component that was working.
         "a renamed codex vocabulary is blamed on the model instead of the wrapper",
         "persona_review/validate.py",
-        r"    if calls == 0 and unknown:",
+        r"    if local == 0 and unknown:",
         "    if False:",
+    ),
+    Mutation(
+        # Recovering by the tool list alone silences the drift check for a renamed
+        # tree-reading kind, and every run then exits 6: the outage the check exists to stop.
+        "the drift recovery stops naming the local-kind list",
+        "persona_review/validate.py",
+        r'            "A kind that reads or edits the working tree also goes in "\n'
+        r'            "validate\.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this '
+        r'error "\n'
+        r'            "and every run then exits 6\."\n',
+        "",
+    ),
+    Mutation(
+        # The refusal reads the local count, so a web search beside a renamed local kind
+        # has to be reported as drift rather than as a model that never opened the diff.
+        "a web search hides a renamed codex vocabulary from the drift check",
+        "persona_review/validate.py",
+        r"    if local == 0 and unknown:",
+        "    if calls == 0 and unknown:",
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
@@ -298,8 +375,47 @@ MUTATIONS: list[Mutation] = [
         # has a sidecar at all, which is every artifact this package writes.
         "the reader refuses on any provenance rather than on a counted zero",
         "persona_review/validate.py",
-        r"    if calls != 0:",
+        r"    if calls != 0 and local != 0:",
         "    if False:",
+    ),
+    Mutation(
+        # A sidecar recording zero calls in all was refused before `local_tool_calls`
+        # existed; a local count beside it, well-formed or not, must not render it now.
+        "a zero total no longer refuses when a local count is recorded",
+        "persona_review/validate.py",
+        r"    if calls != 0 and local != 0:",
+        "    if local != 0:",
+    ),
+    Mutation(
+        # The artifact exit 6 kept from a run that only searched the web records calls, so
+        # reading the total renders it at exit 0 — the laundering the reader exists to stop.
+        "the reader refuses on the total count instead of the local one",
+        "persona_review/validate.py",
+        r'    local = _whole_number\(stats\.get\("local_tool_calls"\)\) '
+        r'if "local_tool_calls" in stats else calls',
+        "    local = calls",
+    ),
+    Mutation(
+        # A sidecar from before the field existed must still be refused on the rule it was
+        # written under; treating the absent field as a zero refuses every one of them.
+        "a sidecar without local_tool_calls is read as recording zero",
+        "persona_review/validate.py",
+        r'    local = _whole_number\(stats\.get\("local_tool_calls"\)\) '
+        r'if "local_tool_calls" in stats else calls',
+        '    local = _whole_number(stats.get("local_tool_calls")) '
+        'if "local_tool_calls" in stats else 0',
+    ),
+    Mutation(
+        "a zero local count beside a malformed total is read as a refusal",
+        "persona_review/validate.py",
+        r"    if calls is None or calls < 0:\n        return None\n    local =",
+        "    if False:\n        return None\n    local =",
+    ),
+    Mutation(
+        "a negative total is read as a count",
+        "persona_review/validate.py",
+        r"    if calls is None or calls < 0:\n        return None\n    local =",
+        "    if calls is None:\n        return None\n    local =",
     ),
     Mutation(
         "persona name may be a path again",
@@ -387,6 +503,52 @@ MUTATIONS: list[Mutation] = [
         "persona_review/findings.py",
         r"            if n == show:",
         "            if n == show + 1:",
+    ),
+    Mutation(
+        # The mode exists so a caller relaying every finding pays for one fence. Reverting
+        # it to the per-finding path makes `all` an unknown finding number.
+        "--show all is read as a finding number",
+        "persona_review/findings.py",
+        r"    if show == SHOW_ALL:\n        if not rows:",
+        "    if False:\n        if not rows:",
+    ),
+    Mutation(
+        # One fence per finding costs two lines each and hands the consumer N nonces to
+        # track, which is the per-finding cost the mode was added to remove.
+        "--show all fences each finding separately",
+        "persona_review/findings.py",
+        r"        print\(fence\(separator\.join\(render_detail\(n, finding\) "
+        r"for n, finding in rows\)\)\)",
+        "        print(separator.join(fence(render_detail(n, finding)) for n, finding in rows))",
+    ),
+    Mutation(
+        # Every tier-2 render already holds blank lines, so without the separator line a
+        # reader cannot tell where one finding's fix ends and the next finding begins.
+        "--show all runs the findings together without the separator line",
+        "persona_review/findings.py",
+        r'        separator = f"\\n\{SHOW_ALL_SEPARATOR\}\\n"',
+        r'        separator = "\\n"',
+    ),
+    Mutation(
+        # `#` order is what lines the entries up with the numbers the caller already holds.
+        "--show all renders in display order instead of # order",
+        "persona_review/findings.py",
+        r"render_detail\(n, finding\) for n, finding in rows\)",
+        "render_detail(n, finding) for n, finding in ordered(rows))",
+    ),
+    Mutation(
+        # An empty fence at exit 0 reads as "rendered, and here it is" where `--all` says
+        # plainly that there is nothing.
+        "--show all on an empty artifact prints an empty fence",
+        "persona_review/findings.py",
+        r'        if not rows:\n            print\("no findings"\)',
+        '        if False:\n            print("no findings")',
+    ),
+    Mutation(
+        "--show all on a verdicts artifact is read as a verdict number",
+        "persona_review/findings.py",
+        r"    if isinstance\(show, int\):",
+        "    if show is not None:",
     ),
     Mutation(
         # The whole reason --return exists: the merge helper demotes a 75/100 finding with no

@@ -6,6 +6,7 @@ artifact for a caller — usually an agent — so nobody pays for detail they wi
     ce-persona-findings <artifact>              # triage rows, P0/P1 by default
     ce-persona-findings <artifact> --all        # every severity
     ce-persona-findings <artifact> --show 3     # one finding, in full
+    ce-persona-findings <artifact> --show all   # every finding, in full, in one fence
     ce-persona-findings <artifact> --json       # the raw object, unchanged
     ce-persona-findings <artifact> --return     # the merge-tier compact return object
 
@@ -18,9 +19,10 @@ the call, and the reason for it. Both are read by this command, because both are
 an agent has to be handed, and one reader is one place to keep the fence and the refusal.
 
 Verdicts list as one row per verdict in `#` order; `--show N` renders the verdict addressed to
-finding `#N`. `--all` has nothing to widen -- a verdict has no severity, so nothing is hidden
-from the default listing -- and `--return` is refused rather than approximated, because the
-merge helper reads a findings shape and a verdict is not one.
+finding `#N`, and `--show all` is the listing itself. `--all` has nothing to widen -- a verdict
+has no severity, so nothing is hidden from the default listing -- and `--return` is refused
+rather than approximated, because the merge helper reads a findings shape and a verdict is not
+one.
 
 THE TIERS, AND WHY
 ------------------
@@ -33,7 +35,9 @@ field is what makes a title trustworthy without the full evidence array. Roughly
 a finding.
 
 Tier 2 is `--show N`: why_it_matters, the full evidence array, the suggested fix. Pay it for
-the finding you are about to act on, not for the four you are not.
+the finding you are about to act on, not for the four you are not. `--show all` is tier 2 for
+every finding at once, for a caller that has to relay all of them inside a fence anyway and
+would otherwise pay one invocation per finding.
 
 `--return` is a tier of its own, for one machine consumer: the compound-engineering plugin's
 `findings-mechanics.py`, which merges reviewer COMPACT RETURNS rather than artifacts. It
@@ -57,11 +61,11 @@ reading them.
 
 A REFUSAL HAS TO SURVIVE BEING HANDED ON
 ----------------------------------------
-The review commands refuse a run that made no tool calls, keep the artifact as evidence, and
-exit 6. An artifact on disk is exactly what this command renders — so without the check in
-`main`, this package laundered its own refusal: the same findings came back as an ordinary
-listing at exit 0, one command later. Every output mode is refused, `--json` and `--return`
-included; a programmatic caller is the one most likely to act on it unread.
+The review commands refuse a run that made no local tool calls, keep the artifact as
+evidence, and exit 6. An artifact on disk is exactly what this command renders — so without
+the check in `main`, this package laundered its own refusal: the same findings came back as
+an ordinary listing at exit 0, one command later. Every output mode is refused, `--json` and
+`--return` included; a programmatic caller is the one most likely to act on it unread.
 """
 
 from __future__ import annotations
@@ -85,7 +89,7 @@ DEFAULT_SEVERITIES = ("P0", "P1")
 # A literal, not `__doc__`: `python -OO` strips docstrings, and reading `.strip()` off the
 # None that leaves behind turns a missing-argument message into an AttributeError.
 USAGE = (
-    "usage: ce-persona-findings <artifact> [--list] [--all] [--show N] [--json]"
+    "usage: ce-persona-findings <artifact> [--list] [--all] [--show N|all] [--json]"
     " [--return [--verify-quotes -C <dir>]]\n"
     "       <artifact> is a findings artifact from a review, or the verdicts artifact"
     " a validation wrote"
@@ -100,6 +104,13 @@ EXIT_DATA = 1
 EXIT_USAGE = 2
 EXIT_VACUOUS = errors.VacuousRun.exit_code
 
+# `--show all`, carried through parsing beside the int `--show N` takes.
+SHOW_ALL = "all"
+
+# Between two findings under `--show all`. A line of its own because every tier-2 render
+# already holds blank lines, so a blank line cannot say where one finding ends.
+SHOW_ALL_SEPARATOR = "----"
+
 HELP = f"""{USAGE}
 
 Project a findings artifact at the detail level you need.
@@ -109,6 +120,10 @@ Project a findings artifact at the detail level you need.
   --list        tier 1: triage rows, P0/P1 only (the default; naming it changes nothing)
   --all         tier 1 for every severity
   --show N      tier 2: finding N in full -- why it matters, evidence, suggested fix
+  --show all    tier 2 for every finding, every severity, in # order, in ONE fence,
+                each entry separated from the next by a line reading {SHOW_ALL_SEPARATOR}
+                (a reading aid, not a boundary: finding text can contain the same line,
+                and the fence is the only boundary)
   --json        the raw artifact, unchanged and unfenced, for a programmatic caller
   --return      the compact RETURN object the compound-engineering merge helper
                 expects, unfenced: the artifact's non-findings keys verbatim, and
@@ -131,13 +146,16 @@ Project a findings artifact at the detail level you need.
 
 A VERDICTS artifact lists one row per verdict in # order -- `#N validated -- <reason>`
 or `#N REJECTED -- <reason>`, where N is the number of the finding it judges. --show N
-renders one of those rows, --all changes nothing (a verdict has no severity to hide
-behind), --json is the raw object, and --return is a usage error: it projects findings
-for the merge helper, and a verdict is not a finding.
+renders one of those rows, --show all renders the same listing as the default (accepted
+for symmetry: a verdict row is already its full detail), --all changes nothing (a
+verdict has no severity to hide behind), --json is the raw object, and --return is a
+usage error: it projects findings for the merge helper, and a verdict is not a finding.
 
 N in `--show N` is the number shown as #N in the listing, in either tier.
-Among the listing modes --show wins, then --list/--all; --json outranks both.
+Among the listing modes --show (N or all) wins, then --list/--all; --json outranks both.
 --return is exclusive with --json and --show (giving both is a usage error).
+An artifact with no entries prints `no findings` / `no verdicts`, unfenced, under
+--show all as under --all.
 
 Rendered output is wrapped in BEGIN/END UNTRUSTED MODEL OUTPUT with a per-run
 nonce: it is text a model wrote about a repository it read, and it is being
@@ -151,8 +169,8 @@ exit status
      number, --return together with --json or --show, --return or --verify-quotes on a
      verdicts artifact, --verify-quotes without --return or without -C, -C without
      --verify-quotes, or a -C that is missing, is not a directory, or names an unknown user
-  {EXIT_VACUOUS}  the artifact's provenance records a run that made no tool calls; nothing
-     it reported is founded, so it is refused rather than rendered"""
+  {EXIT_VACUOUS}  the artifact's provenance records a run that made no local tool calls;
+     nothing it reported is founded, so it is refused rather than rendered"""
 
 Finding = JSONObject
 
@@ -738,7 +756,8 @@ def refusal_banner(path: str, stats: validate.RunStats) -> str:
     sidecar = Path(path).with_name(Path(path).stem + validate.PROVENANCE_SUFFIX)
     return (
         f"ce-persona-findings: refusing to render {path}\n"
-        f"  Its provenance records a run that made no tool calls ({validate.describe_run(stats)}),"
+        f"  Its provenance records a run that made no local tool calls"
+        f" ({validate.describe_run(stats)}),"
         f"\n  so the model never opened the diff and nothing here is founded -- an empty findings"
         f"\n  array and a page of them equally. The review command already refused this run with"
         f"\n  exit {EXIT_VACUOUS}; rendering it would launder that refusal one command later."
@@ -761,7 +780,7 @@ def _expand_repo(spec: str) -> Path | None:
 
 
 def _render_verdicts(
-    path: str, artifact: JSONObject, *, show: int | None, as_json: bool, as_return: bool
+    path: str, artifact: JSONObject, *, show: int | str | None, as_json: bool, as_return: bool
 ) -> int:
     """A verdicts artifact, at the only two detail levels it has.
 
@@ -779,7 +798,7 @@ def _render_verdicts(
         return EXIT_OK
 
     rows = numbered_verdicts(artifact)
-    if show is not None:
+    if isinstance(show, int):
         wanted = [verdict for n, verdict in rows if n == show]
         if not wanted:
             return _usage_error(f"no verdict #{show} (artifact has {len(rows)})")
@@ -801,7 +820,7 @@ def _usage_error(message: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     path: str | None = None
-    show: int | None = None
+    show: int | str | None = None
     want_all = False
     as_json = False
     as_return = False
@@ -814,11 +833,16 @@ def main(argv: list[str] | None = None) -> int:
             # Matched before the unknown-option arm, so a trailing `--show` complains that it
             # wants a number rather than reporting a documented flag as unknown.
             if i + 1 >= len(args):
-                return _usage_error("--show wants a finding number")
-            try:
-                show = int(args[i + 1])
-            except ValueError:
-                return _usage_error(f"--show wants a finding number, got {args[i + 1]!r}")
+                return _usage_error("--show wants a finding number or 'all'")
+            if args[i + 1] == SHOW_ALL:
+                show = SHOW_ALL
+            else:
+                try:
+                    show = int(args[i + 1])
+                except ValueError:
+                    return _usage_error(
+                        f"--show wants a finding number or 'all', got {args[i + 1]!r}"
+                    )
             i += 2
         elif arg == "-C":
             # Matched before the unknown-option arm for the same reason as `--show`.
@@ -932,6 +956,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     rows = numbered(artifact)
+    if show == SHOW_ALL:
+        if not rows:
+            print("no findings")
+            return EXIT_OK
+        separator = f"\n{SHOW_ALL_SEPARATOR}\n"
+        print(fence(separator.join(render_detail(n, finding) for n, finding in rows)))
+        return EXIT_OK
     if show is not None:
         for n, finding in rows:
             if n == show:

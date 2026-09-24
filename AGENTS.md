@@ -149,9 +149,11 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   loudly and so no other test can be read as already covering it. "Found nothing" and
   "looked, then gave up" are indistinguishable without judging the transcript.
 
-  What is no longer in the hole: a run that made **zero** tool calls. It read nothing, so its
-  findings are unfounded whether the array is empty or full, and it exits `6` with no summary
-  line. Exactly zero, with no configurable floor — "did this run inspect anything" has an
+  What is no longer in the hole: a run that made **zero** local tool calls. It read nothing
+  of the repository — a web search or a tool that does not say where it runs proves no
+  read of the diff — so its findings are
+  unfounded whether the array is empty or full, and it exits `6` with no summary line.
+  Exactly zero, with no configurable floor — "did this run inspect anything" has an
   answer, "did it inspect enough" is a judgment this package is not entitled to make. The
   fixture for the gap test therefore carries a tool call, because without one it would be
   testing the refusal instead.
@@ -164,12 +166,14 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   permanent outage, misdiagnosed as a bad model, in the direction the README tells callers to
   retry. `CODEX_QUIET_ITEMS` is what keeps "a kind we skip on purpose" and "a kind we have
   never heard of" different facts, and its control test is what keeps exit `6` reachable.
-- **`ce-persona-findings` refuses an artifact whose provenance records zero tool calls.** It
-  looks like a reader reaching into a sidecar it has no business reading. It is the other
-  half of the refusal: exit `6` KEEPS the artifact as evidence, and an artifact on disk is
-  exactly what this command renders — so without the check the package laundered its own
-  verdict into an ordinary listing at exit `0`, one command later. Only a positive reading of
-  zero refuses; no sidecar, or a malformed one, renders as before.
+- **`ce-persona-findings` refuses an artifact whose provenance records zero local tool
+  calls.** It looks like a reader reaching into a sidecar it has no business reading. It is
+  the other half of the refusal: exit `6` KEEPS the artifact as evidence, and an artifact on
+  disk is exactly what this command renders — so without the check the package laundered its
+  own verdict into an ordinary listing at exit `0`, one command later. Only a positive reading
+  of zero refuses; no sidecar, or a malformed one, renders as before. Zero `tool_calls` refuses on
+  its own, whatever `local_tool_calls` says, so no sidecar refused before that field existed
+  renders now.
 - **One schema ships with this package while the other is read from the plugin.**
   `findings-schema.json` is the plugin's file: this package reads it at run time, hashes it into
   provenance, and has no authority to change what a finding means. `verdicts-schema.json` is
