@@ -1,6 +1,6 @@
 [project]
 name = "persona-review"
-version = "0.3.2"
+version = "0.3.3"
 description = "Run a compound-engineering review persona through grok or codex and get schema-valid findings back, not a transcript"
 readme = "README.md"
 license = "Apache-2.0"

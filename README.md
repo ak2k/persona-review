@@ -318,6 +318,23 @@ day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to 
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
 
+## Changes in 0.3.3
+
+One addition, and exit `6` now covers a run that searched the web but never touched the
+repository. Every other command, flag and exit status is unchanged.
+
+- **`ce-persona-findings <artifact> --show all`** renders tier 2 for every finding, every
+  severity, in `#` order, inside one fence, entries separated by a `----` line. It follows the
+  precedence of `--show N`. On a verdicts artifact it is the default listing.
+- **Exit `6` counts local tool calls.** A codex run whose only tool calls were web searches
+  used to pass the zero-call refusal; it now exits `6`, from the review and validate commands
+  alike. `run_stats` in provenance gains `local_tool_calls`, and `ce-persona-findings` refuses
+  an artifact whose sidecar records zero of them. A sidecar written by an earlier version is
+  refused only when `tool_calls` is zero, as before.
+- **Codex vocabulary drift is detected beside a web search.** A stream holding web searches and
+  a tool kind this build does not recognize, but no recognized local call, exits `3` as drift.
+  It previously counted the searches and exited `0`.
+
 ## Changes in 0.3.2
 
 Defaults only; every command, flag and exit status is unchanged.
