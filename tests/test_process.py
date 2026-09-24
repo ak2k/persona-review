@@ -774,7 +774,7 @@ class TestVacuousRuns(Harness):
         # NOT the summary line. "0 findings -> <path>" beside a refusal is the exact
         # ambiguity being closed, and a caller that reads stdout must see nothing to relay.
         assert proc.stdout.strip() == "", proc.stdout
-        assert "no tool calls" in proc.stderr, proc.stderr
+        assert "no local tool calls" in proc.stderr, proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_findings_from_a_run_with_no_tool_calls_are_refused_too(self, provider: str):
@@ -822,7 +822,7 @@ class TestVacuousRuns(Harness):
         proc = self.findings(str(self.artifact(provider)))
         assert proc.returncode == 6, proc.stdout + proc.stderr
         assert proc.stdout.strip() == "", proc.stdout
-        assert "no tool calls" in proc.stderr, proc.stderr
+        assert "no local tool calls" in proc.stderr, proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reader_refuses_json_too(self, provider: str):
@@ -968,7 +968,7 @@ class TestVocabularyDriftIsNotBlamedOnTheModel(Harness):
         self.set_spec(stdout=codex_stream(), last=ANSWER)
         proc = self.review("codex", "adversarial-reviewer")
         assert proc.returncode == 6, proc.stdout + proc.stderr
-        assert "no tool calls" in proc.stderr
+        assert "no local tool calls" in proc.stderr
 
 
 class TestExitStatus(Harness):
@@ -1684,7 +1684,7 @@ class TestValidatorMode(Harness):
         proc = self.findings(str(self.validator_artifact(provider)))
         assert proc.returncode == 6, proc.stdout
         assert proc.stdout == ""
-        assert "no tool calls" in proc.stderr
+        assert "no local tool calls" in proc.stderr
         assert str(self.validator_provenance(provider)) in proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)

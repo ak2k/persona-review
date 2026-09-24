@@ -60,13 +60,13 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, or the runner's event vocabulary changed and this build can no longer count what a run did |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
-| `6` | the model answered without making a single tool call — it inspected nothing |
+| `6` | the model answered without making a single local tool call — it inspected nothing (a web search is not a local call) |
 | `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
 
 The distinctions that matter to a caller are `1`, `4` and `6`. `1` is the model's fault — it
 answered with something that is not findings. `4` is the runner's — it exited non-zero and
 never got that far. **`6` is the one worth retrying**: the model answered, the answer may be
-perfectly schema-valid, and it made zero tool calls, so it never opened the diff and
+perfectly schema-valid, and it made zero local tool calls, so it never opened the diff and
 certified nothing — empty findings or a page of them. That is a run that happened, not a
 hypothetical: one turn, 151 output tokens, four and a half seconds, `{"findings": []}`, exit
 `0`. Nothing is wrong with the machine or the invocation, so the same command is worth
@@ -83,9 +83,9 @@ genuinely nothing in it.
 
 **A review is defined as inspecting the repository.** Passing the material in the prompt
 (`-c -`, or a large `-c` file) and expecting the model to review it without touching the
-working tree still exits `6`: the tool-call count is what makes a finding checkable against
-the code, and there is no mode in which this package certifies a review of text it cannot
-tie to a file. Use the model directly for that.
+working tree still exits `6`: the local tool-call count is what makes a finding checkable
+against the code, and there is no mode in which this package certifies a review of text it
+cannot tie to a file. Use the model directly for that.
 
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered, `1`
 the file is unreadable, is neither a findings nor a verdicts artifact, is both at once, or
@@ -93,8 +93,8 @@ could not be projected into a usable return, `2` usage error — including no su
 verdict number, `--return` with `--json` or `--show`, `--return` or `--verify-quotes` on a
 verdicts artifact, `--verify-quotes` without `--return` or without `-C`, a `-C` given without
 `--verify-quotes`, and a `-C` that is missing, is not a directory, or names an unknown user —
-and `6` when the artifact's provenance records a run that made no tool calls. That last one
-matters because a refusal has to survive being handed on: the review command keeps the dud
+and `6` when the artifact's provenance records a run that made no local tool calls. That last
+one matters because a refusal has to survive being handed on: the review command keeps the dud
 artifact as evidence, and without the check this package would launder its own refusal into an
 ordinary listing at exit `0`, one command later.
 
@@ -212,8 +212,8 @@ attested as the one the validator saw.
 **The exit statuses are the review commands' own**, with the nouns changed: `0` schema-valid
 verdicts covering the batch, `1` the answer was not that, or also carries a findings list, `2`
 usage or a malformed batch, `3` environment, `4` the runner exited non-zero, `5` timeout, `6`
-the model made no tool calls, `78` over budget. `--help` renders the table in the validate
-mode's words. The second half of `1` is the reader's rule asked at the writing end: a file
+the model made no local tool calls, `78` over budget. `--help` renders the table in the
+validate mode's words. The second half of `1` is the reader's rule asked at the writing end: a file
 carrying both lists is neither artifact, so `ce-persona-findings` refuses it, and a run that
 reported success for one would be certifying verdicts nothing can render.
 
@@ -304,9 +304,13 @@ append to one events file, and the gate then validates an interleaving of two tr
 Each run writes `<persona>-<provider>-provenance.json` beside its findings, recording what produced
 them: the provider, model and effort; the persona brief, the findings schema and **the exact prompt
 the model received**, each by SHA-256; the repository with the resolved `head_sha` and `base_sha`;
-and a `run_stats` object counting what the run *did* — `tool_calls`, `turns`, `output_tokens` and
-`duration_s`. `tool_calls` is the one the exit status turns on, so it is recorded rather than only
-acted on: a refusal you cannot audit afterwards is one you have to take on trust.
+and a `run_stats` object counting what the run *did* — `tool_calls`, `local_tool_calls`, `turns`,
+`output_tokens` and `duration_s`. `tool_calls` is every call the run made; `local_tool_calls` is
+the ones that acted on the machine the review ran on, which excludes web searches. The exit status
+turns on `local_tool_calls` — no local tool calls is exit `6` — so it is recorded rather than only
+acted on: a refusal you cannot audit afterwards is one you have to take on trust. A sidecar
+written before 0.3.3 carries no `local_tool_calls`; `ce-persona-findings` reads it by the rule it
+was written under, refusing it when `tool_calls` is zero.
 
 The hashes are the point. Briefs live in a plugin cache that updates underneath you, so two runs are
 only comparable if they ran the same brief — and `base_ref=HEAD~1` names a different commit every

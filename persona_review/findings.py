@@ -61,11 +61,11 @@ reading them.
 
 A REFUSAL HAS TO SURVIVE BEING HANDED ON
 ----------------------------------------
-The review commands refuse a run that made no tool calls, keep the artifact as evidence, and
-exit 6. An artifact on disk is exactly what this command renders — so without the check in
-`main`, this package laundered its own refusal: the same findings came back as an ordinary
-listing at exit 0, one command later. Every output mode is refused, `--json` and `--return`
-included; a programmatic caller is the one most likely to act on it unread.
+The review commands refuse a run that made no local tool calls, keep the artifact as
+evidence, and exit 6. An artifact on disk is exactly what this command renders — so without
+the check in `main`, this package laundered its own refusal: the same findings came back as
+an ordinary listing at exit 0, one command later. Every output mode is refused, `--json` and
+`--return` included; a programmatic caller is the one most likely to act on it unread.
 """
 
 from __future__ import annotations
@@ -167,8 +167,8 @@ exit status
      number, --return together with --json or --show, --return or --verify-quotes on a
      verdicts artifact, --verify-quotes without --return or without -C, -C without
      --verify-quotes, or a -C that is missing, is not a directory, or names an unknown user
-  {EXIT_VACUOUS}  the artifact's provenance records a run that made no tool calls; nothing
-     it reported is founded, so it is refused rather than rendered"""
+  {EXIT_VACUOUS}  the artifact's provenance records a run that made no local tool calls;
+     nothing it reported is founded, so it is refused rather than rendered"""
 
 Finding = JSONObject
 
@@ -754,7 +754,8 @@ def refusal_banner(path: str, stats: validate.RunStats) -> str:
     sidecar = Path(path).with_name(Path(path).stem + validate.PROVENANCE_SUFFIX)
     return (
         f"ce-persona-findings: refusing to render {path}\n"
-        f"  Its provenance records a run that made no tool calls ({validate.describe_run(stats)}),"
+        f"  Its provenance records a run that made no local tool calls"
+        f" ({validate.describe_run(stats)}),"
         f"\n  so the model never opened the diff and nothing here is founded -- an empty findings"
         f"\n  array and a page of them equally. The review command already refused this run with"
         f"\n  exit {EXIT_VACUOUS}; rendering it would launder that refusal one command later."

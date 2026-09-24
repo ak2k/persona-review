@@ -217,8 +217,46 @@ MUTATIONS: list[Mutation] = [
         # answer, because the answer is fine — it is the RUN that never happened.
         "a run that made no tool calls certifies a clean review again",
         "persona_review/validate.py",
-        r"    if stats\.tool_calls == 0:",
+        r"    if stats\.local_tool_calls == 0:",
         "    if False:",
+    ),
+    Mutation(
+        # A run whose only calls were web searches read the internet, not the repository.
+        # Refusing on the total passes it, because searches are calls.
+        "the refusal counts web searches as having inspected the repository",
+        "persona_review/validate.py",
+        r"    if stats\.local_tool_calls == 0:",
+        "    if stats.tool_calls == 0:",
+    ),
+    Mutation(
+        # The refusal names local calls; a run that made other calls has to say so, or the
+        # message reads "3 tool calls" beside "made no local tool calls" with no way to see why.
+        "the refusal's run description drops the local count",
+        "persona_review/validate.py",
+        r"    if stats\.local_tool_calls != stats\.tool_calls:",
+        "    if False:",
+    ),
+    Mutation(
+        "web_search is counted as a local tool call",
+        "persona_review/validate.py",
+        r'^CODEX_LOCAL_TOOL_ITEMS = CODEX_TOOL_ITEMS - \{"web_search"\}',
+        "CODEX_LOCAL_TOOL_ITEMS = CODEX_TOOL_ITEMS",
+    ),
+    Mutation(
+        # The id-less arm carries the local tally too; without it an id-less local call
+        # counts as a call and not as a local one, refusing a run that did inspect the tree.
+        "an id-less codex call is never counted as local",
+        "persona_review/validate.py",
+        r"                calls \+= 1\n                local \+= is_local",
+        "                calls += 1",
+    ),
+    Mutation(
+        # Every grok call is local because the argv disables grok's web tools. Reporting
+        # none as local would refuse every grok run, which is the refusal made meaningless.
+        "grok calls are not counted as local",
+        "persona_review/validate.py",
+        r"    return calls, calls, turns, output_tokens",
+        "    return calls, 0, turns, output_tokens",
     ),
     Mutation(
         # Counting every content block rather than the tool_use ones counts thinking and
@@ -259,8 +297,16 @@ MUTATIONS: list[Mutation] = [
         # after a provider-CLI rename — a falsehood about the one component that was working.
         "a renamed codex vocabulary is blamed on the model instead of the wrapper",
         "persona_review/validate.py",
-        r"    if calls == 0 and unknown:",
+        r"    if local == 0 and unknown:",
         "    if False:",
+    ),
+    Mutation(
+        # The refusal reads the local count, so a web search beside a renamed local kind
+        # has to be reported as drift rather than as a model that never opened the diff.
+        "a web search hides a renamed codex vocabulary from the drift check",
+        "persona_review/validate.py",
+        r"    if local == 0 and unknown:",
+        "    if calls == 0 and unknown:",
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
@@ -298,8 +344,39 @@ MUTATIONS: list[Mutation] = [
         # has a sidecar at all, which is every artifact this package writes.
         "the reader refuses on any provenance rather than on a counted zero",
         "persona_review/validate.py",
-        r"    if calls != 0:",
+        r"    if local != 0:",
         "    if False:",
+    ),
+    Mutation(
+        # The artifact exit 6 kept from a run that only searched the web records calls, so
+        # reading the total renders it at exit 0 — the laundering the reader exists to stop.
+        "the reader refuses on the total count instead of the local one",
+        "persona_review/validate.py",
+        r'    local = _whole_number\(stats\.get\("local_tool_calls"\)\) '
+        r'if "local_tool_calls" in stats else calls',
+        "    local = calls",
+    ),
+    Mutation(
+        # A sidecar from before the field existed must still be refused on the rule it was
+        # written under; treating the absent field as a zero refuses every one of them.
+        "a sidecar without local_tool_calls is read as recording zero",
+        "persona_review/validate.py",
+        r'    local = _whole_number\(stats\.get\("local_tool_calls"\)\) '
+        r'if "local_tool_calls" in stats else calls',
+        '    local = _whole_number(stats.get("local_tool_calls")) '
+        'if "local_tool_calls" in stats else 0',
+    ),
+    Mutation(
+        "a zero local count beside a malformed total is read as a refusal",
+        "persona_review/validate.py",
+        r"    if calls is None or calls < 0:\n        return None\n    local =",
+        "    if False:\n        return None\n    local =",
+    ),
+    Mutation(
+        "a negative total is read as a count",
+        "persona_review/validate.py",
+        r"    if calls is None or calls < 0:\n        return None\n    local =",
+        "    if calls is None:\n        return None\n    local =",
     ),
     Mutation(
         "persona name may be a path again",
