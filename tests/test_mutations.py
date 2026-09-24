@@ -321,6 +321,17 @@ MUTATIONS: list[Mutation] = [
         "    if False:",
     ),
     Mutation(
+        # Recovering by the tool list alone silences the drift check for a renamed
+        # tree-reading kind, and every run then exits 6: the outage the check exists to stop.
+        "the drift recovery stops naming the local-kind list",
+        "persona_review/validate.py",
+        r'            "A kind that reads or edits the working tree also goes in "\n'
+        r'            "validate\.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this '
+        r'error "\n'
+        r'            "and every run then exits 6\."\n',
+        "",
+    ),
+    Mutation(
         # The refusal reads the local count, so a web search beside a renamed local kind
         # has to be reported as drift rather than as a model that never opened the diff.
         "a web search hides a renamed codex vocabulary from the drift check",

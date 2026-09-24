@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -767,6 +768,18 @@ class TestDriftIsNotBlamedOnTheModel:
         message = str(caught.value)
         assert "shell_call_v2" in message and "file_patch_v2" in message, message
         assert "drift" in message
+
+    def test_the_drift_recovery_names_both_kind_lists(self):
+        # Following a recovery that names only the tool list silences this check for a
+        # renamed tree-reading kind, and every run then exits 6. Names are read back out of
+        # the message and resolved, so renaming either constant fails here.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(codex_stream(codex_item("item.completed", "shell_call_v2", "item_1")))
+        message = str(caught.value)
+        named = set(re.findall(r"validate\.([A-Z_]+)", message))
+        assert named == {"CODEX_TOOL_ITEMS", "CODEX_LOCAL_TOOL_ITEMS"}, message
+        assert validate.CODEX_LOCAL_TOOL_ITEMS <= validate.CODEX_TOOL_ITEMS
+        assert "exits 6" in message, message
 
     def test_a_web_search_beside_a_renamed_kind_is_still_drift(self):
         # The refusal reads the LOCAL count, so the drift check must too: otherwise a search

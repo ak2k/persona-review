@@ -681,11 +681,17 @@ def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, in
         # that is working. The wrapper is the broken part and the message says so. Keyed on
         # the LOCAL count because that is what the refusal reads: a web search beside a
         # renamed local kind would otherwise leave the rename to be reported as exit 6.
+        #
+        # The recovery names BOTH lists: a renamed tree-reading kind added only to the first
+        # silences this check while every run still counts zero local calls and exits 6.
         raise errors.EnvError(
             "counted no local tool calls, but codex's stream carries item kind(s) this wrapper "
-            f"does not recognise: {', '.join(sorted(unknown))}. That is provider CLI drift, "
-            "not model behaviour -- the tool-kind list in validate.CODEX_TOOL_ITEMS needs to "
-            "catch up before any run through codex can be believed."
+            f"does not recognize: {', '.join(sorted(unknown))}. That is provider CLI drift, "
+            "not model behavior, and no run through codex can be believed until each kind "
+            "is added to validate.CODEX_TOOL_ITEMS. "
+            "A kind that reads or edits the working tree also goes in "
+            "validate.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this error "
+            "and every run then exits 6."
         )
     return calls, local, turns, output_tokens
 
