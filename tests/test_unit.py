@@ -204,6 +204,9 @@ CODEX_ONE_CALL = codex_stream(
     codex_item("item.completed", "command_execution"),
 )
 CODEX_NO_CALLS = codex_stream(codex_item("item.completed", "agent_message", "item_0"))
+# Tool kinds that are calls but do not prove the tree was read: the internet, or a tool that
+# does not say where it runs.
+NOT_LOCAL_KINDS = ["custom_tool_call", "function_call", "mcp_tool_call", "web_search"]
 # Calls, and none of them local: the run read the internet and never opened the repository.
 CODEX_ONLY_SEARCHED = codex_stream(
     codex_item("item.started", "web_search", "ws_1"),
@@ -644,14 +647,21 @@ class TestRunEvidence:
         assert (stats.tool_calls, stats.local_tool_calls) == (3, 1)
 
     @pytest.mark.parametrize("kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS))
-    def test_every_other_tool_kind_is_local(self, kind: str):
+    def test_every_local_kind_is_counted_as_local(self, kind: str):
         # With an id and without, so both counting arms carry the local tally.
         assert self._codex(codex_item("item.completed", kind, "item_1")).local_tool_calls == 1
         assert self._codex(codex_item("item.completed", kind, None)).local_tool_calls == 1
 
-    def test_the_local_kinds_are_the_tool_kinds_less_web_search(self):
-        not_local = validate.CODEX_TOOL_ITEMS - validate.CODEX_LOCAL_TOOL_ITEMS
-        assert not_local == {"web_search"}
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    def test_a_kind_that_does_not_prove_the_tree_was_read_is_a_call_but_not_local(self, kind: str):
+        stats = self._codex(codex_item("item.completed", kind, "item_1"))
+        assert (stats.tool_calls, stats.local_tool_calls) == (1, 0)
+
+    def test_the_local_kinds_are_the_ones_that_act_on_the_working_directory(self):
+        local = validate.CODEX_LOCAL_TOOL_ITEMS
+        assert local == {"command_execution", "file_change", "local_shell_call", "patch_apply"}
+        not_local = validate.CODEX_TOOL_ITEMS - local
+        assert not_local == set(NOT_LOCAL_KINDS)
 
     def test_grok_counts_every_call_as_local(self):
         # The argv disables grok's web tools, so no call left is one known to leave the machine.
@@ -864,6 +874,16 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert "2 tool calls (0 local)" in message, message
         assert record["run_stats"]["tool_calls"] == 2
         assert record["run_stats"]["local_tool_calls"] == 0
+
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    def test_a_run_whose_only_calls_are_not_local_is_refused(self, kind: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(
+                Path(tmp), EMPTY_EXAMPLE, codex_stream(codex_item("item.completed", kind, "i1"))
+            )
+        assert code == 6, message
+        assert out == ""
+        assert "1 tool call (0 local)" in message, message
 
     def test_one_tool_call_is_enough(self):
         # The control. Without it every assertion above holds for a gate that refuses

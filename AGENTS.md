@@ -150,7 +150,8 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   "looked, then gave up" are indistinguishable without judging the transcript.
 
   What is no longer in the hole: a run that made **zero** local tool calls. It read nothing
-  of the repository — a web search reads the internet, not the diff — so its findings are
+  of the repository — a web search or a tool that does not say where it runs proves no
+  read of the diff — so its findings are
   unfounded whether the array is empty or full, and it exits `6` with no summary line.
   Exactly zero, with no configurable floor — "did this run inspect anything" has an
   answer, "did it inspect enough" is a judgment this package is not entitled to make. The

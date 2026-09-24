@@ -38,9 +38,10 @@ ONE QUESTION ABOUT THE ANSWER, ONE ABOUT THE RUN
 The schema rules judge what the model SAID. `run_stats` counts what it DID, from the event
 stream the wrapper already keeps, and `gate` refuses a run that made zero local tool calls:
 a reviewer that never opened a file cannot certify anything, and its findings are unfounded
-whether the array is empty or full. A web search is a call, but not a local one. Exactly
-zero is the threshold, with no configurable floor — "did this run inspect anything" has an
-answer, while "did it inspect enough" is a judgment this package is not entitled to make.
+whether the array is empty or full. A web search, or a tool that does not say where it
+runs, is a call but not a local one. Exactly zero is the threshold, with no configurable
+floor — "did this run inspect anything" has an answer, while "did it inspect enough" is a
+judgment this package is not entitled to make.
 
 WHAT THIS DOES NOT COVER
 ------------------------
@@ -555,19 +556,23 @@ CODEX_TOOL_ITEMS = frozenset(
     }
 )
 
-# The subset that acts on the local machine, which is what the refusal turns on.
+# The kinds that act on the working directory by what they are, which is what the refusal
+# turns on. Listed rather than derived from `CODEX_TOOL_ITEMS`, so a kind added there is not
+# local until someone decides it is.
 #
-# `web_search` is the one kind left out: it reads the internet, and a run whose only calls
-# were searches never opened the repository it was asked about.
-#
-# `command_execution`, `local_shell_call`, `file_change` and `patch_apply` act on the working
-# directory by what they are.
-#
-# `function_call`, `custom_tool_call` and `mcp_tool_call` name a tool without saying where it
-# runs, on this machine or on a remote server. They are counted as local because leaving
-# them out would refuse, as "never opened the diff", a run that read the tree through them,
-# and counting them still refuses every run the total count refused.
-CODEX_LOCAL_TOOL_ITEMS = CODEX_TOOL_ITEMS - {"web_search"}
+# `web_search` reads the internet. `function_call`, `custom_tool_call` and `mcp_tool_call`
+# name a tool without saying where it runs, so one of them may be a remote server's. None
+# of them proves the tree was read, so they count in `tool_calls` and not here. A codex
+# build that does read the tree through one of them is then refused visibly, with exit 6,
+# rather than an MCP-only run being passed silently.
+CODEX_LOCAL_TOOL_ITEMS = frozenset(
+    {
+        "command_execution",
+        "file_change",
+        "local_shell_call",
+        "patch_apply",
+    }
+)
 
 # Kinds this wrapper knows about and deliberately does not count: the model talking to
 # itself, and the plan it writes for itself. Named explicitly so that "a kind we chose to
@@ -606,10 +611,8 @@ def _grok_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, int
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
     # Every grok call is counted as local. `_grok_argv` passes `--disable-web-search`, which
-    # removes grok's web search and web fetch tools. A `tool_use`
-    # block does not say where the tool it names runs, so any other remote tool — a
-    # configured MCP server — is counted local on the same reasoning as codex's
-    # `mcp_tool_call`, rather than by a list of tool names that could go stale.
+    # removes grok's web search and web fetch tools, and grok's events carry no kind that
+    # separates a built-in tool from a configured MCP server's, only a tool name.
     return calls, calls, turns, output_tokens
 
 
@@ -964,10 +967,10 @@ def gate(
 
     # A reviewer that made ZERO local tool calls never opened the diff, so it has no verdict
     # to summarize: empty findings and a page of them are equally unfounded. A web search
-    # read something, but not the repository under review. Decided here, ahead of the
-    # summary the rest of this function builds — a gating caller reads only the status, and
-    # a line saying "0 findings" beside a status saying "refused" is the exact ambiguity
-    # being closed.
+    # or an MCP call read something, but was not shown to read the repository. Decided here,
+    # ahead of the summary the rest of this function builds — a gating caller reads only the
+    # status, and a line saying "0 findings" beside a status saying "refused" is the exact
+    # ambiguity being closed.
     #
     # Deliberately no retry here. Whether to spend another full-effort model run is the
     # calling agent's decision and its budget; this command's job is to refuse to certify,

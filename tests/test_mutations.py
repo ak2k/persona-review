@@ -239,8 +239,28 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "web_search is counted as a local tool call",
         "persona_review/validate.py",
-        r'^CODEX_LOCAL_TOOL_ITEMS = CODEX_TOOL_ITEMS - \{"web_search"\}',
-        "CODEX_LOCAL_TOOL_ITEMS = CODEX_TOOL_ITEMS",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "web_search",\n    }\n)',
+    ),
+    Mutation(
+        # An MCP server may be remote; a run whose only calls went to one has not been shown
+        # to have read the tree, and counting it local passes it silently.
+        "mcp_tool_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "mcp_tool_call",\n    }\n)',
+    ),
+    Mutation(
+        "function_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "function_call",\n    }\n)',
+    ),
+    Mutation(
+        "custom_tool_call is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "patch_apply",\n    \}\n\)',
+        '        "patch_apply",\n        "custom_tool_call",\n    }\n)',
     ),
     Mutation(
         # The id-less arm carries the local tally too; without it an id-less local call

@@ -60,7 +60,7 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, or the runner's event vocabulary changed and this build can no longer count what a run did |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
-| `6` | the model answered without making a single local tool call — it inspected nothing (a web search is not a local call) |
+| `6` | the model answered without making a single local tool call — it inspected nothing. Through codex a local call is a `command_execution`, `local_shell_call`, `file_change` or `patch_apply` item; a web search, MCP call or function call is not one |
 | `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
 
 The distinctions that matter to a caller are `1`, `4` and `6`. `1` is the model's fault — it
@@ -306,7 +306,10 @@ them: the provider, model and effort; the persona brief, the findings schema and
 the model received**, each by SHA-256; the repository with the resolved `head_sha` and `base_sha`;
 and a `run_stats` object counting what the run *did* — `tool_calls`, `local_tool_calls`, `turns`,
 `output_tokens` and `duration_s`. `tool_calls` is every call the run made; `local_tool_calls` is
-the ones that acted on the machine the review ran on, which excludes web searches. The exit status
+the ones shown to act on the working directory. Through codex those are the `command_execution`,
+`local_shell_call`, `file_change` and `patch_apply` items. `web_search`, `mcp_tool_call`,
+`function_call` and `custom_tool_call` count in `tool_calls` only, because none of them proves the
+tree was read. Every grok call is local: `--disable-web-search` removes its web tools. The exit status
 turns on `local_tool_calls` — no local tool calls is exit `6` — so it is recorded rather than only
 acted on: a refusal you cannot audit afterwards is one you have to take on trust. A sidecar
 written before 0.3.3 carries no `local_tool_calls`; `ce-persona-findings` reads it by the rule it
@@ -320,21 +323,22 @@ about. Reviewing a directory that is not a git repository is fine; the SHA field
 
 ## Changes in 0.3.3
 
-One addition; exit `6` now covers a run that searched the web but never touched the
-repository, and exit `3` a codex run that paired web searches with an unrecognized tool kind.
+One addition; exit `6` now covers a codex run whose only tool calls did not act on the
+repository, and exit `3` a codex run that paired such calls with an unrecognized tool kind.
 Every other command, flag and exit status is unchanged.
 
 - **`ce-persona-findings <artifact> --show all`** renders tier 2 for every finding, every
   severity, in `#` order, inside one fence, entries separated by a `----` line. It follows the
   precedence of `--show N`. On a verdicts artifact it is the default listing.
-- **Exit `6` counts local tool calls.** A codex run whose only tool calls were web searches
-  used to pass the zero-call refusal; it now exits `6`, from the review and validate commands
-  alike. `run_stats` in provenance gains `local_tool_calls`, and `ce-persona-findings` refuses
+- **Exit `6` counts local tool calls.** Through codex those are `command_execution`,
+  `local_shell_call`, `file_change` and `patch_apply` items. A run whose only tool calls were
+  web searches, MCP calls, function calls or custom tool calls used to pass the zero-call
+  refusal; it now exits `6`, from the review and validate commands alike. `run_stats` in provenance gains `local_tool_calls`, and `ce-persona-findings` refuses
   an artifact whose sidecar records zero of them. A sidecar written by an earlier version is
   refused only when `tool_calls` is zero, as before.
-- **Codex vocabulary drift is detected beside a web search.** A stream holding web searches and
-  a tool kind this build does not recognize, but no recognized local call, exits `3` as drift.
-  It previously counted the searches and exited `0`.
+- **Codex vocabulary drift is detected beside calls that are not local.** A stream holding a
+  tool kind this build does not recognize and no local call exits `3` as drift, even when it
+  also holds web searches or MCP calls. It previously counted those and exited `0`.
 
 ## Changes in 0.3.2
 
