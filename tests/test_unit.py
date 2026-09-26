@@ -2805,6 +2805,310 @@ class TestQuotesAreCheckedAgainstTheTree:
             assert after["first_evidence"] == quote, err
 
 
+def _decorated(path: str, where: str, shape: str) -> str:
+    """A named function rather than a lambda: strict mode cannot infer a lambda's parameter."""
+    return f"`{path}`:{where}" if shape == "`path`" else shape.format(f"{path}:{where}")
+
+
+# A leading citation in every shape `claim_v1` takes off, with what joins it to the code.
+_leading_citations = st.tuples(
+    st.builds(
+        _decorated,
+        st.sampled_from(
+            ["src/a.py", "a.py", "lib/other.py", "docs/guide.md", "src\\win.py", "Makefile.am"]
+        ),
+        st.tuples(
+            st.integers(min_value=1, max_value=99999).map(str),
+            st.sampled_from(["", ":7"]),
+            st.sampled_from(["", "-40", "–40", "—40"]),
+        ).map("".join),
+        st.sampled_from(["{}", "**{}**", "({})", "`{}`", "<{}>", "[{}]", "`path`"]),
+    ),
+    st.sampled_from(["", " (verbatim)", " (Verbatim)"]),
+    st.sampled_from([": ", " : ", " -- ", "-- ", " — ", " – ", " - ", " "]),
+).map("".join)
+
+# Code a claim is made of. No colon, so it holds no citation of its own, and a letter first,
+# so it opens with neither a separator nor `(verbatim)`.
+_claimed_code = st.tuples(
+    st.sampled_from("abcxyz"), st.text(alphabet="abcxyz_019 =+.,()[]{}/\"'#", max_size=30)
+).map("".join)
+
+
+class TestTheCitationScanner:
+    """One reading of a quote's citations, which the claim is cut from."""
+
+    def test_a_bracketed_own_path_is_one_citation(self):
+        # `_REFERENCE` alone reads `id]/page.tsx:12` from offset 4. Kept beside the literal,
+        # the two readings would cut the quote in two different places.
+        found = findings.citations("app/[id]/page.tsx:12: foo(bar, baz)", "app/[id]/page.tsx")
+        assert found == [findings.Citation("app/[id]/page.tsx", "12", 0, 20, True)]
+
+    def test_a_trailing_bracketed_own_path_is_one_citation(self):
+        found = findings.citations("foo(bar, baz) -- app/[id]/page.tsx:12", "app/[id]/page.tsx")
+        assert found == [findings.Citation("app/[id]/page.tsx", "12", 17, 37, True)]
+
+    def test_a_path_ending_in_the_basename_is_another_file(self):
+        # `lib/a.py` ends in `a.py`, and a finding at `src/a.py` tries that basename. Read as
+        # its own citation, a quote of another file would found this one.
+        found = findings.citations("lib/a.py:5 -- total = compute(a, b)", "src/a.py")
+        assert found == [findings.Citation("lib/a.py", "5", 0, 10, False)]
+
+    def test_a_decorated_basename_is_the_findings_own_file(self):
+        found = findings.citations("(a.py:12) total = compute(a, b)", "src/a.py")
+        assert found == [findings.Citation("a.py", "12", 0, 9, True)]
+
+    def test_an_empty_own_path_names_no_citation(self):
+        # An empty literal would match every `:N` that follows whitespace.
+        for own in ("", "src/"):
+            found = findings.citations("retry(limit) :12 and (:40)", own)
+            assert not any(c.own for c in found), (own, found)
+
+
+class TestKeysV1:
+    """The claim and the two keys a poster writes into hidden markers. Frozen.
+
+    A marker outlives every release, so these vectors are never updated to follow the code:
+    a failure here means a definition moved, which orphans every comment already posted. A
+    different definition is a `v2` beside these, with a one-time re-post.
+    """
+
+    CODE = "total = compute(a, b)"
+    OWN = "src/a.py"
+
+    # (quote, the finding's file, the claim). Each claim is read off the grammar in
+    # `claim_v1`'s docstring, not off its output, or a vector would pin whatever the code does.
+    CLAIMS: tuple[tuple[str, str | None, str], ...] = (
+        # A leading citation, with each separator a lens writes.
+        ("src/a.py:12: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 — total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 – total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 - total = compute(a, b)", OWN, CODE),
+        # No separator: the rest is re-stripped before it is unwrapped.
+        ("src/a.py:12 `total = compute(a, b)`", OWN, CODE),
+        ("src/a.py:12 (verbatim): `total = compute(a, b)`", OWN, CODE),
+        ("src/a.py:12–14: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12—14: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12-14 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12:5 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 --     total   =  compute(a, b)", OWN, CODE),
+        ("src/a.py:12 -- `  total = compute(a, b)  `", OWN, CODE),
+        # A trailing citation: joined by a separator, or parenthesized.
+        ("`total = compute(a, b)` -- src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) (src/a.py:12)", OWN, CODE),
+        ("total = compute(a, b) -- (verbatim) src/a.py:12", OWN, CODE),
+        # Bare and unjoined, it may be what the line says.
+        ("total = compute(a, b) src/a.py:12", OWN, "total = compute(a, b) src/a.py:12"),
+        ("total = a- src/a.py:12", OWN, "total = a- src/a.py:12"),
+        # Prose after the citation: it is not at the edge, so nothing is taken off.
+        (
+            "`total = compute(a, b)` -- src/a.py:12, called twice",
+            OWN,
+            "`total = compute(a, b)` -- src/a.py:12, called twice",
+        ),
+        # The finding's own path, read as a literal where `_REFERENCE` would stop at `[`/`(`.
+        ("app/[id]/page.tsx:12: foo(bar, baz)", "app/[id]/page.tsx", "foo(bar, baz)"),
+        ("(app/(auth)/page.tsx:12) -- foo(bar, baz)", "app/(auth)/page.tsx", "foo(bar, baz)"),
+        ("foo(bar, baz) -- app/[id]/page.tsx:12", "app/[id]/page.tsx", "foo(bar, baz)"),
+        # Its basename.
+        ("a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("(a.py:12) total = compute(a, b)", OWN, CODE),
+        # Another file, stripped because its path looks like one (step 2's path rule).
+        ("**src/f.py:2** -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("`src/f.py`:2 -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("lib/a.py:5 -- total = compute(a, b)", OWN, CODE),
+        ("src\\a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("f.py:2 -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("bin/deploy:3 -- set -euo pipefail", OWN, "set -euo pipefail"),
+        ("C:\\bin\\Makefile:42 -- $(CC) -o app main.c", OWN, "$(CC) -o app main.c"),
+        # Citation-shaped, not a path: what the line says.
+        ("timeout:30 -- seconds", OWN, "timeout:30 -- seconds"),
+        ("`timeout`:30 -- seconds", OWN, "`timeout`:30 -- seconds"),
+        (
+            "https://example.com:443 - the port the proxy listens on",
+            OWN,
+            "https://example.com:443 - the port the proxy listens on",
+        ),
+        (":12 -- retry(limit)", "", ":12 -- retry(limit)"),
+        # Only a citation: no code is claimed.
+        ("a.py:12", OWN, ""),
+        ("(src/a.py:12)", OWN, ""),
+        # A citation mid-quote is what the line says.
+        (
+            "retry(3) # see src/a.py:12 for the limit",
+            OWN,
+            "retry(3) # see src/a.py:12 for the limit",
+        ),
+        # Never split, never elided.
+        ("src/a.py:3 -- a = 1 / b = 2", OWN, "a = 1 / b = 2"),
+        ("src/a.py:3 -- first() ... last()", OWN, "first() ... last()"),
+        # A literal backslash-n stays; a real newline is whitespace.
+        ('src/a.py:3 -- log("one\\ntwo")', OWN, 'log("one\\ntwo")'),
+        ("src/a.py:3 -- a = 1\n    b = 2", OWN, "a = 1 b = 2"),
+        # A separator or `(verbatim)` not beside a removed citation stays.
+        ("-- SELECT id FROM users", OWN, "-- SELECT id FROM users"),
+        (
+            "src/a.py:12 -- `total = compute(a, b)` (verbatim)",
+            OWN,
+            "`total = compute(a, b)` (verbatim)",
+        ),
+        ("src/a.py:12 -1 if index is None else index", OWN, "-1 if index is None else index"),
+        ("config.yml:42-column-limit", "config.yml", "-column-limit"),
+        # Backticks are taken off only when they wrap the whole rest.
+        (
+            "src/a.py:12 -- total = compute(a, b)  (the `compute` call)",
+            OWN,
+            "total = compute(a, b) (the `compute` call)",
+        ),
+        # The shapes the poster's own tests carry.
+        (
+            "tools/interval_stats.py:162 (verbatim): `merged[-1] = (merged[-1][0], end)`",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+        (
+            "tools/interval_stats.py:15–16: merged[-1] = (merged[-1][0], end)",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+        (
+            "`merged[-1] = (merged[-1][0], end)` -- tools/interval_stats.py:15",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+    )
+
+    # sha256("persona-review/quote-key/1\0" + claim), each reproducible outside Python with
+    # `printf 'persona-review/quote-key/1\0<claim>' | shasum -a 256`.
+    QUOTE_KEYS: dict[str, str] = {
+        CODE: "f6d53bad0a55cc1481554a6bbc8409829d9663465c7a3069569a784f951ad97c",
+        "foo(bar, baz)": "a1eac5fd51a84970a6897ba2f848f1f07001d0c4ec7b8eb97a3ac979df0d4147",
+        "return bill(account)": "606eafd0681fda2ab232ea5812d0d13a2c8ab0a015af3899622c3718330aaa1e",
+        "merged[-1] = (merged[-1][0], end)": (
+            "2843e8f84c816e9b966ee53801fe30ce07a5c5c24f0f7a4b2d20768d0af46fda"
+        ),
+        "total = compute(a, b) src/a.py:12": (
+            "cf559ec1534669c7e302ee9faed89278afec47fa45d701962ecafd10edb447a5"
+        ),
+        "total = a- src/a.py:12": (
+            "7347abb80e57b21f2e1c2ea794aff5929ea9c7c04a10bc1a571a1a836432125d"
+        ),
+        "`total = compute(a, b)` -- src/a.py:12, called twice": (
+            "e5cfafacc298867b95c3c3217fbd05201af58aa0ed8eb64f263c43ec1d49c7f0"
+        ),
+        "timeout:30 -- seconds": "569f99f20b19f5f460c0d938dbcb47da31bc75dc418e7fa76f35317ee8916252",
+        "`timeout`:30 -- seconds": (
+            "ac1c5725838a7d1bf30c4e9bc1dd1921d892a653b3797f6a84526cac500346d6"
+        ),
+        "https://example.com:443 - the port the proxy listens on": (
+            "19b2efec6d600516a24c6d00974c66aa97f5d021ee50b88be20ebad7b3b01c38"
+        ),
+        ":12 -- retry(limit)": "ce87b1e8d3a814e6ae270c81fd60823fe7cd6744f29a8ee673d1449e0bb23c03",
+        "retry(3) # see src/a.py:12 for the limit": (
+            "078393f24ca9e0b88c89527719aa02d3a8b2c76dfeb0580dda2147deafe1e2ba"
+        ),
+        "a = 1 / b = 2": "c45fbc9af3195b5caccba8fc12914bf79201155a8bac8b8ac59039cc52f68902",
+        "first() ... last()": "efe561ceaff7295351e0c532c42072ed6505880928a46ec38b1baba9de8a75c2",
+        'log("one\\ntwo")': "80b17a3b6e0d4e79905127a98b633e57754e45ad1cda77540d9db562ba24c630",
+        "a = 1 b = 2": "5e0b3835e0d80a4fd2b78939e7144a12db1d693d5c9e42f7869064945089534d",
+        "-- SELECT id FROM users": (
+            "d3a523425cdc9275fbfd8f1e0846bdb10836ba3b96fb6aad64b7a4d33b3b8d0b"
+        ),
+        "`total = compute(a, b)` (verbatim)": (
+            "db26194a59084ae1b2aa57d164cddfc9c0bd4d68183ac6402b0ed94805caf864"
+        ),
+        "-1 if index is None else index": (
+            "e91ec774b0b88bfdff4be7946efd62a84b4aa09c675cec86a8b885ea2c7f233b"
+        ),
+        "-column-limit": "ab755a113e1b4169b84ab122624213501e4ec7401df4d2f25465cf0f1cc7ac0d",
+        "set -euo pipefail": "d32999f83f5146ad89b77f328f7959bfd5eba509f1c0634bee75549c83c77574",
+        "$(CC) -o app main.c": "da72122c02dfcb681a06d5ffdce9875947f84f1308e2f1b3fb6db136ec686bff",
+        "total = compute(a, b) (the `compute` call)": (
+            "15253257dd06b90ce021219c42fff8a2922a4a53b22b6591ce8fd77ebd0b187d"
+        ),
+    }
+
+    @pytest.mark.parametrize(("quote", "own", "claim"), CLAIMS)
+    def test_the_claim(self, quote: str, own: str | None, claim: str):
+        assert findings.claim_v1(quote, own) == claim
+
+    @pytest.mark.parametrize(("quote", "own", "claim"), CLAIMS)
+    def test_the_quote_key(self, quote: str, own: str | None, claim: str):
+        # None for an empty claim: a key shared by every citation-only quote would let one
+        # finding adopt another's thread.
+        assert findings.quote_key_v1(findings.claim_v1(quote, own)) == self.QUOTE_KEYS.get(claim)
+
+    def test_every_vector_is_pinned(self):
+        claims = {claim for _, _, claim in self.CLAIMS}
+        assert claims - {""} == set(self.QUOTE_KEYS)
+        assert findings.quote_key_v1("") is None
+
+    @pytest.mark.parametrize(("claim", "key"), sorted(QUOTE_KEYS.items()))
+    def test_the_quote_key_is_the_documented_hash(self, claim: str, key: str):
+        spelled = hashlib.sha256(f"persona-review/quote-key/1\0{claim}".encode()).hexdigest()
+        assert spelled == key
+
+    def test_a_claim_holding_a_lone_surrogate_still_has_a_key(self):
+        # A lone surrogate is valid JSON (`"\ud800"`), and the key must not raise on it.
+        claim = "x = '\ud800'"
+        assert json.loads("\"x = '\\ud800'\"") == claim
+        assert findings.quote_key_v1(claim) == (
+            "38995cc362aa6d34b0e67804b18d3edb31b1fec8207b6770e3c1c394a85098af"
+        )
+
+    # sha256("persona-review/evidence-key/1\0" + path + "\0" + the span's non-blank lines,
+    # each whitespace-collapsed, joined by "\n"), reproducible the same way.
+    EVIDENCE_ONE_LINE = "b945015ae72d102ebf4ffc5c5cba50ec5e4abdf965bb3dee64925369f425b464"
+    EVIDENCE_TWO_LINES = "0c5b6db6414216e304f8f52adf0eaf5447614658bc961e90650e88a2503a399a"
+
+    def test_the_evidence_key(self):
+        assert (
+            findings.evidence_key_v1("src/a.py", ["    total = compute(a, b)"])
+            == self.EVIDENCE_ONE_LINE
+        )
+        assert (
+            findings.evidence_key_v1("src/a.py", ["  def   f():", "    return 1"])
+            == self.EVIDENCE_TWO_LINES
+        )
+
+    def test_a_blank_line_inside_the_span_does_not_move_the_evidence_key(self):
+        spans = (["def f():", "", "    return 1"], ["def f():", "   \t", "    return 1"])
+        for lines in spans:
+            assert findings.evidence_key_v1("src/a.py", lines) == self.EVIDENCE_TWO_LINES
+
+    def test_the_evidence_key_carries_the_path(self):
+        assert findings.evidence_key_v1("lib/a.py", ["    total = compute(a, b)"]) == (
+            "cc65c9d107387d4392abbac4bd1a0bf61e6c62846315906df5118c1da8b559f8"
+        )
+
+    @PROPERTY
+    @given(
+        cite=st.one_of(st.just(""), _leading_citations),
+        code=_claimed_code,
+        ticks=st.sampled_from(["{}", "`{}`", "` {} `"]),
+    )
+    def test_a_leading_citation_or_backticks_never_move_the_quote_key(
+        self, cite: str, code: str, ticks: str
+    ):
+        quote = cite + ticks.format(code)
+        assert findings.quote_key_v1(findings.claim_v1(quote, self.OWN)) == findings.quote_key_v1(
+            findings.claim_v1(code, self.OWN)
+        ), quote
+
+    @PROPERTY
+    @given(
+        cite=st.one_of(st.just(""), _leading_citations),
+        code=_claimed_code,
+        ticks=st.sampled_from(["{}", "`{}`"]),
+    )
+    def test_the_claim_is_its_own_claim(self, cite: str, code: str, ticks: str):
+        # Over the shapes lenses write. Not over any text: a quote opening with two
+        # citations loses one per pass, because only the edge citation is the lens's.
+        claim = findings.claim_v1(cite + ticks.format(code), self.OWN)
+        assert findings.claim_v1(claim, self.OWN) == claim
+
+
 # ---------------------------------------------------------------------------------------
 # VALIDATOR MODE. A review asks what a model finds; a validation asks it to judge findings
 # somebody else already wrote, and the answer is only usable if it addresses each of them

@@ -731,6 +731,193 @@ MUTATIONS: list[Mutation] = [
         r"^(_REFERENCE = re\.compile\(.*)\(\?:\[-–—\]\\d\+\)\?",
         r"\1",
     ),
+    # The citation scanner and the frozen claim and keys. A moved claim or key orphans every
+    # comment a poster already wrote, so each rule of the grammar is reverted here and a
+    # golden vector must die.
+    Mutation(
+        # `_REFERENCE` first reads `app/[id]/page.tsx:12` from offset 4 as `id]/page.tsx`,
+        # and the claim keeps the line number the key exists to leave out.
+        "the generic citation pattern is read before the finding's own path",
+        "persona_review/findings.py",
+        r"    patterns\.append\(\(_REFERENCE, False\)\)",
+        "    patterns.insert(0, (_REFERENCE, False))",
+    ),
+    Mutation(
+        # Two readings of one citation cut the quote in two different places.
+        "a citation overlapping the finding's own path is kept beside it",
+        "persona_review/findings.py",
+        r"            if any\(start < c\.end and c\.start < end for c in found\):",
+        "            if False:",
+    ),
+    Mutation(
+        # `lib/a.py:5` would read as a citation of `a.py`, the basename a finding at
+        # `src/a.py` tries, and a quote of another file would be claimed as this one's.
+        "the finding's own path is read inside a longer path",
+        "persona_review/findings.py",
+        r"\(\?<!\[\^\\s\(\\\[\*<`\]\)",
+        "",
+    ),
+    Mutation(
+        # An empty name compiles to a pattern matching every `:N` after whitespace.
+        "an empty own path is read as a citation",
+        "persona_review/findings.py",
+        r"    patterns = \[\(_literal\(name\), True\) "
+        r"for name in dict\.fromkeys\(names\) if name\]",
+        "    patterns = [(_literal(name), True) for name in dict.fromkeys(names)]",
+    ),
+    Mutation(
+        "the finding's basename is not read as its own path",
+        "persona_review/findings.py",
+        r'    names = \(own, own\.rsplit\("/", 1\)\[-1\]\) if own is not None else \(\)',
+        "    names = (own,) if own is not None else ()",
+    ),
+    Mutation(
+        # The own path's literal has to wear what `_REFERENCE` does, or `(a.py:12)` leaves
+        # its `)` and `a.py:12:5` its column in the claim.
+        "the own path's literal loses the column, the range and the closing decoration",
+        "persona_review/findings.py",
+        r'^        r"`\?:\(\\d\+\).*$',
+        r'        r":(\\d+)\\b"',
+    ),
+    Mutation(
+        # `timeout:30 -- seconds` is what the line says, not a citation of a file `timeout`.
+        "a citation-shaped token that is not a path is stripped as one",
+        "persona_review/findings.py",
+        r"    cites = \[c for c in citations\(text, own\) if c\.own or _path_like\(c\.path\)\]",
+        "    cites = citations(text, own)",
+    ),
+    Mutation(
+        "a URL's port is read as a line number",
+        "persona_review/findings.py",
+        r'    if "://" in text:\n        return False',
+        "    if False:\n        return False",
+    ),
+    Mutation(
+        "a path is recognized only by a slash or a backslash",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "/" in text or "\\\\" in text',
+    ),
+    Mutation(
+        "a path is recognized only by a backslash or an extension",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "\\\\" in text or bool(_EXTENSION.search(text))',
+    ),
+    Mutation(
+        "a Windows path without an extension is not a path",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "/" in text or bool(_EXTENSION.search(text))',
+    ),
+    Mutation(
+        # A citation mid-quote is what the line says: a log line, a comment, a fixture.
+        "a citation mid-quote is stripped as a leading one",
+        "persona_review/findings.py",
+        r"    if cites and cites\[0\]\.start == 0:",
+        "    if cites:",
+    ),
+    Mutation(
+        "a citation followed by prose is stripped as a trailing one",
+        "persona_review/findings.py",
+        r"    elif cites and cites\[-1\]\.end == len\(text\):",
+        "    elif cites:",
+    ),
+    Mutation(
+        # `# see docs/setup.md:40` ends in a citation that is part of the line.
+        "a bare trailing citation is stripped with no separator joining it",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        "    return rest",
+    ),
+    Mutation(
+        "a parenthesized trailing citation is kept in the claim",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        "    return text",
+    ),
+    Mutation(
+        # Taken off anywhere, `(verbatim)` after the code is dropped from a claim the lens
+        # wrote with it.
+        "(verbatim) is taken off wherever it appears",
+        "persona_review/findings.py",
+        r"    if rest\[: len\(_VERBATIM\)\]\.lower\(\) == _VERBATIM:\n"
+        r"        rest = rest\[len\(_VERBATIM\) :\]\.strip\(\)",
+        '    rest = rest.replace(_VERBATIM, "").strip()',
+    ),
+    Mutation(
+        "a (verbatim) before a trailing citation is kept",
+        "persona_review/findings.py",
+        r"    if rest\[-len\(_VERBATIM\) :\]\.lower\(\) == _VERBATIM:",
+        "    if False:",
+    ),
+    Mutation(
+        # `-- SELECT id FROM users` is a line of SQL, not a separator after a citation.
+        "a separator is taken off a quote no citation was taken off",
+        "persona_review/findings.py",
+        r"^    rest = text$",
+        '    rest = _LEAD_SEPARATOR.sub("", text).strip()',
+    ),
+    Mutation(
+        "a backtick span anywhere in the claim replaces the claim",
+        "persona_review/findings.py",
+        r"    wrapped = _BACKTICKED\.fullmatch\(rest\)",
+        "    wrapped = _BACKTICKED.search(rest)",
+    ),
+    Mutation(
+        "the text after a leading citation is not stripped before its separator is read",
+        "persona_review/findings.py",
+        r"^    rest = rest\.strip\(\)$",
+        "    pass",
+    ),
+    Mutation(
+        # `f.py:12 -- `code`` leaves a space before the backticks, and the unwrap misses.
+        "the claim is not re-stripped before it is unwrapped",
+        "persona_review/findings.py",
+        r'    return _LEAD_SEPARATOR\.sub\("", rest, count=1\)\.strip\(\)',
+        '    return _LEAD_SEPARATOR.sub("", rest, count=1)',
+    ),
+    Mutation(
+        "the text before a trailing citation is not re-stripped before it is unwrapped",
+        "persona_review/findings.py",
+        r"        return rest\[: joined\.start\(\)\]\.strip\(\)",
+        "        return rest[: joined.start()]",
+    ),
+    Mutation(
+        # Every citation-only quote would share one key, and a thread withdrawn for one
+        # finding would be adopted by an unrelated one.
+        "a citation-only quote gets a key",
+        "persona_review/findings.py",
+        r"    if not claim:\n        return None",
+        "    if False:\n        return None",
+    ),
+    Mutation(
+        "a blank line inside the span moves the evidence key",
+        "persona_review/findings.py",
+        r'    text = "\\n"\.join\(line for line in map\(_normalized, lines\) if line\)',
+        r'    text = "\\n".join(map(_normalized, lines))',
+    ),
+    Mutation(
+        "a hyphen fused to the code is taken off as a separator",
+        "persona_review/findings.py",
+        r"-\(\?=\\s\)",
+        "-",
+    ),
+    Mutation(
+        "a hyphen fused to the code before a trailing citation is taken off as a separator",
+        "persona_review/findings.py",
+        r"\(\?<=\\s\)-",
+        "-",
+    ),
+    Mutation(
+        # JSON decodes `"\ud800"` to a lone surrogate, which strict UTF-8 refuses to encode.
+        "a claim holding a lone surrogate raises instead of getting a key",
+        "persona_review/findings.py",
+        r'\.encode\("utf-8", "surrogatepass"\)',
+        '.encode("utf-8")',
+    ),
     Mutation(
         # A newline inside the backticks decorates the quote rather than belonging to it.
         # Counted as a line, it widens the window past the line the citation names, and the

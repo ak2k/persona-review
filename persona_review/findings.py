@@ -71,11 +71,13 @@ an ordinary listing at exit 0, one command later. Every output mode is refused, 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
 import secrets
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -729,6 +731,147 @@ def verify_quotes(projected: JSONObject, repo: Path) -> int:
             file=sys.stderr,
         )
     return dropped
+
+
+# ---------------------------------------------------------------------------------------
+# CITATIONS AND KEYS. What a quote claims the file holds, and the two keys a poster writes
+# into hidden markers on the comments it posts. A marker outlives any release, so the `_v1`
+# functions are never edited: a different definition is a `v2` beside them, and a one-time
+# re-post of every open comment. That holds for what they call too, `_REFERENCE` included:
+# it is shared with --verify-quotes, so a change made for that mode moves these keys.
+
+
+@dataclass(frozen=True)
+class Citation:
+    """One citation in a quote, and whether it names the finding's own file."""
+
+    path: str
+    line: str
+    start: int
+    end: int
+    own: bool
+
+
+def _literal(path: str) -> re.Pattern[str]:
+    """`path` cited verbatim, wearing `_REFERENCE`'s decoration, `:col` and range.
+
+    `_REFERENCE`'s path class stops at `(` and `[`, so without this `app/[id]/page.tsx:12`
+    reads as a citation of `id]/page.tsx`. The lookbehind admits the path only at the start
+    of the text, after whitespace or after decoration: `lib/a.py:5` is another file, not a
+    citation of the `a.py` a finding at `src/a.py` would try.
+    """
+    return re.compile(
+        rf"[(\[*<`]*(?<![^\s(\[*<`])({re.escape(path)})"
+        r"`?:(\d+)(?::\d+)?(?:[-–—]\d+)?\b[*)\]>`]*"
+    )
+
+
+def citations(quote: str, own: str | None) -> list[Citation]:
+    """Every citation in the quote, in order, no two overlapping.
+
+    The finding's own path, then its basename, are read before `_REFERENCE`, and a
+    `_REFERENCE` match overlapping one is dropped: two readings of one citation would cut
+    the quote in two different places.
+    """
+    names = (own, own.rsplit("/", 1)[-1]) if own is not None else ()
+    patterns = [(_literal(name), True) for name in dict.fromkeys(names) if name]
+    patterns.append((_REFERENCE, False))
+    found: list[Citation] = []
+    for pattern, is_own in patterns:
+        for match in pattern.finditer(quote):
+            start, end = match.span()
+            if any(start < c.end and c.start < end for c in found):
+                continue
+            found.append(Citation(match.group(1), match.group(2), start, end, is_own))
+    return sorted(found, key=lambda c: c.start)
+
+
+# The left half of a citation has to look like a path before it is stripped as one:
+# `timeout:30 -- seconds` and `https://host:443 - the port` are what the line says.
+_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9_+-]{0,9}$")
+
+
+def _path_like(text: str) -> bool:
+    if "://" in text:
+        return False
+    return "/" in text or "\\" in text or bool(_EXTENSION.search(text))
+
+
+# What joins a citation to the code it cites. A bare hyphen counts only with whitespace on
+# the side away from the citation, so a negative number or `-flag` keeps its hyphen.
+_LEAD_SEPARATOR = re.compile(r"^(?:--|:|—|–|-(?=\s))")
+_TRAIL_SEPARATOR = re.compile(r"(?:--|:|—|–|(?<=\s)-)$")
+_VERBATIM = "(verbatim)"
+
+
+def _after_lead(rest: str) -> str:
+    """What follows a removed leading citation, less one `(verbatim)` and one separator."""
+    rest = rest.strip()
+    if rest[: len(_VERBATIM)].lower() == _VERBATIM:
+        rest = rest[len(_VERBATIM) :].strip()
+    return _LEAD_SEPARATOR.sub("", rest, count=1).strip()
+
+
+def _before_trail(text: str, cite: Citation) -> str:
+    """What precedes a trailing citation once it is removed, or `text` when it stays.
+
+    A bare citation at the end is the lens's annotation only when a separator joins it to
+    the code; without one it may be what the line itself says (`# see docs/setup.md:40`).
+    A parenthesized one stands apart either way.
+    """
+    rest = text[: cite.start].strip()
+    if rest[-len(_VERBATIM) :].lower() == _VERBATIM:
+        rest = rest[: -len(_VERBATIM)].strip()
+    joined = _TRAIL_SEPARATOR.search(rest)
+    if joined is not None:
+        return rest[: joined.start()].strip()
+    return rest if text[cite.start] == "(" and text[cite.end - 1] == ")" else text
+
+
+def claim_v1(quote: str, own: str | None) -> str:
+    """The code a quote claims the file holds, as `quote_key` hashes it. Frozen.
+
+    Takes off only what a lens writes AROUND the code: one citation at either edge, the
+    `(verbatim)` and the separator beside it, and backticks when they wrap the whole rest.
+    A citation elsewhere, ` / ` or `...` between snippets, and trailing prose are all left
+    in, because each may be what the line says and a claim must never be edited into text
+    the lens did not write. `""` when the quote is only a citation: it claims no code.
+    """
+    text = quote.strip()
+    cites = [c for c in citations(text, own) if c.own or _path_like(c.path)]
+    rest = text
+    if cites and cites[0].start == 0:
+        rest = _after_lead(text[cites[0].end :])
+    elif cites and cites[-1].end == len(text):
+        rest = _before_trail(text, cites[-1])
+    wrapped = _BACKTICKED.fullmatch(rest)
+    return _normalized(wrapped.group(1) if wrapped else rest)
+
+
+def _key(*parts: str) -> str:
+    # surrogatepass: JSON can decode to a lone surrogate, and a key must exist for every
+    # string a finding can carry rather than raise on one.
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def quote_key_v1(claim: str) -> str | None:
+    """The finding's identity across runs, from its claim. Frozen.
+
+    None for an empty claim: every citation-only quote would otherwise share one key, and
+    a thread withdrawn for one finding would be adopted by an unrelated one.
+    """
+    if not claim:
+        return None
+    return _key("persona-review/quote-key/1", claim)
+
+
+def evidence_key_v1(path: str, lines: Sequence[str]) -> str:
+    """The file's own text on the lines a quote was found on, not the lens's wording. Frozen.
+
+    Blank lines are skipped, so a blank line inserted inside the span does not move it.
+    """
+    text = "\n".join(line for line in map(_normalized, lines) if line)
+    return _key("persona-review/evidence-key/1", path, text)
 
 
 def fence(body: str) -> str:
