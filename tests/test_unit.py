@@ -3399,8 +3399,10 @@ class TestAnchors:
         entry = self._locate(quote, line=8)
         assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
 
-    def test_a_doubly_escaped_quote_matches_as_the_lines_it_escaped(self):
-        quote = "src/f.py:3 -- def charge(account):\\n\\ttotal = compute_total(account)"
+    @pytest.mark.parametrize("end", ["", "\n"])
+    def test_a_doubly_escaped_quote_matches_as_the_lines_it_escaped(self, end: str):
+        # A newline ending the quote is not one inside it.
+        quote = "src/f.py:3 -- def charge(account):\\n\\ttotal = compute_total(account)" + end
         entry = self._locate(quote, line=3)
         assert (entry["state"], entry["start"], entry["end"]) == ("verified", 3, 4)
         # Matching only: the key is the claim as written.
@@ -3514,12 +3516,13 @@ class TestAnchors:
         assert entry["quote_key"] == findings.quote_key_v1("return bill(account, total)")
 
     def test_a_quote_under_the_floor_is_unverifiable(self):
-        entry = self._locate("src/f.py:5 -- bill(acct)", line=5)
+        # It is on line 5, and short enough to be on many lines of any tree.
+        entry = self._locate("src/f.py:5 -- return bill", line=5)
         assert (entry["state"], entry["reason"]) == (
             "unverifiable",
-            "too short (10 chars, floor 12)",
+            "too short (11 chars, floor 12)",
         )
-        assert entry["quote_key"] == findings.quote_key_v1("bill(acct)")
+        assert entry["quote_key"] == findings.quote_key_v1("return bill")
 
     @pytest.mark.parametrize(
         ("quote", "reason"),
@@ -3603,6 +3606,19 @@ class TestAnchors:
         doc = findings.anchors(str(art), raw, self.tree)
         assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
         assert len(cast(list[Any], doc["findings"])) == 1
+
+    def test_a_tree_reached_through_a_link_still_holds_its_files(self):
+        # Containment compares resolved paths, so the root has to be resolved too.
+        link = self.dir / "link"
+        link.symlink_to(self.tree)
+        items = [finding(file="src/f.py", line=5, first_evidence="return bill(account, total)")]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        doc = findings.anchors(str(self._artifact(raw, None)), raw, link)
+        assert doc["tree"] == str(self.tree.resolve())
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        assert (rows[0]["state"], rows[0]["path"]) == ("verified", "src/f.py")
+        entry = findings.locate(items[0], link)
+        assert (entry["state"], entry["path"]) == ("verified", "src/f.py")
 
     @pytest.mark.parametrize(
         ("head", "expected"),
