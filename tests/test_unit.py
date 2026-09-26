@@ -2267,8 +2267,8 @@ class TestTheMergeTierProjection:
             # A -C nobody asked to use is not discarded: the output would be byte-identical
             # to an unverified --return at exit 0, and a machine caller has no channel on
             # which to notice it got no verification.
-            ((ARTIFACT, "--return", "-C", "."), "-C only applies to --verify-quotes"),
-            ((ARTIFACT, "-C", "."), "-C only applies to --verify-quotes"),
+            ((ARTIFACT, "--return", "-C", "."), "-C only applies to --verify-quotes or --anchors"),
+            ((ARTIFACT, "-C", "."), "-C only applies to --verify-quotes or --anchors"),
         ],
     )
     def test_a_mode_that_does_not_exist_is_a_usage_error(

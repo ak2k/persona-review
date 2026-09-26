@@ -9,6 +9,7 @@ artifact for a caller — usually an agent — so nobody pays for detail they wi
     ce-persona-findings <artifact> --show all   # every finding, in full, in one fence
     ce-persona-findings <artifact> --json       # the raw object, unchanged
     ce-persona-findings <artifact> --return     # the merge-tier compact return object
+    ce-persona-findings <artifact> --anchors -C <dir>   # where each quote is, for a poster
 
 TWO ARTIFACT SHAPES
 -------------------
@@ -46,6 +47,11 @@ to disk. Its one judgment is the `first_evidence` fallback tier 1 already applie
 display -- the plugin's own contract makes `evidence[0]` that same quote, and the helper
 demotes a finding whose `first_evidence` is missing.
 
+`--anchors -C <dir>` is the other machine tier, for a poster of review comments: where each
+finding's quote is in the tree under `<dir>` -- on the finding's line, elsewhere in its file,
+or nowhere -- and the two keys a poster marks its comments with, so the next run on the same
+pull request finds the thread it already opened rather than opening a second one.
+
 The failure mode this guards against is over-tiering: a caller that sees only titles will
 under-weight a real defect or fix it wrongly from the label. Carrying evidence and
 confidence in tier 1 is the hedge.
@@ -55,8 +61,8 @@ EVERYTHING RENDERED HERE IS MODEL OUTPUT
 A finding's title, evidence and suggested fix were written by a model that had a repository
 under review as its input, and they are being handed to another agent as ITS input. Text
 that reads like an instruction is therefore fenced with a per-run nonce, so the consuming
-agent can tell the data it was asked to read from the instructions it was given. `--json`
-and `--return` are both left unfenced: a programmatic caller parses them rather than
+agent can tell the data it was asked to read from the instructions it was given. `--json`,
+`--return` and `--anchors` are left unfenced: a programmatic caller parses them rather than
 reading them.
 
 A REFUSAL HAS TO SURVIVE BEING HANDED ON
@@ -64,8 +70,9 @@ A REFUSAL HAS TO SURVIVE BEING HANDED ON
 The review commands refuse a run that made no local tool calls, keep the artifact as
 evidence, and exit 6. An artifact on disk is exactly what this command renders — so without
 the check in `main`, this package laundered its own refusal: the same findings came back as
-an ordinary listing at exit 0, one command later. Every output mode is refused, `--json` and
-`--return` included; a programmatic caller is the one most likely to act on it unread.
+an ordinary listing at exit 0, one command later. Every output mode is refused, `--json`,
+`--return` and `--anchors` included; a programmatic caller is the one most likely to act on it
+unread.
 """
 
 from __future__ import annotations
@@ -93,7 +100,7 @@ DEFAULT_SEVERITIES = ("P0", "P1")
 # None that leaves behind turns a missing-argument message into an AttributeError.
 USAGE = (
     "usage: ce-persona-findings <artifact> [--list] [--all] [--show N|all] [--json]"
-    " [--return [--verify-quotes -C <dir>]]\n"
+    " [--return [--verify-quotes -C <dir>]] [--anchors -C <dir>]\n"
     "       <artifact> is a findings artifact from a review, or the verdicts artifact"
     " a validation wrote"
 )
@@ -146,6 +153,14 @@ Project a findings artifact at the detail level you need.
                 citation must resolve, and nothing may sit outside those segments.
                 At least one citation must name the finding's own file.
                 A quote is never rewritten, and the artifact is never modified
+  --anchors -C <dir>
+                one JSON document, unfenced, for a poster of review comments: for
+                every finding, where its quote is in the tree under <dir> --
+                verified on the finding's line, relocated to a line the quote
+                cites or to its one occurrence, ambiguous, not_found, unverifiable,
+                or no_evidence -- with the lines it spans and the quote_key and
+                evidence_key a poster marks its comments with. One line on stderr
+                counts the findings in each state
 
 A VERDICTS artifact lists one row per verdict in # order -- `#N validated -- <reason>`
 or `#N REJECTED -- <reason>`, where N is the number of the finding it judges. --show N
@@ -153,25 +168,30 @@ renders one of those rows, --show all renders the same listing as the default (a
 for symmetry: a verdict row is already its full detail), --all changes nothing (a
 verdict has no severity to hide behind), --json is the raw object, and --return is a
 usage error: it projects findings for the merge helper, and a verdict is not a finding.
+--anchors is a usage error for the same reason: a verdict has no quote to locate.
 
 N in `--show N` is the number shown as #N in the listing, in either tier.
 Among the listing modes --show (N or all) wins, then --list/--all; --json outranks both.
---return is exclusive with --json and --show (giving both is a usage error).
+--return is exclusive with --json and --show (giving both is a usage error), and
+--anchors with --json, --show and --return.
 An artifact with no entries prints `no findings` / `no verdicts`, unfenced, under
 --show all as under --all.
 
 Rendered output is wrapped in BEGIN/END UNTRUSTED MODEL OUTPUT with a per-run
 nonce: it is text a model wrote about a repository it read, and it is being
-handed to another agent as input. --json and --return are deliberately unfenced.
+handed to another agent as input. --json, --return and --anchors are deliberately
+unfenced.
 
 exit status
   {EXIT_OK}  rendered
   {EXIT_DATA}  the file is unreadable, is neither a findings nor a verdicts artifact, is
      both at once, or could not be projected into a usable return
   {EXIT_USAGE}  usage error: unknown flag, missing artifact path, no such finding or verdict
-     number, --return together with --json or --show, --return or --verify-quotes on a
-     verdicts artifact, --verify-quotes without --return or without -C, -C without
-     --verify-quotes, or a -C that is missing, is not a directory, or names an unknown user
+     number, --return together with --json or --show, --anchors together with --json,
+     --show or --return, --return, --verify-quotes or --anchors on a verdicts artifact,
+     --verify-quotes without --return or without -C, --anchors without -C, -C without
+     --verify-quotes or --anchors, or a -C that is missing, is not a directory, or names
+     an unknown user
   {EXIT_VACUOUS}  the artifact's provenance records a run that made no local tool calls;
      nothing it reported is founded, so it is refused rather than rendered"""
 
@@ -1193,6 +1213,19 @@ def anchors(artifact: str, raw: bytes, repo: Path) -> JSONObject:
     }
 
 
+# Every state `locate` reports, in the order the `--anchors` summary counts them.
+_STATES = ("verified", "relocated", "ambiguous", "not_found", "unverifiable", "no_evidence")
+
+
+def _anchors_summary(document: JSONObject) -> str:
+    """The one stderr line `--anchors` ends with: how many findings reached each state."""
+    entries = document.get("findings")
+    rows = entries if isinstance(entries, list) else []
+    states = [row.get("state") for row in rows if isinstance(row, dict)]
+    counts = ", ".join(f"{states.count(state)} {state.replace('_', ' ')}" for state in _STATES)
+    return f"ce-persona-findings: anchors: {len(rows)} findings ({counts})"
+
+
 def fence(body: str) -> str:
     """Mark model-written text as data, not instructions.
 
@@ -1244,7 +1277,13 @@ def _expand_repo(spec: str) -> Path | None:
 
 
 def _render_verdicts(
-    path: str, artifact: JSONObject, *, show: int | str | None, as_json: bool, as_return: bool
+    path: str,
+    artifact: JSONObject,
+    *,
+    show: int | str | None,
+    as_json: bool,
+    as_return: bool,
+    as_anchors: bool,
 ) -> int:
     """A verdicts artifact, at the only two detail levels it has.
 
@@ -1255,6 +1294,11 @@ def _render_verdicts(
         return _usage_error(
             f"--return projects a findings artifact into the merge helper's shape, and"
             f" {path} is a verdicts artifact -- the helper has no verdict to merge"
+        )
+    if as_anchors:
+        return _usage_error(
+            f"--anchors locates the quote of each finding, and {path} is a verdicts artifact"
+            " -- a verdict has no quote to locate"
         )
     if as_json:
         json.dump(artifact, sys.stdout, indent=1)
@@ -1281,6 +1325,30 @@ def _usage_error(message: str) -> int:
     return EXIT_USAGE
 
 
+def _emit(document: JSONObject) -> None:
+    """One JSON document on stdout, for a reader that may stop before the end of it.
+
+    Flushed here and a broken pipe swallowed, the pattern `validate.py` uses on its own
+    summary line and for the same reason: a machine mode is consumed through a pipe (`jq -s .`
+    for `--return`), and a reader that stops early would leave the interpreter's shutdown
+    flush to raise where no handler can catch it and exit 120 -- failure reported for a
+    document that was completed.
+    """
+    try:
+        json.dump(document, sys.stdout, indent=1)
+        print()
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Point the shutdown flush at /dev/null, closing the fd we opened to do it: dup2
+        # duplicates, it does not consume.
+        with contextlib.suppress(OSError):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, sys.stdout.fileno())
+            finally:
+                os.close(devnull)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     path: str | None = None
@@ -1288,6 +1356,7 @@ def main(argv: list[str] | None = None) -> int:
     want_all = False
     as_json = False
     as_return = False
+    as_anchors = False
     verify = False
     repo_spec: str | None = None
     i = 0
@@ -1321,6 +1390,8 @@ def main(argv: list[str] | None = None) -> int:
             as_return, i = True, i + 1
         elif arg == "--verify-quotes":
             verify, i = True, i + 1
+        elif arg == "--anchors":
+            as_anchors, i = True, i + 1
         elif arg == "--list":
             # The default already IS the tier-1 listing; accepted because the tier is
             # documented under this name.
@@ -1341,6 +1412,11 @@ def main(argv: list[str] | None = None) -> int:
     # ask for and no way to notice.
     if as_return and (as_json or show is not None):
         return _usage_error("--return cannot be combined with --json or --show")
+    if as_anchors:
+        clashes = (("--json", as_json), ("--show", show is not None), ("--return", as_return))
+        for flag, given in clashes:
+            if given:
+                return _usage_error(f"--anchors cannot be combined with {flag}")
 
     repo: Path | None = None
     if verify:
@@ -1348,19 +1424,32 @@ def main(argv: list[str] | None = None) -> int:
             return _usage_error("--verify-quotes only applies to --return")
         if repo_spec is None:
             return _usage_error("--verify-quotes wants -C <dir>, the tree that was reviewed")
+    elif as_anchors:
+        # No default to the working directory: the quotes would be located in whatever
+        # happens to be checked out there, and the document would not say so.
+        if repo_spec is None:
+            return _usage_error("--anchors wants -C <dir>, the tree that was reviewed")
+    elif repo_spec is not None:
+        # The mirror of the arms above, for the same reason: without it `--return -C <dir>`
+        # emits the plain projection at exit 0, byte-identical to an unverified one, and a
+        # machine caller has no channel on which to notice it got no verification.
+        return _usage_error("-C only applies to --verify-quotes or --anchors")
+    if repo_spec is not None:
         repo = _expand_repo(repo_spec)
         if repo is None:
             return _usage_error(f"-C '{repo_spec}' names a home directory that does not exist")
         if not repo.is_dir():
             return _usage_error(f"-C '{repo_spec}' is not a directory")
-    elif repo_spec is not None:
-        # The mirror of the arm above, for the same reason: without it `--return -C <dir>`
-        # emits the plain projection at exit 0, byte-identical to an unverified one, and a
-        # machine caller has no channel on which to notice it got no verification.
-        return _usage_error("-C only applies to --verify-quotes")
 
+    data: bytes | None = None
     try:
-        artifact = load(path)
+        # One read for --anchors, so the bytes `artifact_sha256` attests are the bytes parsed.
+        if as_anchors:
+            data = Path(path).read_bytes()
+        artifact = load(path, data)
+    except OSError as exc:
+        print(f"ce-persona-findings: cannot read findings artifact {path}: {exc}", file=sys.stderr)
+        return EXIT_DATA
     except FindingsError as exc:
         print(f"ce-persona-findings: {exc}", file=sys.stderr)
         return EXIT_DATA
@@ -1376,7 +1465,22 @@ def main(argv: list[str] | None = None) -> int:
     # After the refusal and before every output mode: which shape this file is decides
     # what the modes mean, and the refusal is about the run rather than about the shape.
     if artifact_kinds(artifact) == ("verdicts",):
-        return _render_verdicts(path, artifact, show=show, as_json=as_json, as_return=as_return)
+        return _render_verdicts(
+            path,
+            artifact,
+            show=show,
+            as_json=as_json,
+            as_return=as_return,
+            as_anchors=as_anchors,
+        )
+
+    # Both are set exactly when --anchors was given; testing them rather than the flag is
+    # what lets their types narrow.
+    if data is not None and repo is not None:
+        document = anchors(path, data, repo)
+        _emit(document)
+        print(_anchors_summary(document), file=sys.stderr)
+        return EXIT_OK
 
     if as_return:
         try:
@@ -1385,24 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ce-persona-findings: {exc}", file=sys.stderr)
             return EXIT_DATA
         dropped = verify_quotes(projected, repo) if repo is not None else None
-        # Flushed here and a broken pipe swallowed, the pattern `validate.py` uses on its own
-        # summary line and for the same reason: the documented way to consume this mode pipes
-        # it into `jq -s .`, and a reader that stops early would leave the interpreter's
-        # shutdown flush to raise where no handler can catch it and exit 120 — failure
-        # reported for a projection that completed.
-        try:
-            json.dump(projected, sys.stdout, indent=1)
-            print()
-            sys.stdout.flush()
-        except BrokenPipeError:
-            # Point the shutdown flush at /dev/null, closing the fd we opened to do it: dup2
-            # duplicates, it does not consume.
-            with contextlib.suppress(OSError):
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                try:
-                    os.dup2(devnull, sys.stdout.fileno())
-                finally:
-                    os.close(devnull)
+        _emit(projected)
         emitted = projected["findings"]
         summary = (
             f"ce-persona-findings: {_text(projected.get('reviewer'))}: "

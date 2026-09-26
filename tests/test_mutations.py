@@ -1435,8 +1435,8 @@ MUTATIONS: list[Mutation] = [
         # nothing can catch it, reporting failure for a projection that completed.
         "a broken pipe turns a completed --return into a failure",
         "persona_review/findings.py",
-        r"        except BrokenPipeError:",
-        "        except SystemError:",
+        r"^    except BrokenPipeError:$",
+        "    except SystemError:",
         suite="process",
         selector="piped_into_a_reader_that_stops_early",
     ),

@@ -195,6 +195,9 @@ ARTIFACT_SUFFIXES = (
     "-last.json",
     "-events.jsonl",
     "-prompt.md",
+    # Written by a caller, not by the run, but derived from this run's findings: left behind,
+    # it places and keys the previous run's quotes beside this run's artifact.
+    "-anchors.json",
     # The failure path reads this one back, so a survivor from an earlier run is the stale
     # artifact most likely to be believed.
     "-stderr.log",
