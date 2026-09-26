@@ -301,6 +301,10 @@ document's own shape is versioned by `anchors_version`, which is `1`.
   when lines are inserted above. The citations of the finding's own file are still checked at
   the lines they name, so when the code is where they cite it the entry is placed and its
   `evidence_key` is stable.
+- **Lines joined by a literal `\n`** (a backslash and an `n`, not a newline:
+  `f.py:108: a\nf.py:109: b`) are one line to the claim. Only the first locator comes off, so
+  the claim keeps the others and `quote_key` moves when lines are inserted above. The locators
+  left in also keep the claim from matching the file, so such a quote is usually `not_found`.
 - **A Windows backslash citation** (`src\f.py:12`) comes off the claim, so its key is stable, but
   it names no file under the tree. When the quote cites nothing else, it cites only other files
   and is `unverifiable`.
