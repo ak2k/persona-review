@@ -418,6 +418,14 @@ MUTATIONS: list[Mutation] = [
         "    if calls is None:\n        return None\n    local =",
     ),
     Mutation(
+        # `[]` is valid JSON with no fields: every reader of the sidecar raises on it, and
+        # both run before any output mode, `--anchors` included.
+        "a sidecar that is not an object is returned as the record",
+        "persona_review/validate.py",
+        r"    return record if isinstance\(record, dict\) else None",
+        "    return record",
+    ),
+    Mutation(
         "persona name may be a path again",
         "persona_review/assets.py",
         r'    if not persona or persona != Path\(persona\)\.name or persona\.startswith\("\."\):',
@@ -750,6 +758,14 @@ MUTATIONS: list[Mutation] = [
         "            if False:",
     ),
     Mutation(
+        # In pattern order the finding's own path comes first wherever it stands, and a line
+        # opening with another file's citation keeps it.
+        "citations come back in pattern order, not text order",
+        "persona_review/findings.py",
+        r"    return sorted\(found, key=lambda c: c\.start\)",
+        "    return found",
+    ),
+    Mutation(
         # `lib/a.py:5` would read as a citation of `a.py`, the basename a finding at
         # `src/a.py` tries, and a quote of another file would be claimed as this one's.
         "the finding's own path is read inside a longer path",
@@ -885,6 +901,14 @@ MUTATIONS: list[Mutation] = [
         "    return text",
     ),
     Mutation(
+        # `code (src/f.py:30` is not set apart from the code, so it may be what the line says.
+        "a trailing citation after an unclosed parenthesis is stripped as a parenthesized one",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        '    return rest if text[cite.start] == "(" else text',
+    ),
+    Mutation(
         # Taken off anywhere, `(verbatim)` after the code is dropped from a claim the lens
         # wrote with it.
         "(verbatim) is taken off wherever it appears",
@@ -898,6 +922,18 @@ MUTATIONS: list[Mutation] = [
         "persona_review/findings.py",
         r"    if rest\[-len\(_VERBATIM\) :\]\.lower\(\) == _VERBATIM:",
         "    if False:",
+    ),
+    Mutation(
+        "a (verbatim) before a trailing citation is matched only in lower case",
+        "persona_review/findings.py",
+        r"(    if rest\[-len\(_VERBATIM\) :\])\.lower\(\)",
+        r"\1",
+    ),
+    Mutation(
+        "an en dash before a trailing citation is not a separator",
+        "persona_review/findings.py",
+        r'(_TRAIL_SEPARATOR = re\.compile\(r"\(\?:--\|:\|—\|)–\|',
+        r"\1",
     ),
     Mutation(
         # `-- SELECT id FROM users` is a line of SQL, not a separator after a citation.
@@ -1008,6 +1044,14 @@ MUTATIONS: list[Mutation] = [
         "persona_review/findings.py",
         r"    if searched is not None and len\(searched\) == 1:",
         "    if searched:",
+    ),
+    Mutation(
+        # Held in the order the quote cites, so the lens's first citation decides between
+        # two cited places that both hold the code.
+        "a relocation via citation takes the last candidate",
+        "persona_review/findings.py",
+        r"on_cite\[0\]",
+        "on_cite[-1]",
     ),
     Mutation(
         # A snippet is a claim about the line its citation names. Found anywhere, a fragment

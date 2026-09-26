@@ -1051,6 +1051,17 @@ class TestARefusalSurvivesBeingHandedOn:
             )
             assert validate.refused_run(art) is None
 
+    @pytest.mark.parametrize("sidecar", ["[]", '[{"run_stats": {"tool_calls": 0}}]', "0"])
+    def test_a_sidecar_that_is_not_an_object_is_no_record(self, sidecar: str):
+        # Valid JSON with no fields to read: read as a record, it raises out of every mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 0})
+            (Path(tmp) / "adversarial-reviewer-grok-provenance.json").write_text(
+                sidecar, encoding="utf-8"
+            )
+            assert validate.refused_run(art) is None
+            assert validate.reviewed_head(art) == "unresolved: no provenance"
+
     def test_the_command_refuses_every_output_mode_including_json(self):
         # --json especially. A programmatic caller is the one most likely to act on these
         # findings without a person ever reading them.
@@ -2899,6 +2910,17 @@ class TestKeysV1:
         ("`total = compute(a, b)` -- src/a.py:12", OWN, CODE),
         ("total = compute(a, b) (src/a.py:12)", OWN, CODE),
         ("total = compute(a, b) -- (verbatim) src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) – src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) -- (Verbatim) src/a.py:12", OWN, CODE),
+        # An opening parenthesis alone does not set a citation apart.
+        (
+            "total = compute(a, b) (src/a.py:12",
+            OWN,
+            "total = compute(a, b) (src/a.py:12",
+        ),
+        # A citation of another file at column 0 is the line's locator, though the finding's
+        # own path, read first, is cited later in the line.
+        ("lib/b.py:3 -- x … src/a.py:12", OWN, "x … src/a.py:12"),
         # Bare and unjoined, it may be what the line says.
         ("total = compute(a, b) src/a.py:12", OWN, "total = compute(a, b) src/a.py:12"),
         ("total = a- src/a.py:12", OWN, "total = a- src/a.py:12"),
@@ -3039,6 +3061,10 @@ class TestKeysV1:
         "total = a- src/a.py:12": (
             "7347abb80e57b21f2e1c2ea794aff5929ea9c7c04a10bc1a571a1a836432125d"
         ),
+        "total = compute(a, b) (src/a.py:12": (
+            "fad40a85775f1f0d2ba14d679d2a699089ab905901c6d6c4d8d1e3695c43c9f6"
+        ),
+        "x … src/a.py:12": "8b021871d435fcd08fcbbaed9791b9a9691da7c81966078c57792dc82feb3904",
         "`total = compute(a, b)` -- src/a.py:12, called twice": (
             "e5cfafacc298867b95c3c3217fbd05201af58aa0ed8eb64f263c43ec1d49c7f0"
         ),
@@ -3335,6 +3361,18 @@ class TestAnchors:
         )
         assert (entry["occurrences"], entry["candidates"]) == (2, [])
         assert entry["quote_key"] == findings.quote_key_v1("total = compute_total(account)")
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    def test_a_quote_whose_citations_both_hold_it_moves_to_the_first_it_cites(self):
+        # Each line cites one of the two places the code is, and the finding names neither.
+        code = "total = compute_total(account)"
+        entry = self._locate(f"src/f.py:8: {code}\nsrc/f.py:4: {code}", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            8,
+            8,
+        )
         assert entry["evidence_key"] == self._evidence("src/f.py", 8)
 
     @pytest.mark.parametrize(
