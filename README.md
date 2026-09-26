@@ -620,7 +620,7 @@ both and tested against only one.
 Type checking is `basedpyright` in **strict** mode, with no baseline and no rule suppressions. The
 JSON boundary is typed (`validate.JSONValue`) rather than silenced. The `types` check ends with a
 negative control that injects `return x + None` into the library and fails if the checker accepts
-it — because this check once passed while analysing exactly one file and none of the code that
+it — because this check once passed while analyzing exactly one file and none of the code that
 ships.
 
 `python3 -m persona_review.flags` probes the installed `grok` for CLI drift. It needs a real

@@ -245,7 +245,7 @@
                   basedpyright
 
                   # Negative control, and the reason it exists: this check once passed while
-                  # analysing ONE file, because `include` named a directory holding shell
+                  # analyzing ONE file, because `include` named a directory holding shell
                   # scripts. It reported strict and clean over none of the code that ships. A
                   # type check that cannot fail is worse than none, so prove it rejects a
                   # library it should before believing it about the real one.

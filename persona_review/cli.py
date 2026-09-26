@@ -382,7 +382,7 @@ def _review_locked(
         raise errors.EnvError(f"missing findings schema at {schema_file}")
     resolved, brief = assets.resolve_persona(asset_dir, args.persona)
     if resolved != persona:
-        # The lock and the clear were taken against the NORMALISED name, before any
+        # The lock and the clear were taken against the NORMALIZED name, before any
         # filesystem access; the artifacts are written under the RESOLVED one. Both call
         # `normalise_persona`, so they agree — but if they ever stopped agreeing, this run
         # would write to paths it does not hold the lock on, and a concurrent run would
