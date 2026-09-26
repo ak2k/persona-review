@@ -3382,6 +3382,10 @@ class TestAnchors:
             "./src/f.py:5 -- return bill(account, total)",
             # Its basename, which resolves to nothing at the root.
             "f.py:5 -- return bill(account, total)",
+            # Spelled so that no literal of its path matches, and naming it only once resolved.
+            "src//f.py:5 -- return bill(account, total)",
+            "src/../src/f.py:5 -- return bill(account, total)",
+            "src/alias.py:5 -- return bill(account, total)",
         ],
     )
     def test_a_citation_of_the_findings_own_file_places_it(self, quote: str):
