@@ -797,6 +797,11 @@ def _path_like(text: str) -> bool:
     return "/" in text or "\\" in text or bool(_EXTENSION.search(text))
 
 
+def _locators(text: str, own: str | None) -> list[Citation]:
+    """The citations a lens writes as locators: of a path, or of the finding's own file."""
+    return [c for c in citations(text, own) if c.own or _path_like(c.path)]
+
+
 # What joins a citation to the code it cites. A bare hyphen counts only with whitespace on
 # the side away from the citation, so a negative number or `-flag` keeps its hyphen.
 _LEAD_SEPARATOR = re.compile(r"^(?:--|:|—|–|-(?=\s))")
@@ -828,20 +833,46 @@ def _before_trail(text: str, cite: Citation) -> str:
     return rest if text[cite.start] == "(" and text[cite.end - 1] == ")" else text
 
 
+def _lines_uncited(text: str, own: str | None) -> str | None:
+    """`text` less the citation each line begins with, or None when no line begins with one.
+
+    A lens quoting several lines puts a locator on each (`f.py:81: a = 1`, then
+    `f.py:82: b = 2`), and every one left in moves the key when lines are inserted above.
+    Only a line's START is a locator: a citation inside a line is what the line says. A
+    line's backticks come off only where its locator did, since elsewhere they are code.
+    """
+    lines: list[str] = []
+    cut = False
+    for line in text.split("\n"):
+        body = line.strip()
+        cites = _locators(body, own)
+        if cites and cites[0].start == 0:
+            rest = _after_lead(body[cites[0].end :])
+            ticked = _BACKTICKED.fullmatch(rest)
+            lines.append(ticked.group(1) if ticked else rest)
+            cut = True
+        else:
+            lines.append(line)
+    return "\n".join(lines) if cut else None
+
+
 def claim_v1(quote: str, own: str | None) -> str:
     """The code a quote claims the file holds, as `quote_key` hashes it. Frozen.
 
-    Takes off only what a lens writes AROUND the code: one citation at either edge, the
-    `(verbatim)` and the separator beside it, and backticks when they wrap the whole rest.
-    A citation elsewhere, ` / ` or `...` between snippets, and trailing prose are all left
-    in, because each may be what the line says and a claim must never be edited into text
-    the lens did not write. `""` when the quote is only a citation: it claims no code.
+    Takes off only what a lens writes AROUND the code: the citation starting each line,
+    or failing that one at the end, the `(verbatim)` and the separator beside it, and
+    backticks when they wrap a line whose citation came off or the whole rest. A citation
+    inside a line, ` / ` or `...` between snippets, and trailing prose are all left in,
+    because each may be what the line says and a claim must never be edited into text the
+    lens did not write. `""` when the quote is only a citation: it claims no code.
     """
     text = quote.strip()
-    cites = [c for c in citations(text, own) if c.own or _path_like(c.path)]
+    cites = _locators(text, own)
     rest = text
-    if cites and cites[0].start == 0:
-        rest = _after_lead(text[cites[0].end :])
+    uncited = _lines_uncited(text, own)
+    if uncited is not None:
+        # Stripped again: a line left empty by its citation must not stop the unwrap.
+        rest = uncited.strip()
     elif cites and cites[-1].end == len(text):
         rest = _before_trail(text, cites[-1])
     wrapped = _BACKTICKED.fullmatch(rest)

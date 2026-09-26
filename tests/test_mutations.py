@@ -783,8 +783,8 @@ MUTATIONS: list[Mutation] = [
         # `timeout:30 -- seconds` is what the line says, not a citation of a file `timeout`.
         "a citation-shaped token that is not a path is stripped as one",
         "persona_review/findings.py",
-        r"    cites = \[c for c in citations\(text, own\) if c\.own or _path_like\(c\.path\)\]",
-        "    cites = citations(text, own)",
+        r"    return \[c for c in citations\(text, own\) if c\.own or _path_like\(c\.path\)\]",
+        "    return citations(text, own)",
     ),
     Mutation(
         "a URL's port is read as a line number",
@@ -811,11 +811,43 @@ MUTATIONS: list[Mutation] = [
         r'    return "/" in text or bool(_EXTENSION.search(text))',
     ),
     Mutation(
-        # A citation mid-quote is what the line says: a log line, a comment, a fixture.
+        # A citation inside a line is what the line says: a log line, a comment, a fixture.
+        # Only one starting the line is a locator, on the first line or any other.
         "a citation mid-quote is stripped as a leading one",
         "persona_review/findings.py",
         r"    if cites and cites\[0\]\.start == 0:",
         "    if cites:",
+    ),
+    Mutation(
+        # `f.py:81: a = 1` then `f.py:82: b = 2`: the second locator stays in the claim, and
+        # the key moves whenever lines are inserted above the quoted code.
+        "only the quote's first line is read for a leading citation",
+        "persona_review/findings.py",
+        r'    for line in text\.split\("\\n"\):',
+        "    for line in [text]:",
+    ),
+    Mutation(
+        # An indented line's locator starts after its indentation, not at column 0.
+        "a line's locator is read only at column 0",
+        "persona_review/findings.py",
+        r"        body = line\.strip\(\)",
+        "        body = line",
+    ),
+    Mutation(
+        # A backticked line no citation came off is code, and its backticks are part of it.
+        "a backticked line is unwrapped though no citation came off it",
+        "persona_review/findings.py",
+        r"        else:\n            lines\.append\(line\)",
+        "        else:\n"
+        "            _m = _BACKTICKED.fullmatch(line.strip())\n"
+        "            lines.append(_m.group(1) if _m else line)",
+    ),
+    Mutation(
+        # A first line that was only a citation leaves a newline before the backticks.
+        "the uncited lines are not re-stripped before the whole rest is unwrapped",
+        "persona_review/findings.py",
+        r"        rest = uncited\.strip\(\)",
+        "        rest = uncited",
     ),
     Mutation(
         "a citation followed by prose is stripped as a trailing one",

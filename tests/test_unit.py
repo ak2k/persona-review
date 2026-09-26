@@ -2946,6 +2946,31 @@ class TestKeysV1:
         # A literal backslash-n stays; a real newline is whitespace.
         ('src/a.py:3 -- log("one\\ntwo")', OWN, 'log("one\\ntwo")'),
         ("src/a.py:3 -- a = 1\n    b = 2", OWN, "a = 1 b = 2"),
+        # A citation starting any line is that line's locator, in each shape a lens writes.
+        ("src/x.py:81: a = 1\nsrc/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        ("src/x.py:81: `a = 1`\nsrc/x.py:82: `b = 2`", "src/x.py", "a = 1 b = 2"),
+        (
+            "src/x.py:81 (verbatim) -- a = 1\nsrc/x.py:82 (verbatim) -- b = 2",
+            "src/x.py",
+            "a = 1 b = 2",
+        ),
+        (
+            "src/x.py:81 (verbatim) -- `a = 1`\nsrc/x.py:82 (verbatim) -- `b = 2`",
+            "src/x.py",
+            "a = 1 b = 2",
+        ),
+        ("a = 1\nsrc/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        ("src/x.py:81: a = 1\n    src/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        # A line starting with a token that is not a path, or citing mid-line, is code.
+        ("src/x.py:81: a = 1\nretries:3 -- b = 2", "src/x.py", "a = 1 retries:3 -- b = 2"),
+        (
+            "src/x.py:81: a = 1\nb = 2 # see src/x.py:82 for c",
+            "src/x.py",
+            "a = 1 b = 2 # see src/x.py:82 for c",
+        ),
+        # Backticks on a line no citation came off are code; around the whole rest they are not.
+        ("src/x.py:81: a = 1\n`b = 2`", "src/x.py", "a = 1 `b = 2`"),
+        ("src/x.py:81:\n`a = 1`", "src/x.py", "a = 1"),
         # A separator or `(verbatim)` not beside a removed citation stays.
         ("-- SELECT id FROM users", OWN, "-- SELECT id FROM users"),
         (
@@ -3012,6 +3037,14 @@ class TestKeysV1:
         "first() ... last()": "efe561ceaff7295351e0c532c42072ed6505880928a46ec38b1baba9de8a75c2",
         'log("one\\ntwo")': "80b17a3b6e0d4e79905127a98b633e57754e45ad1cda77540d9db562ba24c630",
         "a = 1 b = 2": "5e0b3835e0d80a4fd2b78939e7144a12db1d693d5c9e42f7869064945089534d",
+        "a = 1 retries:3 -- b = 2": (
+            "97f50348864a25d7c44d668b6ddf99339bc0d15ead98dd144aa2740600ebc52a"
+        ),
+        "a = 1 b = 2 # see src/x.py:82 for c": (
+            "2a39b5e50e42a47f90e0a0c23744e1f34eb81b4c9a9d9cc2ebe302d04b904166"
+        ),
+        "a = 1 `b = 2`": "57e371fa25a3711fc6659982926ae672be720e1f054a0178363b648cfa777019",
+        "a = 1": "679e59eae4622f19a810bac3bf4344383ff50238de3f265128a981eaf790cbb6",
         "-- SELECT id FROM users": (
             "d3a523425cdc9275fbfd8f1e0846bdb10836ba3b96fb6aad64b7a4d33b3b8d0b"
         ),
