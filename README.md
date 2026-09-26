@@ -321,6 +321,22 @@ document's own shape is versioned by `anchors_version`, which is `1`.
   of `id]/page.tsx`. It stays in the claim and does not name the finding's file.
 - **A citation in the middle of a line** is never taken off, since it may be what the line says.
   A quote that holds one keeps that line number in its claim.
+- **`-C` has to be the tree the review ran in.** `head` comes from the review's provenance and is
+  not checked against `-C`, so lines located in another checkout are reported under the reviewed
+  commit.
+- **A dirty worktree's lines are reported under the reviewed commit.** The quote is located in
+  the working tree, and `head` is the `HEAD` the review recorded, which holds none of the
+  uncommitted changes.
+- **On a case-insensitive filesystem**, the macOS default, a `file` spelled in another case than
+  the tree's (`SRC/F.py` for `src/f.py`) is read, and `path` and `evidence_key` carry that
+  spelling, which git does not have. A case-sensitive filesystem reports it `unverifiable`.
+- **A literal `\n` in the code comes first.** A quote with no real newline that holds a literal
+  `\n` is placed on a line holding that literal text when one exists, such as a string, and read
+  with the `\n` as whitespace only when none does.
+- **Snippets the reader cannot cut out.** In a quote citing several places, a snippet written as
+  `` `a` / `b` ``, as `` `a` followed by `b` `` or as a backtick span followed by `.` is not
+  matched even when it is true, and the entry is `not_found`. The rule errs toward leaving a
+  finding unplaced rather than publishing a snippet the tree may not hold.
 
 ## Validating a findings batch
 
