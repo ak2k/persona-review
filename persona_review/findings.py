@@ -419,12 +419,14 @@ def project(artifact: JSONObject) -> tuple[JSONObject, int]:
 
 # A `path:line` citation in the shapes the lenses actually write: `f.py:12 -- code`,
 # `f.py:12: code`, `` `code` -- f.py:12``, any of those wearing markdown decoration
-# (`**f.py:12**`, `(f.py:12)`, a backticked path) and an optional `:col` suffix. The
+# (`**f.py:12**`, `(f.py:12)`, a backticked path), an optional `:col` suffix and an optional
+# line range (`f.py:444-446`, with a hyphen, en dash or em dash). The
 # decoration is INSIDE the match, so neither the path nor the compared text carries it —
 # including a backtick closing the path before the colon (`` `f.py`:12 ``);
 # without that, shapes lenses write every day dropped a true quote on this reader's own
 # parse. Backticks and quotes end the path so a quoted span cannot be swallowed into it.
-_REFERENCE = re.compile(r"""[(\[*<`]*([^\s`'"(\[*<]+?)`?:(\d+)(?::\d+)?\b[*)\]>`]*""")
+# A range is checked from its first line: the quote's own line count sizes the window.
+_REFERENCE = re.compile(r"""[(\[*<`]*([^\s`'"(\[*<]+?)`?:(\d+)(?::\d+)?(?:[-–—]\d+)?\b[*)\]>`]*""")
 _BACKTICKED = re.compile(r"`([^`]*)`")
 _SEPARATOR = re.compile(r"^\s*(?::|--|—)\s*")
 _TRAILING_SEPARATOR = re.compile(r"\s*(?::|--|—)\s*$")

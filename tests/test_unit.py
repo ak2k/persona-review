@@ -2429,6 +2429,22 @@ class TestQuotesAreCheckedAgainstTheTree:
         assert after["first_evidence"] == quote
         assert err.strip().endswith("0 dropped by --verify-quotes")
 
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            "src/f.py:1-2: import billing\n    return bill(account)",
+            "src/f.py:1–2: import billing\n    return bill(account)",
+            "src/f.py:2-2 -- return bill(account)",
+            "`return bill(account)` -- src/f.py:2-3",
+        ],
+    )
+    def test_a_range_cited_quote_the_tree_carries_is_kept(self, quote: str):
+        # Half of the lenses' citations are ranges. Read as `path:first`, the rest of the
+        # range stayed in the compared text, and every one of them was dropped.
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
+        assert err.strip().endswith("0 dropped by --verify-quotes")
+
     def test_a_basename_citation_is_resolved_through_the_findings_own_file(self):
         # Lenses routinely cite `f.py:2` while `file` carries the repo-relative path.
         _, _, after = self._run("f.py:2 -- return bill(account)", file="src/f.py")

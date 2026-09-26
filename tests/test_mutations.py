@@ -724,6 +724,14 @@ MUTATIONS: list[Mutation] = [
         r'''(\\d+)(?::\\d+)?\\b[*)\\]>`]*""")''',
     ),
     Mutation(
+        # Half the citations lenses write are ranges. Read as `path:first`, the rest of the
+        # range stays in the compared text and every range-cited true quote is dropped.
+        "a line range ends the citation at its first number again",
+        "persona_review/findings.py",
+        r"^(_REFERENCE = re\.compile\(.*)\(\?:\[-–—\]\\d\+\)\?",
+        r"\1",
+    ),
+    Mutation(
         # A newline inside the backticks decorates the quote rather than belonging to it.
         # Counted as a line, it widens the window past the line the citation names, and the
         # text on the NEXT line then certifies the citation.
