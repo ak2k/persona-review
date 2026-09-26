@@ -1031,30 +1031,52 @@ def _line_number(digits: str) -> int | None:
         return None
 
 
+# The end of a cited range, read off the citation's text rather than from a group added to
+# the scanner's patterns, which the frozen claim is cut with.
+_RANGE_END = re.compile(r"[-–—](\d+)[*)\]>`]*$")
+
+
+def _cited_lines(quote: str, cite: Citation) -> tuple[int, int] | None:
+    """The first and last line a citation names: `f.py:20-22` names 20 to 22.
+
+    A range written backwards, or ending in no usable number, names its first line alone.
+    """
+    first = _line_number(cite.line)
+    if first is None:
+        return None
+    end = _RANGE_END.search(quote, cite.start, cite.end)
+    last = None if end is None else _line_number(end.group(1))
+    return first, first if last is None or last < first else last
+
+
+def _overlaps(span: tuple[int, int], lines: tuple[int, int]) -> bool:
+    return span[0] <= lines[1] and lines[0] <= span[1]
+
+
 def _names_own(cite: Citation, own: str, repo: Path) -> bool:
     """Whether a citation names the finding's own file: spelled as it, or resolving to it."""
     return cite.own or _founds(_Reference(cite.path, (), 0, cite.start, cite.end), own, repo)
 
 
 def _claims(
-    quote: str, claim: str, cites: list[Citation], numbers: list[int | None]
-) -> list[tuple[str, int | None]]:
-    """Each text the quote claims the file holds, with the line it is checked at.
+    quote: str, claim: str, cites: list[Citation], cited: list[tuple[int, int] | None]
+) -> list[tuple[str, tuple[int, int] | None]]:
+    """Each text the quote claims the file holds, with the lines it is checked at.
 
     `None` is the primary claim, the only one searched through the whole file. A citation
-    of the finding's own file, whose line is in `numbers`, also claims the quote less that
-    citation, and its own snippet when the quote cites several places, but only at the line
+    of the finding's own file, whose lines are in `cited`, also claims the quote less that
+    citation, and its own snippet when the quote cites several places, but only at the lines
     it names: searched for anywhere, a fragment is found wherever it happens to occur.
     """
     spans = [_Cited(c.path, c.line, c.start, c.end, None) for c in cites]
     owned = _segments(quote, spans)
-    texts: list[tuple[str, int | None]] = [(claim, None)]
-    for index, number in enumerate(numbers):
-        if number is None:
+    texts: list[tuple[str, tuple[int, int] | None]] = [(claim, None)]
+    for index, lines in enumerate(cited):
+        if lines is None:
             continue
-        texts.append((_normalized(_compared(quote, spans[index], spans)), number))
+        texts.append((_normalized(_compared(quote, spans[index], spans)), lines))
         if owned is not None:
-            texts.append((_normalized(owned[index][1]), number))
+            texts.append((_normalized(owned[index][1]), lines))
     return [(text, n) for text, n in dict.fromkeys(texts) if len(text) >= _QUOTE_FLOOR]
 
 
@@ -1094,23 +1116,23 @@ class _Place:
 
 
 def _place(
-    claims: list[tuple[str, int | None]],
+    claims: list[tuple[str, tuple[int, int] | None]],
     stream: _Stream,
     escaped: bool,
     line: int | None,
-    cited: list[int],
+    cited: list[tuple[int, int]],
 ) -> _Place:
     """The state of a quote the file was searched for: the first rule that holds wins."""
     searched: list[tuple[int, int]] | None = None
     held: list[tuple[int, int]] = []
-    for text, number in claims:
+    for text, lines in claims:
         spans = _occurrences(stream, text, escaped)
-        if number is None:
+        if lines is None:
             searched = spans
-        held.extend(s for s in spans if number is None or s[0] <= number <= s[1])
+        held.extend(s for s in spans if lines is None or _overlaps(s, lines))
     count = None if searched is None else len(searched)
     on_line = [s for s in held if line is not None and s[0] <= line <= s[1]]
-    on_cite = [s for s in held if any(s[0] <= n <= s[1] for n in cited)]
+    on_cite = [s for s in held if any(_overlaps(s, lines) for lines in cited)]
     if on_line:
         return _Place("verified", "line", on_line[0], count, "on the finding's line")
     if on_cite:
@@ -1174,11 +1196,11 @@ def locate(finding: Finding, repo: Path) -> JSONObject:
         # A quote of another file says nothing about this one, and every tree holds some
         # twelve-character line that would match it somewhere.
         return entry | {"reason": "cites only other files"}
-    numbers = [_line_number(c.line) if m else None for c, m in zip(cites, mine, strict=True)]
-    claims = _claims(quote, claim, cites, numbers)
+    named = [_cited_lines(quote, c) if m else None for c, m in zip(cites, mine, strict=True)]
+    claims = _claims(quote, claim, cites, named)
     if not claims:
         return entry | {"reason": f"too short ({len(claim)} chars, floor {_QUOTE_FLOOR})"}
-    cited = [n for n in numbers if n is not None]
+    cited = [n for n in named if n is not None]
     placed = _place(claims, _stream(lines), "\n" not in quote.strip(), line, cited)
     entry |= {
         "state": placed.state,

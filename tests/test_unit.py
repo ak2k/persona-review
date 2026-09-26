@@ -3487,6 +3487,66 @@ class TestAnchors:
         entry = self._locate(quote, line=8)
         assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
 
+    def _ranged(self) -> None:
+        body = [f"# line {n}" for n in range(1, 41)]
+        body[9] = body[20] = "    total = compute_total(items)"
+        (self.tree / "src" / "range.py").write_text("\n".join(body) + "\n", encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            "src/range.py:20-22 -- total = compute_total(items)",
+            "src/range.py:20–22: total = compute_total(items)",
+            "**src/range.py:20:5—22** total = compute_total(items)",
+            "`total = compute_total(items)` -- src/range.py:20-22",
+        ],
+    )
+    def test_a_quote_inside_the_range_it_cites_moves_there(self, quote: str):
+        # On lines 10 and 21, so searching alone is ambiguous: the range covers 21 without
+        # starting on it.
+        self._ranged()
+        entry = self._locate(quote, line=5, file="src/range.py")
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            21,
+            21,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [])
+
+    def test_a_range_written_backwards_cites_its_first_line(self):
+        self._ranged()
+        quote = "src/range.py:21-20 -- total = compute_total(items)"
+        entry = self._locate(quote, line=5, file="src/range.py")
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            21,
+            21,
+        )
+
+    def test_a_range_end_too_long_to_parse_cites_its_first_line(self):
+        entry = self._locate("src/f.py:5-" + "9" * 5000 + " -- return bill(account, total)", 30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+
+    def test_a_snippet_is_checked_across_the_range_its_citation_names(self):
+        # The first snippet is on line 5, inside the 3-5 it cites, and the second on the 9 it
+        # cites. Neither the whole remainder nor the primary claim is on any line.
+        first, second = "return bill(account, total)", "return credit(account, total)"
+        entry = self._locate(f"src/f.py:3-5 -- {first}\nsrc/f.py:9 -- {second}", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
     @pytest.mark.parametrize("end", ["", "\n"])
     def test_a_doubly_escaped_quote_matches_as_the_lines_it_escaped(self, end: str):
         # A newline ending the quote is not one inside it.

@@ -227,8 +227,9 @@ stream: its non-blank lines, whitespace collapsed, joined by single spaces. So a
 however the file indents or wraps the code, and its span is the lines the match covers. The
 claim searched through the whole file is the quote's claim, defined under the keys below. A
 citation of the finding's own file also checks the quote less that citation, and its own
-segment when the quote cites several places, but only at the line it cites. The states, first
-match wins:
+segment when the quote cites several places, but only at the lines it cites. A range
+(`f.py:20-22`) cites every line from its first to its last; one written backwards cites only its
+first. The states, first match wins:
 
 - **`verified`**, `via` `line`: the quote occurs on lines that include the finding's `line`.
 - **`relocated`**, `via` `citation`: it occurs at a line the quote cites in the finding's file.

@@ -1058,14 +1058,41 @@ MUTATIONS: list[Mutation] = [
         # verifies on text the lens never cited.
         "a snippet is looked for off the line its citation names",
         "persona_review/findings.py",
-        r"        held\.extend\(s for s in spans if number is None or s\[0\] <= number <= s\[1\]\)",
+        r"        held\.extend\(s for s in spans if lines is None or _overlaps\(s, lines\)\)",
         "        held.extend(spans)",
     ),
     Mutation(
         "a snippet's occurrences are counted as the quote's",
         "persona_review/findings.py",
-        r"        if number is None:\n            searched = spans",
+        r"        if lines is None:\n            searched = spans",
         "        if True:\n            searched = spans",
+    ),
+    Mutation(
+        # Half of all quotes cite a range, and the code is as often on its last line as on
+        # its first.
+        "a cited range counts only its first line",
+        "persona_review/findings.py",
+        r"    return first, first if last is None or last < first else last",
+        "    return first, first",
+    ),
+    Mutation(
+        "a place counts as cited only when it holds the range's first line",
+        "persona_review/findings.py",
+        r"    return span\[0\] <= lines\[1\] and lines\[0\] <= span\[1\]",
+        "    return span[0] <= lines[0] <= span[1]",
+    ),
+    Mutation(
+        # Read as written, `21-20` is a range no single line lies inside, so it cites nothing.
+        "a range written backwards is read as written",
+        "persona_review/findings.py",
+        r"    return first, first if last is None or last < first else last",
+        "    return first, first if last is None else last",
+    ),
+    Mutation(
+        "a cited range's end too long to parse raises",
+        "persona_review/findings.py",
+        r"    last = None if end is None else _line_number\(end\.group\(1\)\)",
+        "    last = None if end is None else int(end.group(1))",
     ),
     Mutation(
         # Only a placed quote names lines of the file, and a key the poster dedupes by.
