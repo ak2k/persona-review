@@ -229,14 +229,23 @@ claim searched through the whole file is the quote's claim, defined under the ke
 citation of the finding's own file also checks the quote less that citation, and its own
 segment when the quote cites several places, but only at the lines it cites. A range
 (`f.py:20-22`) cites every line from its first to its last; one written backwards cites only its
-first. The states, first match wins:
+first.
+
+A quote citing several places, each citation carrying its own snippet of at least 12 characters
+and no text outside them, is `not_found` before any state below is tried when one of its
+snippets is not on the lines its citation names. A snippet of another file is checked in that
+file, read under the same rules as the finding's own, so one whose file is missing, outside the
+tree, not a regular file, or reached through a link or a `..` is not where it says. One snippet
+that holds cannot place the quote, since the comment would publish the others as code the tree
+holds. `occurrences` still counts the claim. The states, first match wins:
 
 - **`verified`**, `via` `line`: the quote occurs on lines that include the finding's `line`.
 - **`relocated`**, `via` `citation`: it occurs at a line the quote cites in the finding's file.
 - **`relocated`**, `via` `search`: it occurs exactly once in the file, somewhere else.
 - **`ambiguous`**: it occurs more than once, and none of those places covers the finding's line
   or a line the quote cites.
-- **`not_found`**: the file does not hold it.
+- **`not_found`**: the file does not hold it, or one snippet of a quote citing several places is
+  not where it cites.
 - **`unverifiable`**: nothing could be checked. The finding has no `file`. Or the file is
   missing, outside the tree, not a regular file, reached through a link or a `..` (the path it
   resolves to is not the one the finding names), or unreadable. Or the quote cites only other

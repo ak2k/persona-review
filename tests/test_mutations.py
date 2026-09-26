@@ -1068,6 +1068,32 @@ MUTATIONS: list[Mutation] = [
         "        if True:\n            searched = spans",
     ),
     Mutation(
+        # Placed on the one snippet that holds, the comment publishes the other beside it as
+        # code the tree holds.
+        "one true snippet places a quote whose other snippet is not where it cites",
+        "persona_review/findings.py",
+        r'    if refuted:\n        return _Place\(\n            "not_found"',
+        '    if False:\n        return _Place(\n            "not_found"',
+    ),
+    Mutation(
+        "a snippet citing a line too long to parse holds",
+        "persona_review/findings.py",
+        r"        if lines is None or not any\(",
+        "        if lines is not None and not any(",
+    ),
+    Mutation(
+        "a snippet of another file is not checked",
+        "persona_review/findings.py",
+        r"        if not is_own:\n            read = _read\(cite\.path, repo\)",
+        "        if not is_own:\n            continue\n            read = _read(cite.path, repo)",
+    ),
+    Mutation(
+        "a snippet of another file is looked for in the finding's file",
+        "persona_review/findings.py",
+        r"            where = _stream\(read\[1\]\)",
+        "            where = stream",
+    ),
+    Mutation(
         # Half of all quotes cite a range, and the code is as often on its last line as on
         # its first.
         "a cited range counts only its first line",

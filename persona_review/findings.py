@@ -1105,6 +1105,34 @@ def _read(own: str, repo: Path) -> tuple[str, list[str]] | str:
     return path, _file_lines(data.decode("utf-8", errors="replace"))
 
 
+def _refuted(
+    quote: str, cites: list[Citation], mine: list[bool], stream: _Stream, escaped: bool, repo: Path
+) -> bool:
+    """Whether a quote citing several places has a snippet that is not where it says.
+
+    Each snippet is a claim about the lines its own citation names, so a true one cannot
+    carry a false one: placed, the comment would publish both as code the tree holds. A
+    snippet of another file is checked in that file, read under the same rules as the
+    finding's own, and one whose file cannot be read that way is not where it says.
+    """
+    segments = _segments(quote, [_Cited(c.path, c.line, c.start, c.end, None) for c in cites])
+    if segments is None:
+        return False
+    for cite, is_own, (_, text) in zip(cites, mine, segments, strict=True):
+        where = stream
+        if not is_own:
+            read = _read(cite.path, repo)
+            if isinstance(read, str):
+                return True
+            where = _stream(read[1])
+        lines = _cited_lines(quote, cite)
+        if lines is None or not any(
+            _overlaps(s, lines) for s in _occurrences(where, _normalized(text), escaped)
+        ):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class _Place:
     state: str
@@ -1121,6 +1149,7 @@ def _place(
     escaped: bool,
     line: int | None,
     cited: list[tuple[int, int]],
+    refuted: bool,
 ) -> _Place:
     """The state of a quote the file was searched for: the first rule that holds wins."""
     searched: list[tuple[int, int]] | None = None
@@ -1131,6 +1160,10 @@ def _place(
             searched = spans
         held.extend(s for s in spans if lines is None or _overlaps(s, lines))
     count = None if searched is None else len(searched)
+    if refuted:
+        return _Place(
+            "not_found", None, None, count, "a snippet is not on the lines its citation names"
+        )
     on_line = [s for s in held if line is not None and s[0] <= line <= s[1]]
     on_cite = [s for s in held if any(_overlaps(s, lines) for lines in cited)]
     if on_line:
@@ -1201,7 +1234,10 @@ def locate(finding: Finding, repo: Path) -> JSONObject:
     if not claims:
         return entry | {"reason": f"too short ({len(claim)} chars, floor {_QUOTE_FLOOR})"}
     cited = [n for n in named if n is not None]
-    placed = _place(claims, _stream(lines), "\n" not in quote.strip(), line, cited)
+    stream = _stream(lines)
+    escaped = "\n" not in quote.strip()
+    refuted = _refuted(quote, cites, mine, stream, escaped, repo)
+    placed = _place(claims, stream, escaped, line, cited, refuted)
     entry |= {
         "state": placed.state,
         "via": placed.via,

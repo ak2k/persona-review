@@ -3487,6 +3487,79 @@ class TestAnchors:
         entry = self._locate(quote, line=8)
         assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
 
+    @pytest.mark.parametrize(
+        ("second", "occurrences"),
+        [
+            # On no line of the file.
+            ("src/f.py:5: return charge(account, fee)", 0),
+            # In the file, but not on the line it cites. The whole claim is on 4-5, so a search
+            # finds it once.
+            ("src/f.py:12: return bill(account, total)", 1),
+            # Past the end of the file.
+            ("src/f.py:40: return bill(account, total)", 1),
+            ("src/f.py:" + "9" * 5000 + ": return bill(account, total)", 1),
+            # Joined by `; ` rather than a newline.
+            ("; src/f.py:5 -- return charge(account, fee)", 0),
+        ],
+        ids=["absent", "elsewhere", "past-the-end", "unparsable-line", "semicolon-joined"],
+    )
+    def test_a_true_snippet_does_not_place_a_false_one_beside_it(
+        self, second: str, occurrences: int
+    ):
+        # The first snippet is on line 4, the finding's line. Placed, the comment would publish
+        # the second as code the file holds.
+        joiner = "" if second.startswith(";") else "\n"
+        quote = f"src/f.py:4: total = compute_total(account){joiner}{second}"
+        entry = self._locate(quote, line=4)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "not_found",
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (occurrences, [])
+        assert entry["reason"] == "a snippet is not on the lines its citation names"
+        assert entry["evidence_key"] is None
+        assert entry["quote_key"] == findings.quote_key_v1(findings.claim_v1(quote, "src/f.py"))
+
+    def _other(self) -> None:
+        (self.tree / "src" / "g.py").write_text(
+            "import credit\n    return credit(account, total)\n", encoding="utf-8"
+        )
+
+    @pytest.mark.parametrize(
+        "second",
+        [
+            # On no line of that file.
+            "src/g.py:2: this is not in g.py at all",
+            # In that file, but not on the line it cites.
+            "src/g.py:1: return credit(account, total)",
+            # In a file the tree does not have.
+            "src/h.py:2: return credit(account, total)",
+            # Through a link to a file outside the tree that holds it on line 9: never read.
+            "src/out.py:9: return credit(account, total)",
+        ],
+        ids=["absent", "elsewhere", "no-such-file", "outside-the-tree"],
+    )
+    def test_a_snippet_of_another_file_is_checked_in_that_file(self, second: str):
+        self._other()
+        entry = self._locate(f"src/f.py:5: return bill(account, total)\n{second}", line=5)
+        assert (entry["state"], entry["start"], entry["evidence_key"]) == ("not_found", None, None)
+        assert entry["reason"] == "a snippet is not on the lines its citation names"
+
+    def test_a_true_snippet_of_another_file_leaves_the_quote_placed(self):
+        # The second snippet is also on line 9 of this file, but it cites line 2 of g.py.
+        self._other()
+        quote = "src/f.py:5: return bill(account, total)\nsrc/g.py:2: return credit(account, total)"
+        entry = self._locate(quote, line=5)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
     def _ranged(self) -> None:
         body = [f"# line {n}" for n in range(1, 41)]
         body[9] = body[20] = "    total = compute_total(items)"
