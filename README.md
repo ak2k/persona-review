@@ -233,11 +233,13 @@ first.
 
 A quote citing several places, each citation carrying its own snippet of at least 12 characters
 and no text outside them, is `not_found` before any state below is tried when one of its
-snippets is not on the lines its citation names. A snippet of another file is checked in that
-file, read under the same rules as the finding's own, so one whose file is missing, outside the
-tree, not a regular file, or reached through a link or a `..` is not where it says. One snippet
-that holds cannot place the quote, since the comment would publish the others as code the tree
-holds. `occurrences` still counts the claim. The states, first match wins:
+snippets is not on the lines its citation names. A snippet is on those lines when a place it
+occurs in its file overlaps them, so one that starts a line before a cited range still holds; its
+text is in the file either way. A snippet of another file is checked in that file, read under
+the same rules as the finding's own, so one whose file is missing, outside the tree, not a
+regular file, or reached through a link or a `..` is not where it says. One snippet that holds
+cannot place the quote, since the comment would publish the others as code the tree holds.
+`occurrences` still counts the claim. The states, first match wins:
 
 - **`verified`**, `via` `line`: the quote occurs on lines that include the finding's `line`.
 - **`relocated`**, `via` `citation`: it occurs at a line the quote cites in the finding's file.
@@ -321,6 +323,15 @@ document's own shape is versioned by `anchors_version`, which is `1`.
   of `id]/page.tsx`. It stays in the claim and does not name the finding's file.
 - **A citation in the middle of a line** is never taken off, since it may be what the line says.
   A quote that holds one keeps that line number in its claim.
+- **A code token shaped like a citation** (`obj.attr:10`, `buf[self.pos:10]`) is read as a
+  citation of another file, because `.attr` looks like a file extension. When the quote has no
+  citation of the finding's file, it cites only other files and is `unverifiable`. In a quote
+  citing several places, the token splits the snippet it sits in, and a true quote can be
+  `not_found`.
+- **An absolute path inside the tree** is read like a `..`: the path it resolves to is not the
+  one it spells. A snippet of another file cited by one is not where it says, so the quote is
+  `not_found`, and a `file` given as one is `unverifiable`. A citation of the finding's own file
+  by an absolute path still names that file.
 - **`-C` has to be the tree the review ran in.** `head` comes from the review's provenance and is
   not checked against `-C`, so lines located in another checkout are reported under the reviewed
   commit.
@@ -333,10 +344,15 @@ document's own shape is versioned by `anchors_version`, which is `1`.
 - **A literal `\n` in the code comes first.** A quote with no real newline that holds a literal
   `\n` is placed on a line holding that literal text when one exists, such as a string, and read
   with the `\n` as whitespace only when none does.
-- **Snippets the reader cannot cut out.** In a quote citing several places, a snippet written as
-  `` `a` / `b` ``, as `` `a` followed by `b` `` or as a backtick span followed by `.` is not
-  matched even when it is true, and the entry is `not_found`. The rule errs toward leaving a
-  finding unplaced rather than publishing a snippet the tree may not hold.
+- **Snippets the reader cannot cut out.** A quote written as `` `a` / `b` ``, as
+  `` `a` followed by `b` `` or as a backtick span followed by `.` is not matched even when it is
+  true, and the entry is `not_found`. In a quote citing several places, one snippet written that
+  way is enough. The rule errs toward leaving a finding unplaced rather than publishing a snippet
+  the tree may not hold.
+- **`--anchors` output written into a run directory must not overlap a new review there.** A
+  review of the same persona and provider starting in that directory clears
+  `<persona>-<provider>-anchors.json`, including one a redirect is still writing, and `--anchors`
+  then exits `0` with its file gone.
 
 ## Validating a findings batch
 
