@@ -263,7 +263,10 @@ The claim is the code the quote says the file holds, with what a lens writes aro
 taken off. A *citation* here is `path:line`, with an optional `:col`, an optional range (`-N`,
 `–N` or `—N`) and markdown decoration (`**f.py:12**`, `(f.py:12)`, `` `f.py`:12 ``), whose path
 is the finding's own file, that file's basename, or looks like a path: it contains `/` or `\`,
-or ends in a file extension, and is not a URL.
+or ends in a file extension, and is not a URL. The finding's own file is read both as its
+`file` spells it and with `\` read as `/` and empty, `.` and `..` segments dropped, each with or
+without a leading `./`, so `./app/[id]/page.tsx` and `app/[id]/page.tsx` cite the same file
+whichever side spells it which way.
 
 1. Strip the quote's surrounding whitespace.
 2. Split the quote on `\n`. A line that begins, after whitespace, with a citation loses that

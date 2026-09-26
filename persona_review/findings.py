@@ -777,7 +777,7 @@ class Citation:
 
 
 def _literal(path: str) -> re.Pattern[str]:
-    """`path` cited verbatim, wearing `_REFERENCE`'s decoration, `:col` and range.
+    """`path` cited verbatim or after `./`, wearing `_REFERENCE`'s decoration, `:col` and range.
 
     `_REFERENCE`'s path class stops at `(` and `[`, so without this `app/[id]/page.tsx:12`
     reads as a citation of `id]/page.tsx`. The lookbehind admits the path only at the start
@@ -785,7 +785,7 @@ def _literal(path: str) -> re.Pattern[str]:
     citation of the `a.py` a finding at `src/a.py` would try.
     """
     return re.compile(
-        rf"[(\[*<`]*(?<![^\s(\[*<`])({re.escape(path)})"
+        rf"[(\[*<`]*(?<![^\s(\[*<`])((?:\./)?{re.escape(path)})"
         r"`?:(\d+)(?::\d+)?(?:[-–—]\d+)?\b[*)\]>`]*"
     )
 
@@ -793,11 +793,14 @@ def _literal(path: str) -> re.Pattern[str]:
 def citations(quote: str, own: str | None) -> list[Citation]:
     """Every citation in the quote, in order, no two overlapping.
 
-    The finding's own path, then its basename, are read before `_REFERENCE`, and a
-    `_REFERENCE` match overlapping one is dropped: two readings of one citation would cut
-    the quote in two different places.
+    The finding's own path, as its `file` spells it and as `norm_path` does, then their
+    basenames, are read before `_REFERENCE`, and a `_REFERENCE` match overlapping one is
+    dropped: two readings of one citation would cut the quote in two different places.
+    Both spellings, because the file read and the file a poster keys are the one
+    `norm_path` names, so a claim must not turn on which spelling the lens copied.
     """
-    names = (own, own.rsplit("/", 1)[-1]) if own is not None else ()
+    paths = (own, norm_path(own)) if own is not None else ()
+    names = [*paths, *(path.rsplit("/", 1)[-1] for path in paths)]
     patterns = [(_literal(name), True) for name in dict.fromkeys(names) if name]
     patterns.append((_REFERENCE, False))
     found: list[Citation] = []

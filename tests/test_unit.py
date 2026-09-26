@@ -2912,6 +2912,22 @@ class TestKeysV1:
         ("app/[id]/page.tsx:12: foo(bar, baz)", "app/[id]/page.tsx", "foo(bar, baz)"),
         ("(app/(auth)/page.tsx:12) -- foo(bar, baz)", "app/(auth)/page.tsx", "foo(bar, baz)"),
         ("foo(bar, baz) -- app/[id]/page.tsx:12", "app/[id]/page.tsx", "foo(bar, baz)"),
+        # Spelled with a `./` on either side, which `norm_path` reads as the same file.
+        (
+            "app/[id]/page.tsx:2 -- return renderPage(props);",
+            "app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
+        (
+            "app/[id]/page.tsx:2 -- return renderPage(props);",
+            "./app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
+        (
+            "./app/[id]/page.tsx:2 -- return renderPage(props);",
+            "app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
         # Its basename.
         ("a.py:12 -- total = compute(a, b)", OWN, CODE),
         ("(a.py:12) total = compute(a, b)", OWN, CODE),
@@ -3010,6 +3026,9 @@ class TestKeysV1:
     QUOTE_KEYS: dict[str, str] = {
         CODE: "f6d53bad0a55cc1481554a6bbc8409829d9663465c7a3069569a784f951ad97c",
         "foo(bar, baz)": "a1eac5fd51a84970a6897ba2f848f1f07001d0c4ec7b8eb97a3ac979df0d4147",
+        "return renderPage(props);": (
+            "9abc73d462d4cb3277a9269340fe56936e230c6ee64799115ee2fb0014af75c3"
+        ),
         "return bill(account)": "606eafd0681fda2ab232ea5812d0d13a2c8ab0a015af3899622c3718330aaa1e",
         "merged[-1] = (merged[-1][0], end)": (
             "2843e8f84c816e9b966ee53801fe30ce07a5c5c24f0f7a4b2d20768d0af46fda"
@@ -3141,6 +3160,36 @@ class TestKeysV1:
         # citations loses one per pass, because only the edge citation is the lens's.
         claim = findings.claim_v1(cite + ticks.format(code), self.OWN)
         assert findings.claim_v1(claim, self.OWN) == claim
+
+    @PROPERTY
+    @given(
+        path=st.sampled_from(["app/[id]/page.tsx", "app/(auth)/page.tsx", "src/a.py"]),
+        form=st.sampled_from(["{}", "./{}", "/{}", "{}/"]),
+        separator=st.sampled_from(["/", "//", "/./", "\\"]),
+        written=st.sampled_from(["{}", "./{}"]),
+        decoration=st.sampled_from(["{}", "**{}**", "({})", "`{}`", "[{}]", "`path`"]),
+        shape=st.sampled_from(
+            ["{cite} -- {code}", "{code} -- {cite}", "{cite}: {code}\n{cite}: {code}"]
+        ),
+        code=_claimed_code,
+    )
+    def test_every_spelling_of_the_findings_file_makes_one_claim(
+        self,
+        path: str,
+        form: str,
+        separator: str,
+        written: str,
+        decoration: str,
+        shape: str,
+        code: str,
+    ):
+        # `norm_path` is how a poster keys the file, so every spelling it reads as one names
+        # the same file, in the finding's `file` and in the quote alike.
+        own = form.format(path.replace("/", separator))
+        assert findings.norm_path(own) == path
+        quote = shape.format(cite=_decorated(written.format(path), "2", decoration), code=code)
+        plain = shape.format(cite=_decorated(path, "2", decoration), code=code)
+        assert findings.claim_v1(quote, own) == findings.claim_v1(plain, path), (quote, own)
 
 
 # The file every `TestAnchors` case reads, one entry per line so a number is easy to check.
@@ -3454,6 +3503,32 @@ class TestAnchors:
     def test_a_path_spelled_another_way_still_names_its_file(self, file: str):
         entry = self._locate("return bill(account, total)", file=file)
         assert (entry["path"], entry["state"]) == ("src/f.py", "verified")
+
+    @pytest.mark.parametrize(
+        ("file", "quote"),
+        [
+            ("./app/[id]/page.tsx", "app/[id]/page.tsx:2 -- return renderPage(props);"),
+            ("app/[id]/page.tsx", "./app/[id]/page.tsx:2 -- return renderPage(props);"),
+        ],
+    )
+    def test_a_bracketed_path_spelled_another_way_still_cites_its_file(self, file: str, quote: str):
+        # `_REFERENCE` reads either citation as one of `id]/page.tsx`, another file, so only
+        # the finding's own path can say which file the quote cites.
+        page = self.tree / "app" / "[id]"
+        page.mkdir(parents=True)
+        (page / "page.tsx").write_text(
+            "export default function Page() {\n  return renderPage(props);\n}\n",
+            encoding="utf-8",
+        )
+        entry = self._locate(quote, line=7, file=file)
+        assert (entry["path"], entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "app/[id]/page.tsx",
+            "relocated",
+            "citation",
+            2,
+            2,
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("return renderPage(props);")
 
     def test_a_file_whose_name_is_padded_is_another_path(self):
         # The poster strips each segment, so it would look up `src/f.py`, not this file.

@@ -768,8 +768,22 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "the finding's basename is not read as its own path",
         "persona_review/findings.py",
-        r'    names = \(own, own\.rsplit\("/", 1\)\[-1\]\) if own is not None else \(\)',
-        "    names = (own,) if own is not None else ()",
+        r'    names = \[\*paths, \*\(path\.rsplit\("/", 1\)\[-1\] for path in paths\)\]',
+        "    names = list(paths)",
+    ),
+    Mutation(
+        # `./app/[id]/page.tsx` as the finding's `file` is the file `app/[id]/page.tsx`
+        # cites, and `_REFERENCE` cannot read that citation for it.
+        "the finding's own path is read only as its file spells it",
+        "persona_review/findings.py",
+        r"    paths = \(own, norm_path\(own\)\) if own is not None else \(\)",
+        "    paths = (own,) if own is not None else ()",
+    ),
+    Mutation(
+        "a `./` before the finding's own path in a quote is not part of its citation",
+        "persona_review/findings.py",
+        r"\(\?:\\\./\)\?",
+        "",
     ),
     Mutation(
         # The own path's literal has to wear what `_REFERENCE` does, or `(a.py:12)` leaves
