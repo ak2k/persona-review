@@ -808,7 +808,7 @@ class TestDriftIsNotBlamedOnTheModel:
     def test_the_kinds_we_deliberately_skip_are_not_mistaken_for_drift(self):
         # THE OTHER CONTROL, and the one that decides whether exit 6 still exists: a genuine
         # dud emits agent_message and reasoning and nothing else. If those counted as
-        # unrecognised, every vacuous run would report drift and the refusal would be dead.
+        # unrecognized, every vacuous run would report drift and the refusal would be dead.
         stats = self._codex(CODEX_NO_CALLS)
         assert stats.tool_calls == 0
 
@@ -1968,7 +1968,7 @@ class TestGateIsFailClosed:
     def test_a_schema_keyword_is_either_enforced_or_refused_never_skipped(
         self, field: str, spec: dict[str, Any], value: Any
     ):
-        # Generalises the hand-written anyOf/oneOf/$ref/const case over the whole keyword
+        # Generalizes the hand-written anyOf/oneOf/$ref/const case over the whole keyword
         # vocabulary, including keywords the plugin has not invented yet. Silently ignoring
         # one certifies a review against rules nobody checked -- so acceptance has to mean
         # every keyword present was one of the two declared sets.

@@ -233,7 +233,7 @@ def check_schema_supported(spec: JSONObject, label: str = "schema") -> None:
 
 
 def _type_names(label: str, spec: JSONObject) -> list[str]:
-    """The declared type(s), normalised to a list of known names.
+    """The declared type(s), normalized to a list of known names.
 
     JSON Schema lets `type` be a LIST, and the plugin schema uses that form:
     `"suggested_fix": {"type": ["string", "null"]}`. Reading only the `str` case skips that
@@ -493,7 +493,7 @@ class RunStats:
     `tool_calls` is every call, local or not, recorded so the refusal can say what the run
     did instead. Both are ints and never None, because "the adapter could not tell" is not
     an answer this package is entitled to give. A stream carrying nothing this module
-    recognises counts zero and the run is refused; a stream that cannot be READ is an
+    recognizes counts zero and the run is refused; a stream that cannot be READ is an
     environment error rather than a quiet zero, because the two have different causes and
     only one of them is about the model. The rest are provenance — best effort, and None
     where a provider publishes no comparable number.
@@ -531,7 +531,7 @@ class Evidence:
 # codex side needs the drift detection below.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
-# defence in depth rather than a fix for an observed shape: grok returns tool RESULTS in
+# defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
 # `user` events as `tool_result` blocks, which the block-type test already excludes. If a
 # future build ever echoed a `tool_use` block back, this stops it being counted twice.
 # Verified against grok 1.0.13: one real review carried 99 `tool_use` blocks over 31 turns.
@@ -738,7 +738,7 @@ def _plural(count: int, noun: str) -> str:
 
 
 def describe_run(stats: RunStats) -> str:
-    """The counts behind a refusal, in one clause. A refusal nobody can check is a rumour."""
+    """The counts behind a refusal, in one clause. A refusal nobody can check is a rumor."""
     parts: list[str] = []
     if stats.turns is not None:
         parts.append(_plural(stats.turns, "turn"))

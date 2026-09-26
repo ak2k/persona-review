@@ -341,7 +341,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
-        # unrecognised, every genuine dud would report drift and exit 6 would be dead code.
+        # unrecognized, every genuine dud would report drift and exit 6 would be dead code.
         "kinds this wrapper skips on purpose are reported as drift",
         "persona_review/validate.py",
         r"                if item_kind not in CODEX_QUIET_ITEMS:",
@@ -1836,7 +1836,7 @@ class TestGuardsCanFail:
             #
             # That is not hypothetical. The `start_new_session=True` probe matched the
             # DOCSTRING three dozen lines above the code, mutated a sentence, changed no
-            # behaviour, and was duly reported as a surviving guard. The finding was a
+            # behavior, and was duly reported as a surviving guard. The finding was a
             # harness defect wearing the costume of a code defect.
             matches = len(re.findall(mutation.pattern, text, flags=re.M))
             if matches != 1:

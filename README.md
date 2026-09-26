@@ -78,8 +78,8 @@ budget to spend.
 **`6` is never the answer when the wrapper is the broken part.** If a provider CLI upgrade
 renames the event kinds this counts, every run would count zero and `6` would blame the model
 on every one of them — a permanent outage wearing the costume of a bad model. So a stream
-carrying kinds this build does not recognise, or no events at all, exits `3` naming the
-unrecognised kinds instead; `6` is reached only when the stream was understood and there was
+carrying kinds this build does not recognize, or no events at all, exits `3` naming the
+unrecognized kinds instead; `6` is reached only when the stream was understood and there was
 genuinely nothing in it.
 
 **A review is defined as inspecting the repository.** Passing the material in the prompt
@@ -434,7 +434,7 @@ variable. Two rules are worth knowing because they refuse things you might expec
 - **A watchdog cannot be switched off.** `0` is rejected, not treated as "no timeout". An unwatched
   run is a full-effort model run that nothing will stop and nothing will read. Set a large value if
   you want a long one.
-- **An unrecognised `CE_PERSONA_*` name is an error.** `CE_PERSONA_IDEL_SECS=30` would otherwise be
+- **An unrecognized `CE_PERSONA_*` name is an error.** `CE_PERSONA_IDEL_SECS=30` would otherwise be
   ignored in silence while the real idle timeout stayed at its default — a misconfiguration that
   looks exactly like a working one.
 
@@ -493,6 +493,8 @@ other command, flag and exit status is unchanged.
   - Where a quote citing several locations is cut into per-location segments shifts with this,
     and so does the text of some drop reasons.
   - Code shaped like `t:30-60` is now read as a range citation too.
+- **US spelling in two messages.** The `--help` text and the error for an unknown
+  `CE_PERSONA_*` name now say `unrecognized`.
 
 ## Changes in 0.3.3
 
@@ -563,7 +565,7 @@ are unchanged; the exit statuses are not:
 - Both review commands now enforce timeouts. A wedged provider previously hung forever and took the
   calling agent with it; `CE_PERSONA_IDLE_SECS` and `CE_PERSONA_HARD_SECS` bound that.
 - **`CE_PERSONA_*` values are validated strictly.** A timeout of `0`, a non-finite or negative
-  number, and an unrecognised `CE_PERSONA_*` name all exit `2`. Previously `0` disabled the watchdog
+  number, and an unrecognized `CE_PERSONA_*` name all exit `2`. Previously `0` disabled the watchdog
   and a misspelled name was ignored in silence.
 - **Concurrent runs of the same persona and provider in one run directory are refused** with `2`
   rather than overwriting each other. See Concurrency above.
@@ -599,7 +601,7 @@ ships.
 `python3 -m persona_review.flags` probes the installed `grok` for CLI drift. It needs a real
 authenticated binary, so no flake check runs it.
 
-## Licence
+## License
 
 Apache-2.0. Persona briefs and the findings schema are read at run time from the
 compound-engineering plugin, which is MIT — see `NOTICE`.

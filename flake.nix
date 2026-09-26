@@ -62,7 +62,7 @@
             # The cwd, PYTHONPATH and PYTHONHOME are three INSTANCES of that mechanism, not
             # the set. Two were closed one at a time under a comment reading "TWO doors, and
             # both have to be shut"; a reviewer promptly found the third. So the doors below
-            # are defence in depth, and the actual guarantee is PERSONA_REVIEW_LIB: the code
+            # are defense in depth, and the actual guarantee is PERSONA_REVIEW_LIB: the code
             # asserts at startup that the gate it is running came from here, which holds for
             # instances nobody has enumerated.
             #
@@ -162,7 +162,7 @@
                        python3 -m pytest ${self}/tests/test_unit.py \
                          -p no:cacheprovider --no-cov --no-header -q > control.log 2>&1; then
                     echo "FAIL: the suite passed while importing something other than the" >&2
-                    echo "packaged library. PERSONA_REVIEW_EXPECT_LIB is not being honoured." >&2
+                    echo "packaged library. PERSONA_REVIEW_EXPECT_LIB is not being honored." >&2
                     exit 1
                   fi
                   grep -q 'not the packaged library' control.log || {
@@ -222,7 +222,7 @@
                   # ones that ship. The unit and process checks already run the built output;
                   # a harness measuring a different copy is the same defect their own
                   # negative controls exist to catch. The suite asserts this variable is
-                  # honoured, so the source-tree fallback cannot silently apply here.
+                  # honored, so the source-tree fallback cannot silently apply here.
                   PERSONA_REVIEW_PKG=${persona-review}/${python.sitePackages} \
                     python3 -m pytest ${self}/tests/test_mutations.py \
                       -p no:cacheprovider --no-cov --no-header -q

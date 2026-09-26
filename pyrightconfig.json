@@ -13,7 +13,7 @@
   // way. No TypedDict, so nothing here asserts a schema shape the plugin is free to change.
   //
   // `include` must name persona_review/ explicitly. An earlier config named a directory that
-  // held shell scripts, so exactly one file was analysed and a clean strict run covered none
+  // held shell scripts, so exactly one file was analyzed and a clean strict run covered none
   // of the code that ships. The `types` flake check now ends with a negative control that
   // fails if the checker accepts `return x + None` in the library.
   "reportMissingImports": "none",

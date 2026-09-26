@@ -95,7 +95,7 @@ environment
 
   Both timeouts must be greater than zero: there is no way to switch a watchdog
   off, because an unwatched run is a full-effort model run that nothing will stop
-  and nothing will read. An unrecognised CE_PERSONA_* name is an error, not a
+  and nothing will read. An unrecognized CE_PERSONA_* name is an error, not a
   shrug -- a misspelled one would otherwise leave the real setting at its default.
 """
 

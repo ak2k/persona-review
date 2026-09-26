@@ -103,7 +103,7 @@ class VacuousRun(AppError):
     is fine, and the same command may well work next time.
 
     Reached only when the wrapper positively understood the stream and counted nothing in it.
-    A stream it could not read, or one carrying event kinds it does not recognise, is an
+    A stream it could not read, or one carrying event kinds it does not recognize, is an
     EnvError instead — "the model inspected nothing" would be a false statement told
     identically on every run, about the one component that was working.
     """

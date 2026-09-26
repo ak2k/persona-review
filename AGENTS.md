@@ -43,7 +43,7 @@ see *Things that look like bugs and are not*) and is free to grow fields it has 
 so `validate.JSONValue` plus `isinstance` narrowing is the documented choice. See the note
 at the top of `validate.py`.
 
-**Taken from the template anyway:** `extra="forbid"`. An unrecognised `CE_PERSONA_*` name is
+**Taken from the template anyway:** `extra="forbid"`. An unrecognized `CE_PERSONA_*` name is
 an error, not a shrug — `CE_PERSONA_IDEL_SECS=30` used to leave the real idle timeout at its
 default and say nothing. Eleven lines in `config.py`. The idea was worth more than the
 library here.
@@ -67,7 +67,7 @@ one line, and a person reading one error.
 
 **Why — measured, not assumed** (rich 15.0.0, Python 3.14):
 
-The obvious objection, colour, is **not** the reason: rich auto-detects a non-TTY and emits
+The obvious objection, color, is **not** the reason: rich auto-detects a non-TTY and emits
 no ANSI when piped. Two real ones replace it.
 
 **It wraps the payload.** Rich falls back to **80 columns** when it cannot detect a terminal.
@@ -90,7 +90,7 @@ images set, rich emits ANSI even when piped. The caller does not control that va
 
 **Template says:** typer for Profile A.
 
-**Status: open, and deprioritised — not blocked.** Two objections previously recorded here
+**Status: open, and deprioritized — not blocked.** Two objections previously recorded here
 were wrong, and are corrected rather than deleted so they are not re-derived:
 
 - ~~A missing option value would exit 1, not 2.~~ **False.** `click.UsageError.exit_code`
@@ -161,7 +161,7 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   structurally — a `tool_use` content block — so any of them counts and there is no list to
   go stale. codex names it by an item KIND, so that adapter carries a list, and a list can
   fall out of date. Hence the drift check on the codex side only: a stream whose item kinds
-  are all unrecognised exits `3` naming them, never `6`. Getting that wrong would report
+  are all unrecognized exits `3` naming them, never `6`. Getting that wrong would report
   "the model never opened the diff" identically on every run after a provider upgrade — a
   permanent outage, misdiagnosed as a bad model, in the direction the README tells callers to
   retry. `CODEX_QUIET_ITEMS` is what keeps "a kind we skip on purpose" and "a kind we have

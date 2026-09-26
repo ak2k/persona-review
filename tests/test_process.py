@@ -11,7 +11,7 @@ PATH are the runners.
 **Every case runs for BOTH providers.** That is not thoroughness for its own sake: when the
 two runners were separate scripts, guards were repeatedly added to both and tested against
 only one, so deleting the second copy left the suite green. One code path plus a
-parameterised suite makes that impossible rather than merely unlikely.
+parameterized suite makes that impossible rather than merely unlikely.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ TYPE_INVALID = json.dumps(
     }
 )
 
-# A stub runner. It records the argv it was called with, honours codex's `-o`, and does
+# A stub runner. It records the argv it was called with, honors codex's `-o`, and does
 # whatever the spec file tells it — including going silent, so the watchdogs can be tested.
 #
 # This interpreter, not `env python3`, for the reason the shims below carry the same
@@ -508,7 +508,7 @@ class Harness:
     def findings(self, *args: str) -> subprocess.CompletedProcess[str]:
         """The retrieval command, as installed. On Harness rather than on its own test class
         because the vacuous-run tests need it too: the refusal is only closed if BOTH the
-        review command and the reader of its artifact honour it."""
+        review command and the reader of its artifact honor it."""
         cmd = self.findings_cmd
         argv = [str(cmd), *args] if isinstance(cmd, Path) else [*cmd, *args]
         return subprocess.run(argv, capture_output=True, text=True, env=self.env(), check=False)
@@ -787,7 +787,7 @@ class TestVacuousRuns(Harness):
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_refusal_names_the_evidence_and_keeps_the_artifacts(self, provider: str):
-        # A refusal a caller cannot audit is a rumour. The counts go on stderr and the dud
+        # A refusal a caller cannot audit is a rumor. The counts go on stderr and the dud
         # itself stays on disk, because it is the only record of what was refused.
         proc = self.review_dud(provider, self.EMPTY)
         assert proc.returncode == 6
@@ -840,7 +840,7 @@ class TestVacuousRuns(Harness):
         # THE LAUNDERING ROUTE. exit 6 keeps the artifact as evidence, and an artifact on
         # disk is exactly what `ce-persona-findings` renders — so a caller that ignored the
         # status got the same dud back as an ordinary listing at exit 0, one command later,
-        # through this package's own reader. Both ends have to honour the refusal.
+        # through this package's own reader. Both ends have to honor the refusal.
         assert self.review_dud(provider, ANSWER).returncode == 6
         proc = self.findings(str(self.artifact(provider)))
         assert proc.returncode == 6, proc.stdout + proc.stderr
@@ -999,7 +999,7 @@ class TestVocabularyDriftIsNotBlamedOnTheModel(Harness):
     def test_a_genuine_dud_is_still_the_model_s_doing(self):
         # THE CONTROL that keeps exit 6 alive: a real vacuous run emits agent_message and
         # nothing else, and those are kinds the wrapper knows and skips on purpose. If they
-        # counted as unrecognised, every dud would report drift and the refusal would be dead.
+        # counted as unrecognized, every dud would report drift and the refusal would be dead.
         self.set_spec(stdout=codex_stream(), last=ANSWER)
         proc = self.review("codex", "adversarial-reviewer")
         assert proc.returncode == 6, proc.stdout + proc.stderr
