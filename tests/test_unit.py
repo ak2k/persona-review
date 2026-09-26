@@ -1064,6 +1064,7 @@ class TestARefusalSurvivesBeingHandedOn:
                 [str(art), "--all"],
                 [str(art), "--json"],
                 [str(art), "--show", "all"],
+                [str(art), "--anchors", "-C", tmp],
             ):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -2314,7 +2315,7 @@ class TestTheMergeTierProjection:
     def test_help_documents_the_new_modes(self):
         code, out, _ = self._run("--help")
         assert code == 0
-        for token in ("--return", "--verify-quotes", "-C <dir>"):
+        for token in ("--return", "--verify-quotes", "-C <dir>", "--anchors -C <dir>"):
             assert token in out
         # Wrapped in HELP, one sentence in README: the words are the contract, the line
         # breaks are layout, so the comparison is against the collapsed text.
@@ -3660,6 +3661,99 @@ class TestAnchors:
         for raw in (b"\xff\xfe", b"[]", b"{}"):
             with pytest.raises(findings.FindingsError):
                 findings.anchors(str(self.dir / "x.json"), raw, self.tree)
+
+    # ---- the command ----
+
+    def _main(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_command_prints_the_document_and_counts_every_state(self):
+        bill = "return bill(account, total)"
+        items: list[Any] = [
+            finding(file="src/f.py", line=5, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence="total = compute_total(account)"),
+            finding(file="src/f.py", line=1, first_evidence="this text is in no file at all"),
+            finding(file="src/missing.py", line=1, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence="src/f.py:9"),
+            finding(file="src/f.py", line=5, first_evidence=f"src/f.py:5 -- {bill}"),
+        ]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 0, err
+        doc = json.loads(out)
+        assert doc == findings.anchors(str(art), raw, self.tree)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert [row["state"] for row in doc["findings"]] == [
+            "verified",
+            "relocated",
+            "ambiguous",
+            "not_found",
+            "unverifiable",
+            "no_evidence",
+            "verified",
+        ]
+        assert err == (
+            "ce-persona-findings: anchors: 7 findings (2 verified, 1 relocated, 1 ambiguous,"
+            " 1 not found, 1 unverifiable, 1 no evidence)\n"
+        )
+
+    def test_the_summary_of_an_artifact_with_no_findings_counts_zero_in_every_state(self):
+        raw = json.dumps({"findings": ["not a finding"]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 0, err
+        assert json.loads(out)["findings"] == []
+        assert err == (
+            "ce-persona-findings: anchors: 0 findings (0 verified, 0 relocated, 0 ambiguous,"
+            " 0 not found, 0 unverifiable, 0 no evidence)\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (("--anchors",), "--anchors wants -C <dir>"),
+            (("--anchors", "-C"), "-C wants a directory"),
+            (("--anchors", "-C", "ARTIFACT"), "is not a directory"),
+            (("--anchors", "--json", "-C", "TREE"), "--anchors cannot be combined with --json"),
+            (("--json", "--anchors", "-C", "TREE"), "--anchors cannot be combined with --json"),
+            (("--anchors", "--show", "1", "-C", "TREE"), "cannot be combined with --show"),
+            (("--anchors", "--show", "all", "-C", "TREE"), "cannot be combined with --show"),
+            (("--anchors", "--return", "-C", "TREE"), "cannot be combined with --return"),
+            (("--anchors", "--verify-quotes", "-C", "TREE"), "only applies to --return"),
+        ],
+    )
+    def test_a_mode_it_cannot_serve_is_a_usage_error(self, args: tuple[str, ...], expected: str):
+        raw = json.dumps({"findings": [finding(file="src/f.py", line=5)]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        given = {"ARTIFACT": str(art), "TREE": str(self.tree)}
+        code, out, err = self._main(str(art), *(given.get(a, a) for a in args))
+        assert code == 2, err
+        assert expected in err, err
+        assert out == ""
+
+    def test_a_verdicts_artifact_is_a_usage_error_before_anything_is_located(self):
+        raw = json.dumps({"verdicts": [{"#": 1, "validated": True, "reason": "r"}]}).encode()
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 2, err
+        assert "a verdict has no quote to locate" in err
+        assert out == ""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(None, "cannot read findings artifact"), (b"[]", "is not a findings or verdicts")],
+    )
+    def test_an_artifact_it_cannot_use_is_a_data_error(self, raw: bytes | None, expected: str):
+        art = self.dir / "correctness-grok.json" if raw is None else self._artifact(raw, None)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 1, err
+        assert expected in err, err
+        assert out == ""
 
     # ---- properties, over findings drawn from the shapes that reach every state ----
 

@@ -1282,6 +1282,50 @@ MUTATIONS: list[Mutation] = [
         "    vacuous = None if as_return else validate.refused_run(Path(path))",
     ),
     Mutation(
+        # A poster places and keys comments from --anchors with nobody reading them, so a
+        # refused run reaching it is posted as a review that happened.
+        "the vacuous-run refusal stops preceding --anchors",
+        "persona_review/findings.py",
+        r"^    vacuous = validate\.refused_run\(Path\(path\)\)$",
+        "    vacuous = None if as_anchors else validate.refused_run(Path(path))",
+    ),
+    Mutation(
+        # Each prints a different document on the same stdout, so ranking them hands a
+        # parser a shape it did not ask for.
+        "--anchors together with --json is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--json", as_json\)',
+        '("--json", False)',
+    ),
+    Mutation(
+        "--anchors together with --show is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--show", show is not None\)',
+        '("--show", False)',
+    ),
+    Mutation(
+        "--anchors together with --return is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--return", as_return\)',
+        '("--return", False)',
+    ),
+    Mutation(
+        # The quotes would be located in whatever happens to be checked out there, and the
+        # document would not say so.
+        "--anchors falls back to the current directory when -C is missing",
+        "persona_review/findings.py",
+        r'^            return _usage_error\("--anchors wants -C.*$',
+        '            repo_spec = "."',
+    ),
+    Mutation(
+        # A verdict carries no quote, so the listing it falls through to exits 0 as if the
+        # document had been written.
+        "--anchors on a verdicts artifact is not refused",
+        "persona_review/findings.py",
+        r'^    if as_anchors:\n        return _usage_error\(\n            f"--anchors locates',
+        '    if False:\n        return _usage_error(\n            f"--anchors locates',
+    ),
+    Mutation(
         "usage errors collapse back onto the data exit code",
         "persona_review/findings.py",
         r"^EXIT_USAGE = 2$",
@@ -1432,8 +1476,9 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         # The documented way to consume --return pipes it into `jq -s .`. Without the handler
         # a reader that stops early leaves the interpreter's shutdown flush to raise where
-        # nothing can catch it, reporting failure for a projection that completed.
-        "a broken pipe turns a completed --return into a failure",
+        # nothing can catch it, reporting failure for a document that was completed. One
+        # handler serves --return and --anchors, and a test of each dies.
+        "a broken pipe turns a completed --return or --anchors into a failure",
         "persona_review/findings.py",
         r"^    except BrokenPipeError:$",
         "    except SystemError:",
@@ -1480,6 +1525,14 @@ MUTATIONS: list[Mutation] = [
         "    for suffix in ():",
         suite="process",
         selector="refusal_before_dispatch and grok",
+    ),
+    Mutation(
+        "a stale anchors file survives the run directory's clear",
+        "persona_review/cli.py",
+        r'^    "-anchors\.json",$',
+        "",
+        suite="process",
+        selector="stale_anchors_file and grok",
     ),
     Mutation(
         # The idle watchdog. Its `if secs > 0` guard is gone because config makes the value
