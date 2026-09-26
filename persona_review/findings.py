@@ -70,6 +70,7 @@ an ordinary listing at exit 0, one command later. Every output mode is refused, 
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import hashlib
 import json
@@ -206,9 +207,12 @@ def artifact_kinds(raw: JSONValue) -> tuple[str, ...]:
     return tuple(key for key in ARTIFACT_KEYS if isinstance(raw.get(key), list))
 
 
-def load(path: str) -> JSONObject:
+def load(path: str, data: bytes | None = None) -> JSONObject:
+    # `data` is the file's bytes when the caller has already read them to hash, so what
+    # is parsed is what was hashed rather than whatever the path holds a moment later.
     try:
-        raw = cast(JSONValue, json.loads(Path(path).read_text(encoding="utf-8")))
+        text = Path(path).read_text(encoding="utf-8") if data is None else data.decode("utf-8")
+        raw = cast(JSONValue, json.loads(text))
     except (OSError, ValueError) as exc:
         raise FindingsError(f"cannot read findings artifact {path}: {exc}") from exc
     kinds = artifact_kinds(raw)
@@ -903,6 +907,290 @@ def evidence_key_v1(path: str, lines: Sequence[str]) -> str:
     """
     text = "\n".join(line for line in map(_normalized, lines) if line)
     return _key("persona-review/evidence-key/1", path, text)
+
+
+# ---------------------------------------------------------------------------------------
+# WHERE EACH QUOTE IS. What a poster reads instead of searching a diff itself: for every
+# finding, whether its quote is on the line the finding names, elsewhere in its file, or
+# nowhere, and the two keys. A problem with one finding is a state with a reason, never an
+# exception, so one malformed finding cannot cost a pull request the placement of the rest.
+
+ANCHORS_VERSION = 1
+
+# How many places an ambiguous quote lists. `occurrences` still counts all of them.
+_CANDIDATE_CAP = 20
+
+
+def norm_path(path: str) -> str:
+    """`path` as the poster keys a file: `/` separators, no `.`, `..` or empty segments.
+
+    Each segment is stripped before it is tested, so `.. ` is the dot segment it looks like.
+    An entry names the file it read only when this agrees, so the poster looks up the file
+    that was read and no other.
+    """
+    segments = (segment.strip() for segment in path.replace("\\", "/").split("/"))
+    return "/".join(segment for segment in segments if segment not in ("", ".", ".."))
+
+
+def _file_lines(text: str) -> list[str]:
+    # Numbered as a diff numbers them. `splitlines` also breaks at a form feed, a lone `\r`
+    # and U+2028, which puts every later line off by one. A CRLF line keeps its `\r`, which
+    # every comparison here reads as whitespace.
+    return text.split("\n")
+
+
+@dataclass(frozen=True)
+class _Stream:
+    """A file's non-blank lines, each whitespace-collapsed, joined by one space.
+
+    One string, so a quote matches however the file wraps, indents or spaces the code, and
+    where each line starts in it, so a match maps back to the lines it covers.
+    """
+
+    text: str
+    starts: tuple[int, ...]
+    numbers: tuple[int, ...]
+
+    def line_at(self, offset: int) -> int:
+        return self.numbers[bisect.bisect_right(self.starts, offset) - 1]
+
+
+def _stream(lines: Sequence[str]) -> _Stream:
+    parts: list[str] = []
+    starts: list[int] = []
+    numbers: list[int] = []
+    offset = 0
+    for number, line in enumerate(lines, 1):
+        part = _normalized(line)
+        if part:
+            parts.append(part)
+            starts.append(offset)
+            numbers.append(number)
+            offset += len(part) + 1
+    return _Stream(" ".join(parts), tuple(starts), tuple(numbers))
+
+
+def _spans(stream: _Stream, claim: str) -> list[tuple[int, int]]:
+    """Every run of lines the claim occurs on, in file order, each once.
+
+    A run is the lines the match's own characters cover: a quote of one line the file
+    wraps over two covers both, and a blank line inside the match is inside the run.
+    """
+    found: dict[tuple[int, int], None] = {}
+    at = stream.text.find(claim)
+    while at != -1:
+        found[(stream.line_at(at), stream.line_at(at + len(claim) - 1))] = None
+        at = stream.text.find(claim, at + 1)
+    return list(found)
+
+
+def _occurrences(stream: _Stream, claim: str, escaped: bool) -> list[tuple[int, int]]:
+    """Where the claim occurs, reading a literal `\\n` or `\\t` as whitespace if it must.
+
+    A lens that escaped a multi-line quote twice writes `a\\n    b` for two lines. That
+    reading is tried only when the claim occurs nowhere and the quote has no real newline,
+    because then the escape is the lens's rather than the code's, and never in a key.
+    """
+    spans = _spans(stream, claim)
+    if spans or not escaped:
+        return spans
+    plain = _normalized(claim.replace("\\n", " ").replace("\\t", " "))
+    if len(plain) < _QUOTE_FLOOR:
+        return []
+    return _spans(stream, plain)
+
+
+def _line_number(digits: str) -> int | None:
+    # `int` refuses more than 4300 digits, and these are model-written.
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _names_own(cite: Citation, own: str, repo: Path) -> bool:
+    """Whether a citation names the finding's own file: spelled as it, or resolving to it."""
+    return cite.own or _founds(_Reference(cite.path, (), 0, cite.start, cite.end), own, repo)
+
+
+def _claims(
+    quote: str, claim: str, cites: list[Citation], numbers: list[int | None]
+) -> list[tuple[str, int | None]]:
+    """Each text the quote claims the file holds, with the line it is checked at.
+
+    `None` is the primary claim, the only one searched through the whole file. A citation
+    of the finding's own file, whose line is in `numbers`, also claims the quote less that
+    citation, and its own snippet when the quote cites several places, but only at the line
+    it names: searched for anywhere, a fragment is found wherever it happens to occur.
+    """
+    spans = [_Cited(c.path, c.line, c.start, c.end, None) for c in cites]
+    owned = _segments(quote, spans)
+    texts: list[tuple[str, int | None]] = [(claim, None)]
+    for index, number in enumerate(numbers):
+        if number is None:
+            continue
+        texts.append((_normalized(_compared(quote, spans[index], spans)), number))
+        if owned is not None:
+            texts.append((_normalized(owned[index][1]), number))
+    return [(text, n) for text, n in dict.fromkeys(texts) if len(text) >= _QUOTE_FLOOR]
+
+
+def _read(own: str, repo: Path) -> tuple[str, list[str]] | str:
+    """The finding's file as its in-tree path and its lines, or why it cannot be read.
+
+    Contained by `--verify-quotes`'s rule, on the RESOLVED path. It must also resolve to
+    the path the finding names: reached through a link or a `..` it is another file, and a
+    poster would place the finding on the path it was given rather than on this one.
+    """
+    try:
+        target = (repo / own).resolve(strict=True)
+    except (OSError, ValueError):
+        return "no such file"
+    if not target.is_relative_to(repo):
+        return "outside the tree"
+    if not target.is_file():
+        return "not a file"
+    path = target.relative_to(repo).as_posix()
+    if path != norm_path(own):
+        return "resolves to another path"
+    try:
+        data = target.read_bytes()
+    except OSError:
+        return "unreadable"
+    return path, _file_lines(data.decode("utf-8", errors="replace"))
+
+
+@dataclass(frozen=True)
+class _Place:
+    state: str
+    via: str | None
+    span: tuple[int, int] | None
+    occurrences: int | None
+    reason: str
+    candidates: tuple[tuple[int, int], ...] = ()
+
+
+def _place(
+    claims: list[tuple[str, int | None]],
+    stream: _Stream,
+    escaped: bool,
+    line: int | None,
+    cited: list[int],
+) -> _Place:
+    """The state of a quote the file was searched for: the first rule that holds wins."""
+    searched: list[tuple[int, int]] | None = None
+    held: list[tuple[int, int]] = []
+    for text, number in claims:
+        spans = _occurrences(stream, text, escaped)
+        if number is None:
+            searched = spans
+        held.extend(s for s in spans if number is None or s[0] <= number <= s[1])
+    count = None if searched is None else len(searched)
+    on_line = [s for s in held if line is not None and s[0] <= line <= s[1]]
+    on_cite = [s for s in held if any(s[0] <= n <= s[1] for n in cited)]
+    if on_line:
+        return _Place("verified", "line", on_line[0], count, "on the finding's line")
+    if on_cite:
+        return _Place("relocated", "citation", on_cite[0], count, "on a line the quote cites")
+    if searched is not None and len(searched) == 1:
+        return _Place("relocated", "search", searched[0], 1, "occurs once in the file")
+    if searched:
+        many = len(searched)
+        some = tuple(searched[:_CANDIDATE_CAP])
+        return _Place("ambiguous", None, None, many, f"occurs {many} times in the file", some)
+    return _Place("not_found", None, None, count, "not in the file")
+
+
+def locate(finding: Finding, repo: Path) -> JSONObject:
+    """Where this finding's quote is in its file under `repo`, and its two keys. Total.
+
+    The state says how far the quote could be followed: `verified` on the finding's own
+    line, `relocated` to a line it cites or to its one occurrence, `ambiguous` over several,
+    `not_found`, `unverifiable` when the file or the quote cannot be checked, `no_evidence`
+    when there is no code to look for. Only a placed quote has a span and an evidence key,
+    since those name lines of the file; only a quote with no code lacks a quote key.
+    """
+    file = finding.get("file")
+    own = file if isinstance(file, str) else None
+    given = finding.get("line")
+    line = given if isinstance(given, int) and not isinstance(given, bool) else None
+    entry: JSONObject = {
+        "file": own,
+        "path": None,
+        "line": line,
+        "state": "no_evidence",
+        "via": None,
+        "start": None,
+        "end": None,
+        "occurrences": None,
+        "candidates": [],
+        "reason": "no quote",
+        "quote_key": None,
+        "evidence_key": None,
+    }
+    quote = first_evidence(finding)
+    if quote is None:
+        return entry
+    claim = claim_v1(quote, own)
+    # First: a citation-only quote claims no code wherever it points, so it has no key and
+    # nothing to check, whatever file it cites.
+    if not claim:
+        return entry | {"reason": "the quote is only a citation"}
+    entry |= {"state": "unverifiable", "quote_key": quote_key_v1(claim)}
+    if own is None:
+        return entry | {"reason": "no file"}
+    repo = repo.resolve()
+    read = _read(own, repo)
+    if isinstance(read, str):
+        return entry | {"reason": read}
+    path, lines = read
+    entry["path"] = path
+    cites = _locators(quote, own)
+    mine = [_names_own(c, own, repo) for c in cites]
+    if cites and not any(mine):
+        # A quote of another file says nothing about this one, and every tree holds some
+        # twelve-character line that would match it somewhere.
+        return entry | {"reason": "cites only other files"}
+    numbers = [_line_number(c.line) if m else None for c, m in zip(cites, mine, strict=True)]
+    claims = _claims(quote, claim, cites, numbers)
+    if not claims:
+        return entry | {"reason": f"too short ({len(claim)} chars, floor {_QUOTE_FLOOR})"}
+    cited = [n for n in numbers if n is not None]
+    placed = _place(claims, _stream(lines), "\n" not in quote.strip(), line, cited)
+    entry |= {
+        "state": placed.state,
+        "via": placed.via,
+        "occurrences": placed.occurrences,
+        "candidates": [[start, end] for start, end in placed.candidates],
+        "reason": placed.reason,
+    }
+    if placed.span is not None:
+        start, end = placed.span
+        evidence = evidence_key_v1(path, lines[start - 1 : end])
+        entry |= {"start": start, "end": end, "evidence_key": evidence}
+    return entry
+
+
+def anchors(artifact: str, raw: bytes, repo: Path) -> JSONObject:
+    """Every finding of the artifact located under `repo`: the document `--anchors` prints.
+
+    Parsed from the bytes it hashes, so `artifact_sha256` attests what was located. `head`
+    comes from the run's provenance, which a poster checks against the head it posts to.
+    A verdicts artifact is refused rather than given an empty list, which would read as a
+    review that found nothing.
+    """
+    parsed = load(artifact, raw)
+    if not isinstance(parsed.get("findings"), list):
+        raise FindingsError(f"{artifact} is not a findings artifact: it has nothing to locate")
+    tree = repo.resolve()
+    return {
+        "anchors_version": ANCHORS_VERSION,
+        "artifact": artifact,
+        "artifact_sha256": validate.digest_bytes(raw),
+        "tree": str(tree),
+        "head": validate.reviewed_head(Path(artifact)),
+        "findings": [{"#": n, **locate(finding, tree)} for n, finding in numbered(parsed)],
+    }
 
 
 def fence(body: str) -> str:

@@ -60,6 +60,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -818,6 +819,38 @@ def write_provenance(
 PROVENANCE_SUFFIX = "-provenance.json"
 
 
+def _provenance(artifact: Path) -> JSONObject | None:
+    """The record beside this artifact, or None when there is no readable object there."""
+    sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
+    try:
+        record = loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+# A git object id, SHA-1 or SHA-256, as `rev-parse` prints one.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def reviewed_head(artifact: Path) -> str:
+    """The commit the run behind this artifact reviewed, or an `unresolved:` reason.
+
+    Read from the provenance record rather than asked of git, because what is checked out
+    now need not be what the model saw. A caller placing findings on a pull request
+    compares this with the head it posts against, so anything but an object id -- a
+    missing record, or a tree that was not a git repository -- reads as unresolved rather
+    than as a head that happens to differ.
+    """
+    record = _provenance(artifact)
+    if record is None:
+        return "unresolved: no provenance"
+    head = record.get("head_sha")
+    if not isinstance(head, str) or _OBJECT_ID.fullmatch(head) is None:
+        return "unresolved: the provenance records no head commit"
+    return head
+
+
 def refused_run(artifact: Path) -> RunStats | None:
     """The run behind this artifact, IF its provenance records no local tool calls.
 
@@ -838,12 +871,8 @@ def refused_run(artifact: Path) -> RunStats | None:
     before `local_tool_calls` existed. Otherwise zero `local_tool_calls` refuses. A count
     that is present but not a whole non-negative number is not a reading of zero.
     """
-    sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
-    try:
-        record = loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    stats = record.get("run_stats") if isinstance(record, dict) else None
+    record = _provenance(artifact)
+    stats = record.get("run_stats") if record is not None else None
     if not isinstance(stats, dict):
         return None
     # Both counts are checked as whole numbers before either is believed: a zero local

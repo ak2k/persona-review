@@ -3142,6 +3142,552 @@ class TestKeysV1:
         assert findings.claim_v1(claim, self.OWN) == claim
 
 
+# The file every `TestAnchors` case reads, one entry per line so a number is easy to check.
+_ANCHORED = (
+    "import billing",
+    "",
+    "def charge(account):",
+    "    total = compute_total(account)",
+    "    return bill(account, total)",
+    "",
+    "def refund(account):",
+    "    total = compute_total(account)",
+    "    return credit(account, total)",
+    "",
+    "def audit(account):",
+    '    log_event("audit", account)',
+    "    result = summarize(",
+    "        account, verbose=True)",
+    "    first_value = compute(a)",
+    "",
+    "    second_value = compute(b)",
+)
+
+
+def _citing(path: str, line: int, code: str) -> str:
+    return f"{path}:{line} -- {code}"
+
+
+def _as_finding(file: str | None, line: int | bool | None, quote: str | None) -> dict[str, Any]:
+    return {"file": file, "line": line, "first_evidence": quote}
+
+
+_ANCHORED_CODE = [line.strip() for line in _ANCHORED if line.strip()]
+
+# Quotes that reach every state against `_ANCHORED`: whole lines, lines cited from the file,
+# its basename or another file, two lines at once, and text it does not hold.
+_anchored_quotes = st.one_of(
+    st.sampled_from(_ANCHORED_CODE),
+    st.builds(
+        _citing,
+        st.sampled_from(["src/f.py", "f.py", "./src/f.py", "src/g.py"]),
+        st.integers(min_value=1, max_value=20),
+        st.sampled_from(_ANCHORED_CODE),
+    ),
+    st.sampled_from(["\n".join(_ANCHORED[n : n + 2]) for n in range(len(_ANCHORED) - 1)]),
+    st.text(max_size=20),
+)
+
+# The poster's own `norm_path` cases, shared so the two ends agree on which path an entry
+# names. (path, what it normalizes to).
+NORMALIZED_PATHS = (
+    ("../../../../evil-org/payload/x.py", "evil-org/payload/x.py"),
+    ("..%2fevil/x.py", "..%2fevil/x.py"),
+    ("%2e%2e/%2e%2e/evil/x.py", "%2e%2e/%2e%2e/evil/x.py"),
+    ("\\..\\..\\evil\\x.py", "evil/x.py"),
+    ("/etc/passwd", "etc/passwd"),
+    ("....//....//evil/x.py", "..../..../evil/x.py"),
+    ("a/./../../evil.py", "a/evil.py"),
+    ("../" * 40 + "evil.py", "evil.py"),
+    ("tools/a.py", "tools/a.py"),
+    ("tools/a b(c).py", "tools/a b(c).py"),
+    (".. /../evil.py", "evil.py"),
+    ("..\u2028/../evil.py", "evil.py"),
+    ("a /", "a"),
+    (".. /", ""),
+    ("a /..", "a"),
+)
+
+_STATES = ("verified", "relocated", "ambiguous", "not_found", "unverifiable", "no_evidence")
+
+
+class TestAnchors:
+    """`locate` and `anchors`: where each finding's quote is, and the keys a poster writes.
+
+    Every state is reached from a small tree, and each case asserts the span, `via` and
+    both keys, since those are what a poster places and deduplicates by.
+    """
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.tree = self.dir / "tree"
+        src = self.tree / "src"
+        src.mkdir(parents=True)
+        (src / "f.py").write_text("\n".join(_ANCHORED) + "\n", encoding="utf-8")
+        (src / "alias.py").symlink_to(src / "f.py")
+        outside = self.dir / "outside.py"
+        outside.write_text("\n".join(_ANCHORED) + "\n", encoding="utf-8")
+        (src / "out.py").symlink_to(outside)
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _locate(self, quote: str | None, line: Any = 5, file: Any = "src/f.py") -> dict[str, Any]:
+        finding: dict[str, Any] = {"line": line}
+        if file is not None:
+            finding["file"] = file
+        if quote is not None:
+            finding["first_evidence"] = quote
+        return cast(dict[str, Any], findings.locate(finding, self.tree))
+
+    @staticmethod
+    def _evidence(path: str, *numbers: int) -> str:
+        return findings.evidence_key_v1(path, [_ANCHORED[n - 1] for n in numbers])
+
+    def test_a_quote_on_the_findings_line_is_verified(self):
+        entry = self._locate("src/f.py:5 -- return bill(account, total)", line=5)
+        assert entry == {
+            "file": "src/f.py",
+            "path": "src/f.py",
+            "line": 5,
+            "state": "verified",
+            "via": "line",
+            "start": 5,
+            "end": 5,
+            "occurrences": 1,
+            "candidates": [],
+            "reason": "on the finding's line",
+            "quote_key": findings.quote_key_v1("return bill(account, total)"),
+            "evidence_key": self._evidence("src/f.py", 5),
+        }
+
+    def test_the_findings_line_wins_over_the_line_the_quote_cites(self):
+        # The code is on lines 4 and 8. The finding says 8, so 8 is corroborated, whatever
+        # line the lens wrote beside the quote.
+        entry = self._locate("src/f.py:4 -- total = compute_total(account)", line=8)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            8,
+            8,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    def test_a_quote_off_its_line_moves_to_the_line_it_cites(self):
+        # On lines 4 and 8, so searching alone is ambiguous: the citation says which.
+        entry = self._locate("src/f.py:8 -- total = compute_total(account)", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            8,
+            8,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [])
+        assert entry["quote_key"] == findings.quote_key_v1("total = compute_total(account)")
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            # Spelled as the finding's own path, and resolving to it.
+            "./src/f.py:5 -- return bill(account, total)",
+            # Its basename, which resolves to nothing at the root.
+            "f.py:5 -- return bill(account, total)",
+        ],
+    )
+    def test_a_citation_of_the_findings_own_file_places_it(self, quote: str):
+        # One occurrence, so a search would find the same line: `via` says the citation did.
+        entry = self._locate(quote, line=40)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
+    def test_a_quote_occurring_once_moves_to_that_line(self):
+        entry = self._locate("return credit(account, total)", line=2)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "search",
+            9,
+            9,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (1, [])
+        assert entry["evidence_key"] == self._evidence("src/f.py", 9)
+
+    def test_a_quote_occurring_twice_off_its_line_is_ambiguous(self):
+        entry = self._locate("total = compute_total(account)", line=1)
+        assert entry["state"] == "ambiguous"
+        assert (entry["via"], entry["start"], entry["end"], entry["evidence_key"]) == (
+            None,
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [[4, 4], [8, 8]])
+        assert entry["quote_key"] == findings.quote_key_v1("total = compute_total(account)")
+        assert entry["reason"] == "occurs 2 times in the file"
+
+    def test_an_ambiguous_quote_lists_at_most_twenty_places(self):
+        (self.tree / "src" / "many.py").write_text(
+            "    retry_request(session)\n" * 25, encoding="utf-8"
+        )
+        entry = self._locate("retry_request(session)", line=100, file="src/many.py")
+        assert (entry["state"], entry["occurrences"]) == ("ambiguous", 25)
+        assert entry["candidates"] == [[n, n] for n in range(1, 21)]
+
+    def test_a_quote_the_file_does_not_carry_is_not_found(self):
+        entry = self._locate("src/f.py:5 -- return charge(account)", line=5)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "not_found",
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"], entry["evidence_key"]) == (0, [], None)
+        assert entry["quote_key"] == findings.quote_key_v1("return charge(account)")
+        assert entry["path"] == "src/f.py"
+
+    def test_the_span_is_the_lines_the_match_covers(self):
+        # One line of quote, two lines of file: a window sized by the quote would stop at 13.
+        entry = self._locate("src/f.py:13 -- result = summarize( account, verbose=True)", line=13)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 13, 14)
+        assert entry["evidence_key"] == self._evidence("src/f.py", 13, 14)
+
+    def test_a_blank_line_inside_the_match_is_inside_the_span(self):
+        entry = self._locate("first_value = compute(a)\n\n    second_value = compute(b)", line=15)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 15, 17)
+        assert entry["evidence_key"] == self._evidence("src/f.py", 15, 16, 17)
+
+    def test_a_locator_on_every_line_matches_the_lines_it_quotes(self):
+        quote = (
+            "src/f.py:4: total = compute_total(account)\nsrc/f.py:5: return bill(account, total)"
+        )
+        entry = self._locate(quote, line=4)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 4, 5)
+        assert entry["quote_key"] == findings.quote_key_v1(
+            "total = compute_total(account) return bill(account, total)"
+        )
+
+    def test_a_snippet_is_checked_at_the_line_its_citation_names(self):
+        # Two citations, each owning a snippet. Neither the whole remainder nor the primary
+        # claim is on any line; the second snippet is on the line it cites and the finding's.
+        quote = (
+            "src/f.py:4 -- total = compute_total(account); "
+            'src/f.py:12 -- log_event("audit", account)'
+        )
+        entry = self._locate(quote, line=12)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            12,
+            12,
+        )
+        assert entry["occurrences"] == 0
+        assert entry["evidence_key"] == self._evidence("src/f.py", 12)
+
+    def test_a_snippet_is_never_searched_for_off_its_cited_line(self):
+        # The second snippet is on lines 4 and 8, and the finding says 8, but it cites 9. Found
+        # wherever it occurs, a fragment would verify, or be ambiguous, on text it never cited.
+        quote = (
+            'src/f.py:12 -- log_event("nothing", account); '
+            "src/f.py:9 -- total = compute_total(account)"
+        )
+        entry = self._locate(quote, line=8)
+        assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
+
+    def test_a_doubly_escaped_quote_matches_as_the_lines_it_escaped(self):
+        quote = "src/f.py:3 -- def charge(account):\\n\\ttotal = compute_total(account)"
+        entry = self._locate(quote, line=3)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 3, 4)
+        # Matching only: the key is the claim as written.
+        assert entry["quote_key"] == findings.quote_key_v1(
+            "def charge(account):\\n\\ttotal = compute_total(account)"
+        )
+
+    def test_an_escape_beside_a_real_newline_is_the_codes_own(self):
+        quote = (
+            "def charge(account):\\n    total = compute_total(account)\nreturn bill(account, total)"
+        )
+        entry = self._locate(quote, line=3)
+        assert (entry["state"], entry["occurrences"]) == ("not_found", 0)
+
+    def test_an_escaped_quote_is_held_to_the_floor_once_unescaped(self):
+        # Unescaped, it is empty, and an empty string occurs everywhere.
+        entry = self._locate("src/f.py:2 -- \\n\\n\\n\\n\\n\\n", line=2)
+        assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
+
+    def test_a_citation_line_too_long_to_parse_is_a_state_not_a_crash(self):
+        entry = self._locate("src/f.py:" + "9" * 5000 + " -- return bill(account, total)", line=5)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 5, 5)
+
+    def test_a_line_that_is_a_boolean_is_no_line(self):
+        entry = self._locate("import billing", line=True)
+        assert entry["line"] is None
+        assert (entry["state"], entry["via"], entry["start"]) == ("relocated", "search", 1)
+
+    def test_lines_are_numbered_as_a_diff_numbers_them(self):
+        # A form feed is a line break to `splitlines` and not to a diff, which would put the
+        # code on line 5.
+        (self.tree / "src" / "ff.py").write_text(
+            "import billing\n\x0c\ndef g(account):\n    return bill(account, total)\n",
+            encoding="utf-8",
+        )
+        entry = self._locate("return bill(account, total)", line=4, file="src/ff.py")
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 4, 4)
+
+    def test_a_crlf_file_anchors_like_its_lf_twin(self):
+        (self.tree / "src" / "crlf.py").write_bytes(
+            "\r\n".join(_ANCHORED).encode("utf-8") + b"\r\n"
+        )
+        entry = self._locate("src/crlf.py:5 -- return bill(account, total)", file="src/crlf.py")
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 5, 5)
+        assert entry["evidence_key"] == self._evidence("src/crlf.py", 5)
+
+    @pytest.mark.parametrize("file", ["./src/f.py", "src//f.py", "src/./f.py"])
+    def test_a_path_spelled_another_way_still_names_its_file(self, file: str):
+        entry = self._locate("return bill(account, total)", file=file)
+        assert (entry["path"], entry["state"]) == ("src/f.py", "verified")
+
+    def test_a_file_whose_name_is_padded_is_another_path(self):
+        # The poster strips each segment, so it would look up `src/f.py`, not this file.
+        (self.tree / " src ").mkdir()
+        (self.tree / " src " / " f.py").write_text("\n".join(_ANCHORED), encoding="utf-8")
+        entry = self._locate("return bill(account, total)", file=" src / f.py")
+        assert (entry["state"], entry["reason"]) == ("unverifiable", "resolves to another path")
+
+    @pytest.mark.parametrize(
+        ("file", "reason"),
+        [
+            ("src/missing.py", "no such file"),
+            ("src/f\x00.py", "no such file"),
+            ("src", "not a file"),
+            ("src/out.py", "outside the tree"),
+            ("../outside.py", "outside the tree"),
+            # Through a link or a `..` the file read is another path than the one a poster
+            # would place the finding on.
+            ("src/alias.py", "resolves to another path"),
+            ("src/../src/f.py", "resolves to another path"),
+        ],
+    )
+    def test_a_file_that_cannot_be_read_as_named_is_unverifiable(self, file: str, reason: str):
+        entry = self._locate("src/f.py:5 -- return bill(account, total)", file=file)
+        assert (entry["state"], entry["reason"], entry["path"]) == ("unverifiable", reason, None)
+        assert (entry["start"], entry["end"], entry["evidence_key"]) == (None, None, None)
+        assert entry["quote_key"] == findings.quote_key_v1("return bill(account, total)")
+
+    def test_an_absolute_path_outside_the_tree_is_unverifiable(self):
+        entry = self._locate("return bill(account, total)", file=str(self.dir / "outside.py"))
+        assert (entry["state"], entry["reason"]) == ("unverifiable", "outside the tree")
+
+    def test_an_unreadable_file_is_unverifiable(self):
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file, so the case cannot be produced")
+        secret = self.tree / "src" / "secret.py"
+        secret.write_text("return bill(account, total)\n", encoding="utf-8")
+        secret.chmod(0o000)
+        try:
+            entry = self._locate("return bill(account, total)", file="src/secret.py")
+        finally:
+            secret.chmod(0o600)
+        assert (entry["state"], entry["reason"], entry["path"]) == (
+            "unverifiable",
+            "unreadable",
+            None,
+        )
+
+    def test_a_finding_with_no_file_is_unverifiable(self):
+        entry = self._locate("return bill(account, total)", file=None)
+        assert (entry["file"], entry["state"], entry["reason"]) == (None, "unverifiable", "no file")
+
+    def test_a_quote_citing_only_another_file_is_unverifiable(self):
+        # The code IS in src/f.py, and a search would find it: the quote says it is elsewhere.
+        entry = self._locate("src/g.py:5 -- return bill(account, total)", line=5)
+        assert (entry["state"], entry["reason"], entry["path"]) == (
+            "unverifiable",
+            "cites only other files",
+            "src/f.py",
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("return bill(account, total)")
+
+    def test_a_quote_under_the_floor_is_unverifiable(self):
+        entry = self._locate("src/f.py:5 -- bill(acct)", line=5)
+        assert (entry["state"], entry["reason"]) == (
+            "unverifiable",
+            "too short (10 chars, floor 12)",
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("bill(acct)")
+
+    @pytest.mark.parametrize(
+        ("quote", "reason"),
+        [
+            (None, "no quote"),
+            ("   ", "no quote"),
+            ("src/f.py:5", "the quote is only a citation"),
+            # Before the file it cites is looked at: an empty claim has no key, and a poster
+            # refuses any other state without one.
+            ("src/g.py:5", "the quote is only a citation"),
+        ],
+    )
+    def test_a_finding_with_no_code_to_look_for_has_no_evidence(
+        self, quote: str | None, reason: str
+    ):
+        entry = self._locate(quote, line=5)
+        assert (entry["state"], entry["reason"]) == ("no_evidence", reason)
+        assert (entry["path"], entry["quote_key"], entry["evidence_key"]) == (None, None, None)
+
+    @pytest.mark.parametrize(("path", "expected"), NORMALIZED_PATHS)
+    def test_paths_normalize_as_the_poster_normalizes_them(self, path: str, expected: str):
+        assert findings.norm_path(path) == expected
+
+    # ---- the document ----
+
+    def _artifact(self, raw: bytes, head: str | None) -> Path:
+        art = self.dir / "correctness-grok.json"
+        art.write_bytes(raw)
+        if head is not None:
+            (self.dir / "correctness-grok-provenance.json").write_text(
+                json.dumps({"head_sha": head, "run_stats": {"tool_calls": 3}}), encoding="utf-8"
+            )
+        return art
+
+    def test_the_document(self):
+        items: list[Any] = [
+            finding(file="src/f.py", line=5, first_evidence="return bill(account, total)"),
+            "not a finding",
+            finding(file="src/f.py", line=1, first_evidence="src/f.py:9"),
+        ]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        doc = findings.anchors(str(art), raw, self.tree)
+        assert list(doc) == [
+            "anchors_version",
+            "artifact",
+            "artifact_sha256",
+            "tree",
+            "head",
+            "findings",
+        ]
+        assert doc["anchors_version"] == 1
+        assert doc["artifact"] == str(art)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert doc["tree"] == str(self.tree.resolve())
+        assert doc["head"] == "a" * 40
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        # Keyed by raw position, the entry that is not a finding skipped rather than renumbered.
+        assert [(row["#"], row["state"]) for row in rows] == [(1, "verified"), (3, "no_evidence")]
+        assert list(rows[0]) == [
+            "#",
+            "file",
+            "path",
+            "line",
+            "state",
+            "via",
+            "start",
+            "end",
+            "occurrences",
+            "candidates",
+            "reason",
+            "quote_key",
+            "evidence_key",
+        ]
+        json.dumps(doc, allow_nan=False)
+
+    def test_the_bytes_given_are_the_bytes_located(self):
+        # Hashed and located from one read: a file rewritten in between changes neither.
+        raw = json.dumps({"findings": [finding(file="src/f.py", line=5)]}).encode("utf-8")
+        art = self._artifact(b'{"findings": []}', "a" * 40)
+        doc = findings.anchors(str(art), raw, self.tree)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert len(cast(list[Any], doc["findings"])) == 1
+
+    @pytest.mark.parametrize(
+        ("head", "expected"),
+        [
+            ("0123456789abcdef" * 2 + "01234567", "0123456789abcdef" * 2 + "01234567"),
+            ("0123456789abcdef" * 4, "0123456789abcdef" * 4),
+            (None, "unresolved: no provenance"),
+            ("unresolved: HEAD", "unresolved: the provenance records no head commit"),
+            (
+                "0123456789ABCDEF" * 2 + "01234567",
+                "unresolved: the provenance records no head commit",
+            ),
+            ("a" * 41, "unresolved: the provenance records no head commit"),
+            ("", "unresolved: the provenance records no head commit"),
+        ],
+    )
+    def test_the_head_is_the_reviewed_commit_or_unresolved(self, head: str | None, expected: str):
+        raw = json.dumps({"findings": []}).encode("utf-8")
+        art = self._artifact(raw, head)
+        assert findings.anchors(str(art), raw, self.tree)["head"] == expected
+
+    def test_a_head_recorded_as_no_string_is_unresolved(self):
+        raw = json.dumps({"findings": []}).encode("utf-8")
+        art = self._artifact(raw, None)
+        (self.dir / "correctness-grok-provenance.json").write_text(
+            json.dumps({"head_sha": 7}), encoding="utf-8"
+        )
+        assert findings.anchors(str(art), raw, self.tree)["head"] == (
+            "unresolved: the provenance records no head commit"
+        )
+
+    def test_a_verdicts_artifact_is_refused(self):
+        raw = json.dumps({"verdicts": [{"#": 1, "validated": True}]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        with pytest.raises(findings.FindingsError, match="not a findings artifact"):
+            findings.anchors(str(art), raw, self.tree)
+
+    def test_bytes_that_are_not_an_artifact_are_refused(self):
+        for raw in (b"\xff\xfe", b"[]", b"{}"):
+            with pytest.raises(findings.FindingsError):
+                findings.anchors(str(self.dir / "x.json"), raw, self.tree)
+
+    # ---- properties, over findings drawn from the shapes that reach every state ----
+
+    @PROPERTY
+    @given(
+        entries=st.lists(
+            st.one_of(
+                st.builds(
+                    _as_finding,
+                    st.sampled_from(
+                        ["src/f.py", "./src/f.py", "src/alias.py", "src/missing.py", "src", None]
+                    ),
+                    st.one_of(st.none(), st.booleans(), st.integers(min_value=-1, max_value=20)),
+                    st.one_of(st.none(), _anchored_quotes),
+                ),
+                st.sampled_from(["text", 3, None, ["list"]]),
+            ),
+            max_size=6,
+        )
+    )
+    def test_every_entry_keeps_the_contract_a_poster_enforces(self, entries: list[Any]):
+        raw = json.dumps({"findings": entries}).encode("utf-8")
+        doc = findings.anchors(str(self.dir / "a.json"), raw, self.tree)
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        # One entry per finding that is an object, at its raw position.
+        assert [row["#"] for row in rows] == [
+            n for n, item in enumerate(entries, 1) if isinstance(item, dict)
+        ]
+        for row in rows:
+            state = row["state"]
+            placed = state in ("verified", "relocated")
+            assert state in _STATES
+            assert (row["evidence_key"] is not None) == placed, row
+            assert (row["start"] is not None) == placed == (row["end"] is not None), row
+            assert (row["quote_key"] is None) == (state == "no_evidence"), row
+            assert (row["candidates"] != []) == (state == "ambiguous"), row
+            if placed:
+                assert 1 <= row["start"] <= row["end"], row
+            if state == "verified":
+                assert row["start"] <= row["line"] <= row["end"], row
+            if row["path"] is not None:
+                assert row["path"] == findings.norm_path(row["file"]), row
+
+
 # ---------------------------------------------------------------------------------------
 # VALIDATOR MODE. A review asks what a model finds; a validation asks it to judge findings
 # somebody else already wrote, and the answer is only usable if it addresses each of them
