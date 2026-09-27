@@ -36,10 +36,12 @@ that cannot provide one is unsupported rather than supported badly.
 ONE QUESTION ABOUT THE ANSWER, ONE ABOUT THE RUN
 ------------------------------------------------
 The schema rules judge what the model SAID. `run_stats` counts what it DID, from the event
-stream the wrapper already keeps, and `gate` refuses a run that made zero local tool calls:
-a reviewer that never opened a file cannot certify anything, and its findings are unfounded
-whether the array is empty or full. A web search, or a tool that does not say where it
-runs, is a call but not a local one. Exactly zero is the threshold, with no configurable
+stream the wrapper already keeps, and `gate` refuses a run with zero successful local tool
+calls: a reviewer that never read a file cannot certify anything, and its findings are
+unfounded whether the array is empty or full. A web search, or a tool that does not say
+where it runs, is a call but not a local one; a local call that failed read nothing. A run
+that attempted no local call exits 6, and one whose every attempt failed exits 3, because
+only the first is the model's doing. Exactly zero is the threshold, with no configurable
 floor — "did this run inspect anything" has an answer, while "did it inspect enough" is a
 judgment this package is not entitled to make.
 
@@ -50,8 +52,8 @@ and stays valid: distinguishing "found nothing" from "looked, then gave up" need
 judgment about the transcript this does not attempt. Two checks narrow that gap from either
 side and neither closes it — the grok path reads the run's own terminal status before
 believing its answer, but `stop_reason` is an open vocabulary and the denylist cannot be
-exhaustive; the tool-call count catches a run that inspected nothing at all, but one tool
-call is not diligence.
+exhaustive; the tool-call count catches a run that inspected nothing at all, but one
+successful tool call is not diligence.
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -488,15 +490,24 @@ class RunStats:
     """What a run DID, as opposed to what it said.
 
     `local_tool_calls` is the field that gates: the calls that acted on the machine the
-    review ran on, which is where the repository is. A run whose only calls were web
-    searches read the internet and not the diff, so it has certified nothing either.
-    `tool_calls` is every call, local or not, recorded so the refusal can say what the run
-    did instead. Both are ints and never None, because "the adapter could not tell" is not
-    an answer this package is entitled to give. A stream carrying nothing this module
-    recognizes counts zero and the run is refused; a stream that cannot be READ is an
-    environment error rather than a quiet zero, because the two have different causes and
-    only one of them is about the model. The rest are provenance — best effort, and None
-    where a provider publishes no comparable number.
+    review ran on, which is where the repository is, AND succeeded. A run whose only calls
+    were web searches read the internet and not the diff, and a command that could not start
+    read nothing at all, so neither has certified anything. `local_tool_attempts` is every
+    local call, succeeded or not, and it is what tells the two refusals apart: none attempted
+    is the model's doing, every one failing is not. `tool_calls` is every call, local or
+    not, recorded so the refusal can say what the run did instead. All three are ints when
+    counted from a stream, because "the adapter could not tell" is not an answer this package
+    is entitled to give. A stream carrying nothing this module recognizes counts zero and the
+    run is refused; a stream that cannot be READ is an environment error rather than a quiet
+    zero, because the two have different causes and only one of them is about the model. The
+    rest are provenance — best effort, and None where a provider publishes no comparable
+    number.
+
+    `local_tool_attempts` is None where it was never recorded: a sidecar written before
+    0.3.5, whose `local_tool_calls` counted attempts rather than successes. `first_failure`
+    is the first line the first failed local call printed, for the refusal to quote; it is
+    not written to provenance, because the event stream kept beside the sidecar holds all of
+    it.
     """
 
     tool_calls: int
@@ -504,6 +515,8 @@ class RunStats:
     turns: int | None
     output_tokens: int | None
     duration_s: float | None
+    local_tool_attempts: int | None = None
+    first_failure: str | None = None
 
 
 @dataclass(frozen=True)
@@ -521,14 +534,20 @@ class Evidence:
     duration_s: float | None
 
 
-# BOTH ADAPTERS ASK ONE QUESTION: did the model reach outside itself? They answer it
-# differently because the streams differ in kind, and the difference is worth stating rather
-# than discovering.
+# BOTH ADAPTERS ASK TWO QUESTIONS: did the model reach outside itself, and did what it
+# reached for work? They answer them differently because the streams differ in kind, and
+# the difference is worth stating rather than discovering.
 #
-# grok names a tool call structurally — a `tool_use` content block — so ANY of them counts
-# and there is no list of tool names to go stale. codex names it by an item KIND, so the
-# adapter has to carry a list, and a list can go out of date. That asymmetry is why only the
-# codex side needs the drift detection below.
+# grok names a tool call structurally — a `tool_use` content block — so ANY of them is an
+# attempt and there is no list of tool names to go stale. codex names it by an item KIND, so
+# the adapter has to carry a list, and a list can go out of date. That asymmetry is why only
+# the codex side needs the drift detection below.
+#
+# A call SUCCEEDED only when the provider reports that it ran and worked. Neither a
+# `failed` status nor a non-zero exit code separates a command that never started from one
+# that ran and found nothing, since both read the same; only exit code 0 says a command ran.
+# So a codex command counts on `exit_code` 0 and a grok call on a `tool_result` reporting no
+# error, no non-zero exit code and no command still running.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
 # defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
@@ -536,6 +555,16 @@ class Evidence:
 # future build ever echoed a `tool_use` block back, this stops it being counted twice.
 # Verified against grok 1.0.13: one real review carried 99 `tool_use` blocks over 31 turns.
 GROK_TOOL_BLOCK = "tool_use"
+
+# A call's outcome: a `tool_result` block inside a `user` event, naming the call it answers
+# by `tool_use_id`. Its `content` is a JSON object serialized as a string, and a command's
+# carries its `exit_code` there, beside `is_error` false even when the command failed.
+GROK_RESULT_BLOCK = "tool_result"
+
+# A command grok moved to the background reports `status` "running" at once, and its real
+# outcome arrives later as a `TaskOutput` with the command's own `status` and `exit_code`
+# one level down, under this key.
+GROK_NESTED_REPORT = "Result"
 
 # codex's `--json` stream is items rather than messages: one `item.started` and one
 # `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
@@ -575,6 +604,11 @@ CODEX_LOCAL_TOOL_ITEMS = frozenset(
     }
 )
 
+# The local kinds that succeed by exit code. Every other local kind succeeds by its status,
+# because a file change has no exit code to read. Verified against codex-cli 0.152.1 and
+# 0.156.1: every completed `command_execution` carries an integer `exit_code`.
+CODEX_COMMAND_ITEMS = frozenset({"command_execution", "local_shell_call"})
+
 # Kinds this wrapper knows about and deliberately does not count: the model talking to
 # itself, and the plan it writes for itself. Named explicitly so that "a kind we chose to
 # skip" and "a kind we have never heard of" stay different facts — which is the whole of the
@@ -587,21 +621,105 @@ def _whole_number(value: JSONValue) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _grok_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, int | None]:
+# How much of a failed call's output the exit-3 refusal quotes. One line, because stderr
+# carries one legible reason; cut, because the output is the provider's and any length.
+FAILURE_LINE_CHARS = 200
+
+
+def _text(value: JSONValue) -> str:
+    """Output as text. grok reports a command's output as an array of byte values."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        octets = [b for b in value if isinstance(b, int) and not isinstance(b, bool)]
+        if len(octets) == len(value) and all(0 <= b < 256 for b in octets):
+            return bytes(octets).decode("utf-8", errors="replace")
+    return ""
+
+
+def _first_line(value: JSONValue) -> str:
+    line = next((line.strip() for line in _text(value).splitlines() if line.strip()), "")
+    return line if len(line) <= FAILURE_LINE_CHARS else line[:FAILURE_LINE_CHARS] + "..."
+
+
+def _grok_reports(block: JSONObject) -> list[JSONObject]:
+    """The objects a `tool_result` reports a call's outcome in: its content, and the report
+    nested in it when the call was a background command's."""
+    content = block.get("content")
+    if isinstance(content, str):
+        try:
+            content = loads(content)
+        except ValueError:
+            return []
+    if not isinstance(content, dict):
+        return []
+    nested = content.get(GROK_NESTED_REPORT)
+    return [content, nested] if isinstance(nested, dict) else [content]
+
+
+def _grok_succeeded(block: JSONObject) -> bool:
+    """Whether a `tool_result` reports a call that ran and worked.
+
+    `is_error` false alone is not that: grok returns a command that exited 2 with `is_error`
+    false and the exit code in the content, and a command moved to the background as
+    "running" before anything came back. A report carrying an `exit_code` must carry 0, and
+    null is a command that has not finished. A result with no exit code at all, a file read,
+    rests on `is_error`.
+    """
+    if block.get("is_error") is not False:
+        return False
+    for report in _grok_reports(block):
+        if report.get("status") == "running":
+            return False
+        if "exit_code" in report and _whole_number(report["exit_code"]) != 0:
+            return False
+    return True
+
+
+def _grok_output(block: JSONObject) -> str:
+    """What a failed call printed, for the refusal to quote."""
+    for report in _grok_reports(block):
+        for key in ("output", "stderr", "stdout"):
+            text = _text(report.get(key))
+            if text.strip():
+                return text
+    content = block.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     calls = 0
+    local = 0
+    failure: str | None = None
+    # The calls made and not yet answered. A result counts once, for a call this run made: a
+    # second result for the same id, or one for an id never called, is evidence of nothing.
+    pending: set[str] = set()
     turns: int | None = None
     output_tokens: int | None = None
     for event in events:
         kind = event.get("type")
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
         if kind == "assistant":
-            message = event.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if isinstance(content, list):
-                calls += sum(
-                    1
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == GROK_TOOL_BLOCK
-                )
+            for block in blocks:
+                if block.get("type") == GROK_TOOL_BLOCK:
+                    calls += 1
+                    ident = block.get("id")
+                    if isinstance(ident, str):
+                        pending.add(ident)
+        elif kind == "user":
+            for block in blocks:
+                ident = block.get("tool_use_id")
+                if block.get("type") != GROK_RESULT_BLOCK or not isinstance(ident, str):
+                    continue
+                if ident not in pending:
+                    continue
+                pending.discard(ident)
+                if _grok_succeeded(block):
+                    local += 1
+                elif failure is None:
+                    failure = _first_line(_grok_output(block))
         elif kind == "result":
             # LAST wins, where the extractor refuses a stream carrying more than one. The
             # laxity is unreachable rather than a disagreement: `gate` extracts and validates
@@ -611,18 +729,37 @@ def _grok_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, int
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
-    # Every grok call is counted as local. `_grok_argv` passes `--disable-web-search`, which
-    # removes grok's web search and web fetch tools, and grok's events carry no kind that
-    # separates a built-in tool from a configured MCP server's, only a tool name.
-    return calls, calls, turns, output_tokens
+    # Every grok call is an attempt at a local one. `_grok_argv` passes
+    # `--disable-web-search`, which removes grok's web search and web fetch tools, and grok's
+    # events carry no kind that separates a built-in tool from a configured MCP server's, only
+    # a tool name.
+    return RunStats(
+        tool_calls=calls,
+        local_tool_calls=local,
+        turns=turns,
+        output_tokens=output_tokens,
+        duration_s=None,
+        local_tool_attempts=calls,
+        first_failure=failure,
+    )
 
 
-def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, int | None]:
+def _codex_succeeded(item_kind: str, item: JSONObject) -> bool:
+    """Whether a local item's `item.completed` reports that it ran and worked."""
+    if item_kind in CODEX_COMMAND_ITEMS:
+        return _whole_number(item.get("exit_code")) == 0
+    return item.get("status") == "completed"
+
+
+def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
     seen: set[str] = set()
+    worked: set[str] = set()
     unknown: set[str] = set()
     total = 0
     calls = 0
+    attempts = 0
     local = 0
+    failure: str | None = None
     # codex's own turn accounting, which counts one per `exec` turn rather than one per
     # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
     # it is the number codex publishes, not because the two mean the same thing.
@@ -653,17 +790,28 @@ def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, in
             is_local = item_kind in CODEX_LOCAL_TOOL_ITEMS
             if isinstance(ident, str):
                 # Deduped on the item's own id, so a call the run started and never finished
-                # still counts as evidence that something was inspected.
+                # is still an attempt.
                 if ident not in seen:
                     seen.add(ident)
                     calls += 1
-                    local += is_local
+                    attempts += is_local
             elif kind == "item.completed":
                 # No id, so the two events cannot be paired. Count the terminal one only:
-                # counting both would double a single call, and an unfinished id-less call
-                # going uncounted is the safe direction for a number that gates a refusal.
+                # counting both would double a single call.
                 calls += 1
-                local += is_local
+                attempts += is_local
+            # Read at completion only: every `item.started` carries `exit_code` null and
+            # `status` "in_progress", whatever the call goes on to do.
+            if not is_local or kind != "item.completed":
+                continue
+            if not _codex_succeeded(item_kind, item):
+                if failure is None:
+                    failure = _first_line(item.get("aggregated_output"))
+            elif not isinstance(ident, str):
+                local += 1
+            elif ident not in worked:
+                worked.add(ident)
+                local += 1
 
     if total == 0:
         # `codex exec --json` opens every run with `thread.started` and `turn.started`, so a
@@ -675,13 +823,14 @@ def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, in
             "thread and a turn, so an empty stream means the runner did not run or its "
             "output format has changed -- this is not something the model did."
         )
-    if local == 0 and unknown:
+    if attempts == 0 and unknown:
         # THE MISDIAGNOSIS THIS PREVENTS. After a provider-CLI upgrade renames its item
         # kinds, every run counts zero and would otherwise be refused as "the model never
         # opened the diff" — a falsehood, told identically on every run, about a component
         # that is working. The wrapper is the broken part and the message says so. Keyed on
-        # the LOCAL count because that is what the refusal reads: a web search beside a
-        # renamed local kind would otherwise leave the rename to be reported as exit 6.
+        # LOCAL ATTEMPTS because that is what separates exit 6 from the rest: a web search
+        # beside a renamed local kind would otherwise leave the rename to be reported as
+        # exit 6, and recognized commands that all failed are not drift.
         #
         # The recovery names BOTH lists: a renamed tree-reading kind added only to the first
         # silences this check while every run still counts zero local calls and exits 6.
@@ -694,7 +843,15 @@ def _codex_stats(events: Iterable[JSONObject]) -> tuple[int, int, int | None, in
             "validate.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this error "
             "and every run then exits 6."
         )
-    return calls, local, turns, output_tokens
+    return RunStats(
+        tool_calls=calls,
+        local_tool_calls=local,
+        turns=turns,
+        output_tokens=output_tokens,
+        duration_s=None,
+        local_tool_attempts=attempts,
+        first_failure=failure,
+    )
 
 
 def run_stats(mode: str, events: Iterable[JSONObject], duration_s: float | None) -> RunStats:
@@ -714,9 +871,9 @@ def run_stats(mode: str, events: Iterable[JSONObject], duration_s: float | None)
     who produced it is worse than one that means the same thing everywhere.
     """
     if mode == "grok-messages":
-        calls, local, turns, tokens = _grok_stats(events)
+        counted = _grok_stats(events)
     elif mode == "codex-items":
-        calls, local, turns, tokens = _codex_stats(events)
+        counted = _codex_stats(events)
     else:
         # The MACHINE, not the model. An events mode this module does not implement is a
         # mis-wired build, and reporting it as a gate failure would blame the answer for a
@@ -724,13 +881,7 @@ def run_stats(mode: str, events: Iterable[JSONObject], duration_s: float | None)
         raise errors.EnvError(
             f"unknown event mode {mode!r}; this build cannot count what its own provider did"
         )
-    return RunStats(
-        tool_calls=calls,
-        local_tool_calls=local,
-        turns=turns,
-        output_tokens=tokens,
-        duration_s=duration_s,
-    )
+    return replace(counted, duration_s=duration_s)
 
 
 def _plural(count: int, noun: str) -> str:
@@ -743,7 +894,12 @@ def describe_run(stats: RunStats) -> str:
     if stats.turns is not None:
         parts.append(_plural(stats.turns, "turn"))
     calls = _plural(stats.tool_calls, "tool call")
-    if stats.local_tool_calls != stats.tool_calls:
+    attempts = stats.local_tool_attempts
+    if attempts is not None and attempts > stats.local_tool_calls:
+        # A run whose local calls failed says how many it made, or "0 succeeded" would read
+        # as a run that never tried.
+        calls += f" ({attempts} local, {stats.local_tool_calls} succeeded)"
+    elif stats.local_tool_calls != stats.tool_calls:
         # Only when they differ, so the common case reads as it always has and a run that
         # searched the web but touched nothing says so in the clause that refuses it.
         calls += f" ({stats.local_tool_calls} local)"
@@ -753,6 +909,15 @@ def describe_run(stats: RunStats) -> str:
     if stats.output_tokens is not None:
         parts.append(f"{stats.output_tokens} output tokens")
     return ", ".join(parts)
+
+
+def _first_failure(stats: RunStats) -> str:
+    """What the first failed local call printed, quoted as data: it is the provider's text."""
+    if stats.first_failure is None:
+        return "none of them finished"
+    if not stats.first_failure:
+        return "the first to fail printed nothing"
+    return f"the first to fail printed {stats.first_failure!r}"
 
 
 def _sha256(filename: str) -> str:
@@ -800,12 +965,13 @@ def write_provenance(
         # A digest the caller computed when it READ the input wins over re-reading the path:
         # the record must say what the run used, not what happens to be there now.
         record[f"{key}_sha256"] = (digests or {}).get(key) or _sha256(filename)
-    # WHAT THE RUN DID, beside what produced it. `local_tool_calls` decides the exit status,
-    # so it is written down rather than only acted on: a refusal a caller cannot audit
-    # afterwards is one it has to take on trust.
+    # WHAT THE RUN DID, beside what produced it. `local_tool_calls` and `local_tool_attempts`
+    # decide the exit status, so they are written down rather than only acted on: a refusal a
+    # caller cannot audit afterwards is one it has to take on trust.
     record["run_stats"] = {
         "tool_calls": stats.tool_calls,
         "local_tool_calls": stats.local_tool_calls,
+        "local_tool_attempts": stats.local_tool_attempts,
         "turns": stats.turns,
         "output_tokens": stats.output_tokens,
         "duration_s": stats.duration_s,
@@ -857,10 +1023,11 @@ def refused_run(artifact: Path) -> RunStats | None:
     The reading counterpart to `write_provenance`, here so one module owns the sidecar's
     shape from both ends rather than two agreeing by memory.
 
-    This exists because a refusal has to survive being handed on. `gate` refuses a vacuous
-    run with exit 6 and keeps the artifact as evidence — and an artifact on disk is exactly
-    what the retrieval command renders, cheerfully and at exit 0. The refusal was laundered
-    by this package's own reader, so the reader has to be able to see it too.
+    This exists because a refusal has to survive being handed on. `gate` refuses a run that
+    read nothing — exit 6 when it attempted no local call, exit 3 when every one failed — and
+    keeps the artifact as evidence, and an artifact on disk is exactly what the retrieval
+    command renders, cheerfully and at exit 0. The refusal was laundered by this package's
+    own reader, so the reader has to be able to see it too.
 
     `None` means "nothing here says this run was vacuous": no sidecar, an unreadable or
     malformed one, or one recording at least one local tool call. Only a POSITIVE reading
@@ -868,8 +1035,11 @@ def refused_run(artifact: Path) -> RunStats | None:
     this field existed, or one a person assembled by hand, must still render.
 
     Zero `tool_calls` refuses on its own, which is the whole rule for a sidecar written
-    before `local_tool_calls` existed. Otherwise zero `local_tool_calls` refuses. A count
-    that is present but not a whole non-negative number is not a reading of zero.
+    before `local_tool_calls` existed. Otherwise zero `local_tool_calls` refuses: since 0.3.5
+    that field counts the calls that succeeded, so a run whose every local call failed is
+    refused too. A sidecar written by 0.3.3 or 0.3.4 counted attempts there, and is read by
+    that rule rather than reinterpreted. A count that is present but not a whole
+    non-negative number is not a reading of zero.
     """
     record = _provenance(artifact)
     stats = record.get("run_stats") if record is not None else None
@@ -885,12 +1055,17 @@ def refused_run(artifact: Path) -> RunStats | None:
     # refused before `local_tool_calls` existed renders now.
     if calls != 0 and local != 0:
         return None
+    attempts = _whole_number(stats.get("local_tool_attempts"))
     return RunStats(
         tool_calls=calls,
         local_tool_calls=0,
         turns=_whole_number(stats.get("turns")),
         output_tokens=_whole_number(stats.get("output_tokens")),
         duration_s=_seconds(stats.get("duration_s")),
+        # Absent before 0.3.5, when a zero `local_tool_calls` meant no local call was even
+        # attempted. None keeps that reading; zero or the total would claim a count nobody
+        # made.
+        local_tool_attempts=attempts if attempts is not None and attempts >= 0 else None,
     )
 
 
@@ -956,11 +1131,12 @@ def gate(
 ) -> int:
     """Validate a run's answer and write its artifacts. Returns the process exit status.
 
-    Raises `VacuousRun` when the run made no local tool calls — after the artifacts are
-    written, because that dud IS the evidence and a caller has to be able to look at what it
-    refused.
-    Raises `EnvError` when the stream cannot be counted at all, which is a fact about this
-    build or the provider CLI rather than about the model, and must not be told as one.
+    Raises `VacuousRun` when the run attempted no local tool call, and `EnvError` when it
+    attempted some and none succeeded — both after the artifacts are written, because that dud
+    IS the evidence and a caller has to be able to look at what it refused.
+    Raises `EnvError` before writing anything when the stream cannot be counted at all, which
+    is a fact about this build or the provider CLI rather than about the model, and must not
+    be told as one.
 
     `key`, `check`, `summarize` and `noun` are what a validation varies: the top-level key its
     answer carries, the rules its answer is held to, the one-line summary and the word for what
@@ -1000,12 +1176,12 @@ def gate(
     findings_out.write_text(json.dumps(found, indent=1), encoding="utf-8")
     write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)
 
-    # A reviewer that made ZERO local tool calls never opened the diff, so it has no verdict
-    # to summarize: empty findings and a page of them are equally unfounded. A web search
-    # or an MCP call read something, but was not shown to read the repository. Decided here,
-    # ahead of the summary the rest of this function builds — a gating caller reads only the
-    # status, and a line saying "0 findings" beside a status saying "refused" is the exact
-    # ambiguity being closed.
+    # A reviewer with ZERO successful local tool calls never read the diff, so it has no
+    # verdict to summarize: empty findings and a page of them are equally unfounded. A web
+    # search or an MCP call read something, but was not shown to read the repository, and a
+    # command that failed read nothing. Decided here, ahead of the summary the rest of this
+    # function builds — a gating caller reads only the status, and a line saying "0 findings"
+    # beside a status saying "refused" is the exact ambiguity being closed.
     #
     # Deliberately no retry here. Whether to spend another full-effort model run is the
     # calling agent's decision and its budget; this command's job is to refuse to certify,
@@ -1015,6 +1191,19 @@ def gate(
         # laundering route: it invited the caller to open the very artifact just refused, and
         # `ce-persona-findings` would render it as an ordinary review. The sidecar is the
         # record of WHY it was refused, and it is the only one of the two safe to read.
+        if stats.local_tool_attempts:
+            # Not 6, the status that blames the model and invites a retry: the model tried to
+            # read the tree and every call failed, which the same command in the same place
+            # will most likely do again. The first failure is quoted, not diagnosed — a
+            # command that could not start and one that ran and exited non-zero land here
+            # alike.
+            raise errors.EnvError(
+                f"refusing to report {count} {noun} from a run none of whose local tool calls "
+                f"succeeded ({describe_run(stats)}); {_first_failure(stats)}. A call that could "
+                "not start and a call that ran and exited non-zero both count as failed, and "
+                "either way nothing of the repository was read, so nothing the run reported is "
+                f"founded; the evidence is {provenance_out}."
+            )
         raise errors.VacuousRun(
             f"refusing to report {count} {noun} from a run that made no local tool calls "
             f"({describe_run(stats)}). The model never opened the diff, so nothing it "
