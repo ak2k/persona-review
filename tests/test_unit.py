@@ -22,7 +22,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from hypothesis import given, settings
@@ -148,15 +148,127 @@ EMPTY_EXAMPLE = json.dumps(artifact())
 # refusal has to carry one, because a run with zero tool calls is refused before the summary
 # line — so a zero here would quietly turn those tests into assertions about the refusal.
 STATS = validate.RunStats(
-    tool_calls=7, local_tool_calls=7, turns=4, output_tokens=4096, duration_s=61.5
+    tool_calls=7,
+    local_tool_calls=7,
+    turns=4,
+    output_tokens=4096,
+    duration_s=61.5,
+    local_tool_attempts=7,
 )
 
 
+# What a grok `tool_result` carries in its `content`, one per shape seen in real grok-4.7
+# runs (gate-P2 and gate-Q3 events): every key and value type as recorded, with local paths
+# and long payloads shortened, because the recorded ones are a home directory and another
+# repository's code.
+def _octets(text: str) -> list[int]:
+    return list(text.encode("utf-8"))
+
+
+READ_FILE = {
+    "type": "ReadFile",
+    "FileContent": {
+        "content": "1→[project]\n",
+        "content_concise": "1→[project]\n",
+        "absolute_path": "/work/repo/pyproject.toml",
+        "offset": None,
+        "limit": 40,
+        "raw_output": "[project]\n",
+        "total_lines": 78,
+    },
+}
+
+
+def bash_report(exit_code: int | None, output: str) -> dict[str, Any]:
+    return {
+        "type": "Bash",
+        "output": _octets(output),
+        "output_for_prompt": f"exit: {exit_code}\n{output}",
+        "exit_code": exit_code,
+        "command": "git diff --stat 3243e36..HEAD",
+        "truncated": False,
+        "signal": None,
+        "timed_out": False,
+        "description": "Measure diff size and commit range",
+        "current_dir": "/work/repo",
+        "output_file": "/work/.grok/sessions/s/terminal/call-1.log",
+        "total_bytes": len(output),
+    }
+
+
+BASH_OK = bash_report(0, " f.py | 2 +-\n 1 file changed\n")
+# gate-P2 line 39: a command that ran and exited 2, returned with `is_error` false.
+BASH_FAILED = bash_report(
+    2, "error: Failed to initialize cache at `/work/.cache/uv`\n  Caused by: failed to open file\n"
+)
+# gate-Q line 15: a search that matched nothing exits 1, like `rg`.
+GREP_NO_MATCH = {
+    "type": "GrepSearch",
+    "stdout": _octets(
+        '<workspace_result workspace_path="/work/repo">\nNo matches found\n</workspace_result>'
+    ),
+    "stderr": [],
+    "exit_code": 1,
+    "match_count": 0,
+    "file_matches": [],
+}
+# gate-P2 lines 41 and 49: moved to the background before anything came back.
+BACKGROUND_STARTED = {
+    "type": "BackgroundTaskStarted",
+    "task_id": "call-1",
+    "task_type": "bash",
+    "output_file": "/work/.grok/sessions/s/terminal/call-1.log",
+    "status": "running",
+    "command": "uv run --no-project python probe.py",
+    "summary": "Command has been automatically moved to background because it exceeded "
+    "auto-background timeout limit of 15s. Process is still running.",
+    "retrieval_hint": 'Use get_command_or_subagent_output with task_ids=["call-1"]',
+    "pid": 42844,
+}
+
+
+def task_output(status: str, exit_code: int | None, output: str) -> dict[str, Any]:
+    """gate-P2 lines 43 and 51: the background command's own report, under `Result`."""
+    return {
+        "type": "TaskOutput",
+        "Result": {
+            "task_id": "call-1",
+            "command": "uv run --no-project python probe.py",
+            "status": status,
+            "exit_code": exit_code,
+            "started": "2026-09-26T19:49:03Z",
+            "ended": None,
+            "duration_secs": 78.890947,
+            "output": output,
+            "output_file": "/work/.grok/sessions/s/terminal/call-1.log",
+            "truncated": False,
+            "truncation_hint": "[truncated - use read_file on output_file for full content]",
+            "raw_output_bytes": 0,
+        },
+    }
+
+
 # Event fixtures in each provider's own vocabulary, at module scope because both the counter's
-# tests and the gate's need them. Shapes copied from real runs: grok 1.0.13 and codex-cli
-# 0.150.1.
-def grok_tool_call(name: str = "read_file") -> str:
-    return json.dumps(
+# tests and the gate's need them. Shapes copied from real runs: grok 1.0.13 and grok-4.7, and
+# codex-cli 0.150.1, 0.152.1 and 0.156.1.
+def grok_tool_result(
+    ident: str, report: dict[str, Any] | str = READ_FILE, *, is_error: bool = False
+) -> str:
+    """A call's outcome, as grok returns it: a `tool_result` block in a `user` event."""
+    content = report if isinstance(report, str) else json.dumps(report)
+    block = {"type": "tool_result", "tool_use_id": ident, "content": content, "is_error": is_error}
+    return json.dumps({"type": "user", "message": {"role": "user", "content": [block]}})
+
+
+def grok_tool_call(
+    name: str = "read_file", report: dict[str, Any] | str | None = READ_FILE, **result: Any
+) -> str:
+    """A call and, unless `report` is None, the result that answers it.
+
+    Answered by default, because a call with no successful result read nothing and the run
+    behind it is refused: a fixture standing in for a real review has to carry one.
+    """
+    call = json.dumps(
         {
             "type": "assistant",
             "message": {
@@ -167,6 +279,9 @@ def grok_tool_call(name: str = "read_file") -> str:
             },
         }
     )
+    if report is None:
+        return call
+    return call + "\n" + grok_tool_result(f"toolu_{name}", report, **result)
 
 
 def grok_result(**over: Any) -> str:
@@ -182,10 +297,19 @@ def grok_result(**over: Any) -> str:
     return json.dumps(event)
 
 
-def codex_item(kind: str, item_type: str, ident: str | None = "item_1") -> str:
+def codex_item(kind: str, item_type: str, ident: str | None = "item_1", **fields: Any) -> str:
+    """One codex item event. A completed local item SUCCEEDS unless `fields` say otherwise,
+    because every completed command in a real stream carries an exit code: 0 when it worked.
+    """
     item: dict[str, Any] = {"type": item_type}
     if ident is not None:
         item["id"] = ident
+    if kind == "item.completed" and item_type in validate.CODEX_LOCAL_TOOL_ITEMS:
+        if item_type in validate.CODEX_COMMAND_ITEMS:
+            item.update(aggregated_output="", exit_code=0, status="completed")
+        else:
+            item.update(status="completed")
+    item.update(fields)
     return json.dumps({"type": kind, "item": item})
 
 
@@ -214,6 +338,59 @@ CODEX_ONLY_SEARCHED = codex_stream(
     codex_item("item.completed", "web_search", "ws_1"),
     codex_item("item.completed", "web_search", "ws_2"),
 )
+
+# REAL STREAMS, verbatim: every line below is copied unchanged from a kept event stream,
+# keeping a subset of its lines. They are what the counting rule is proven on.
+#
+# codex-cli 0.156.1 on a runner where no command could start (events-c156.jsonl lines 1-17,
+# 19, 20): five commands complete `failed` with exit code 1 beside two MCP calls, and the
+# run answered with an empty findings array that 0.3.4 passed at exit 0.
+C156_STREAM = r"""
+{"type":"thread.started","thread_id":"01a0e48d-0e98-74a1-b56f-3b332c076aa9"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll measure the diff, inspect each changed area and its surrounding code, then return the review as JSON."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"The local command runner is failing before Git starts, so I haven’t been able to read the diff. I’m checking whether another available tool can expose the repository before I return a result."}}
+{"type":"item.started","item":{"id":"item_6","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.started","item":{"id":"item_7","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resource_templates","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.started","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_7","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resource_templates","arguments":{},"result":{"content":[{"type":"text","text":"{\"resourceTemplates\":[]}"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"{\"reviewer\":\"adversarial-reviewer\",\"findings\":[],\"residual_risks\":[\"Review incomplete: the command runner failed before Git started, so I could not read git diff d15e788cf8415673695f68c78976f0d1c382da83..HEAD or assess the changed code. An empty findings array does not indicate the change is safe.\"],\"testing_gaps\":[\"Could not inspect or run tests because the local command runner failed.\"]}"}}
+{"type":"turn.completed","usage":{"input_tokens":110820,"cached_input_tokens":92288,"cache_write_input_tokens":0,"output_tokens":734,"reasoning_output_tokens":175}}
+"""  # noqa: E501
+
+# codex-cli 0.152.1 on the same diff, working (events-c152m.jsonl lines 1-5, 12).
+C152M_STREAM = r"""
+{"type":"thread.started","thread_id":"01a0e48d-d4a5-7ba0-b96d-7344eb7abcd9"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll size the diff, identify whether it changes any verification mechanism, then trace the changed components and their call sites before emitting the required JSON."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --name-status d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --name-status d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"485\t0\t.github/workflows/ai-review-probe.yml\n32\t0\tprobe/ledger.py\n .github/workflows/ai-review-probe.yml | 485 ++++++++++++++++++++++++++++++++++\n probe/ledger.py                       |  32 +++\n 2 files changed, 517 insertions(+)\nA\t.github/workflows/ai-review-probe.yml\nA\tprobe/ledger.py\n","exit_code":0,"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":134325,"cached_input_tokens":107008,"cache_write_input_tokens":0,"output_tokens":3356,"reasoning_output_tokens":1128}}
+"""  # noqa: E501
+
+# A working review (gate-Q2 codex events lines 1, 2, 9, 12, 141, 142, 194, 199, 217): two
+# `rg` calls that ran and exited 1 and 2, both `failed` like the commands above that never
+# started, and one command that exited 0.
+Q2_MIXED_STREAM = r"""
+{"type":"thread.started","thread_id":"01a0df66-73cf-7611-917e-992ab2d14406"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"rg: persona_review/anchors.py: IO error for operation on persona_review/anchors.py: No such file or directory (os error 2)\n","exit_code":2,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 3243e36..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 3243e36..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"EXIT=0\n","exit_code":0,"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":4559120,"cached_input_tokens":4356224,"cache_write_input_tokens":0,"output_tokens":18866,"reasoning_output_tokens":9988}}
+"""  # noqa: E501
 
 # A placeholder for a per-test fixture path inside a parametrize table, which is evaluated at
 # import time and so cannot see instance state. Compared with `is`, never `==`.
@@ -649,9 +826,10 @@ class TestRunEvidence:
 
     @pytest.mark.parametrize("kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS))
     def test_every_local_kind_is_counted_as_local(self, kind: str):
-        # With an id and without, so both counting arms carry the local tally.
-        assert self._codex(codex_item("item.completed", kind, "item_1")).local_tool_calls == 1
-        assert self._codex(codex_item("item.completed", kind, None)).local_tool_calls == 1
+        # With an id and without, so both counting arms carry the local tallies.
+        for ident in ("item_1", None):
+            stats = self._codex(codex_item("item.completed", kind, ident))
+            assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), ident
 
     @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
     def test_a_kind_that_does_not_prove_the_tree_was_read_is_a_call_but_not_local(self, kind: str):
@@ -677,7 +855,7 @@ class TestRunEvidence:
             )
         )
         stats = self._grok(grok_tool_call("grep"), grok_tool_call("read_file"), grok_result())
-        assert (stats.tool_calls, stats.local_tool_calls) == (2, 2)
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 2, 2)
 
     def test_an_id_less_call_counts_once_never_twice(self):
         # Stated on its own as well, because the rule is not "dedupe": without an id the two
@@ -743,6 +921,128 @@ class TestRunEvidence:
         for mode in answer_modes:
             with pytest.raises(errors.EnvError):
                 validate.run_stats(mode, validate.objects(["{}"]), None)
+
+
+class TestACallCountsOnlyIfItSucceeded:
+    """A local call inspected the tree only if it ran and worked.
+
+    The incident this closes: codex-cli 0.156.1 could not start a single command, every one
+    completed `failed` with exit code 1, and 0.3.4 counted the five of them as inspection and
+    passed an empty findings array at exit 0 — a clean review of nothing.
+    """
+
+    def _codex(self, text: str) -> validate.RunStats:
+        return validate.run_stats("codex-items", validate.objects(text.splitlines()), None)
+
+    def _grok(self, *lines: str) -> validate.RunStats:
+        text = "\n".join(lines) + "\n"
+        return validate.run_stats("grok-messages", validate.objects(text.splitlines()), None)
+
+    def test_the_c156_stream_attempted_five_local_calls_and_none_succeeded(self):
+        stats = self._codex(C156_STREAM)
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (7, 5, 0)
+        # The first COMPLETION's output, not the empty output its `item.started` carries.
+        assert stats.first_failure == (
+            "error building bubblewrap command: cannot establish app-server socket mount isolation"
+        )
+
+    def test_a_working_stream_counts_its_command(self):
+        stats = self._codex(C152M_STREAM)
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (1, 1, 1)
+
+    def test_commands_that_ran_and_exited_non_zero_do_not_count_and_do_not_sink_the_run(self):
+        # `rg` exiting 1 and 2 reads `failed`, exactly like a command that never started; the
+        # one command that exited 0 is what makes this a review.
+        stats = self._codex(Q2_MIXED_STREAM)
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (3, 3, 1)
+        assert stats.first_failure == "", "the first failure, `rg` exiting 1, printed nothing"
+
+    @pytest.mark.parametrize("kind", sorted(validate.CODEX_COMMAND_ITEMS))
+    @pytest.mark.parametrize("exit_code", [1, 2, None, True, False, "0", 0.0])
+    def test_a_command_counts_only_on_exit_code_0(self, kind: str, exit_code: Any):
+        stats = self._codex(codex_stream(codex_item("item.completed", kind, exit_code=exit_code)))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        stats = self._codex(codex_stream(codex_item("item.completed", kind, exit_code=0)))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    @pytest.mark.parametrize(
+        "kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS - validate.CODEX_COMMAND_ITEMS)
+    )
+    @pytest.mark.parametrize("status", ["failed", "declined", "in_progress", None])
+    def test_a_file_change_counts_only_when_completed(self, kind: str, status: str | None):
+        stats = self._codex(codex_stream(codex_item("item.completed", kind, status=status)))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
+    def test_the_command_kinds_are_local_kinds(self):
+        assert validate.CODEX_COMMAND_ITEMS < validate.CODEX_LOCAL_TOOL_ITEMS
+
+    def test_a_call_reported_complete_twice_succeeds_once(self):
+        # So the succeeded count never exceeds the attempts it is a part of.
+        done = codex_item("item.completed", "command_execution", "item_1")
+        stats = self._codex(codex_stream(done, done))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    def test_a_long_first_line_is_cut(self):
+        long = codex_item(
+            "item.completed", "command_execution", exit_code=1, aggregated_output="x" * 500
+        )
+        assert self._codex(codex_stream(long)).first_failure == "x" * 200 + "..."
+
+    @pytest.mark.parametrize(
+        ("report", "is_error", "succeeded"),
+        [
+            (READ_FILE, False, 1),
+            (BASH_OK, False, 1),
+            (task_output("completed", 0, "Python 3.14.6\n"), False, 1),
+            # Each of these is refused by exactly one rule, so each rule is proven alone.
+            (READ_FILE, True, 0),
+            (BASH_FAILED, False, 0),
+            (GREP_NO_MATCH, False, 0),
+            (bash_report(None, ""), False, 0),
+            (BACKGROUND_STARTED, False, 0),
+            (task_output("completed", 2, "Traceback\n"), False, 0),
+            (task_output("running", None, "\n\nWaited the requested 60s.\n"), False, 0),
+        ],
+    )
+    def test_a_grok_call_counts_only_on_a_result_reporting_success(
+        self, report: dict[str, Any], is_error: bool, succeeded: int
+    ):
+        stats = self._grok(grok_tool_call("run_terminal_command", report, is_error=is_error))
+        assert (stats.tool_calls, stats.local_tool_attempts) == (1, 1)
+        assert stats.local_tool_calls == succeeded
+
+    def test_a_grok_result_without_is_error_false_does_not_count(self):
+        call = grok_tool_call("read_file", None)
+        result = json.loads(grok_tool_result("toolu_read_file"))
+        del result["message"]["content"][0]["is_error"]
+        assert self._grok(call, json.dumps(result)).local_tool_calls == 0
+
+    def test_a_grok_call_with_no_result_is_an_attempt_that_did_not_succeed(self):
+        stats = self._grok(grok_tool_call("read_file", None), grok_result())
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        assert stats.first_failure is None
+
+    def test_a_grok_result_counts_once_and_only_for_a_call_this_run_made(self):
+        stranger = grok_tool_result("toolu_never_called")
+        assert self._grok(stranger, grok_result()).local_tool_calls == 0
+        twice = grok_tool_result("toolu_read_file")
+        stats = self._grok(grok_tool_call("read_file"), twice, grok_result())
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    def test_a_failed_grok_call_quotes_the_first_line_it_printed(self):
+        stats = self._grok(grok_tool_call("run_terminal_command", BASH_FAILED))
+        assert stats.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
+        refused = self._grok(
+            grok_tool_call("read_file", "\nError: permission denied\nmore", is_error=True)
+        )
+        assert refused.first_failure == "Error: permission denied"
+
+    def test_the_run_description_names_the_attempts_beside_none_succeeded(self):
+        # "(0 local)" alone would describe a run that never tried.
+        described = validate.describe_run(self._codex(C156_STREAM))
+        assert "7 tool calls (5 local, 0 succeeded)" in described, described
+        # And the web-search-only wording is unchanged, because that run attempted nothing.
+        assert "(0 local)" in validate.describe_run(self._codex(CODEX_ONLY_SEARCHED))
 
 
 class TestDriftIsNotBlamedOnTheModel:
@@ -905,6 +1205,67 @@ class TestTheGateRefusesARunThatInspectedNothing:
             code, out, err = self._gate(Path(tmp), EMPTY_EXAMPLE, CODEX_ONE_CALL)
         assert code == 0, err
         assert "0 findings" in out
+
+    def test_a_run_whose_every_local_call_failed_exits_3_and_keeps_its_evidence(self):
+        # The c156 run, with the answer it actually gave: 0.3.4 passed it at exit 0.
+        answer = json.loads(C156_STREAM.strip().splitlines()[-2])["item"]["text"]
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, C156_STREAM)
+            record = json.loads((Path(tmp) / "out-provenance.json").read_text(encoding="utf-8"))
+            assert (Path(tmp) / "out.json").is_file(), "the refused artifact is the evidence"
+            assert str(Path(tmp) / "out-provenance.json") in message
+            assert str(Path(tmp) / "out.json") not in message
+        assert code == 3, message
+        assert out == "", "the summary line must not be printed for a refused run"
+        assert "none of whose local tool calls succeeded" in message, message
+        assert "7 tool calls (5 local, 0 succeeded)" in message, message
+        assert (
+            "'error building bubblewrap command: cannot establish app-server socket mount "
+            "isolation'"
+        ) in message, message
+        # Neither the model's fault nor one diagnosed cause: a command that ran and exited
+        # non-zero lands here too.
+        assert "never opened the diff" not in message
+        assert "sandbox" not in message
+        assert "\n" not in message, "stderr carries one line"
+        stats = record["run_stats"]
+        assert (stats["tool_calls"], stats["local_tool_attempts"], stats["local_tool_calls"]) == (
+            7,
+            5,
+            0,
+        )
+
+    @pytest.mark.parametrize("stream", [C152M_STREAM, Q2_MIXED_STREAM])
+    def test_a_run_with_one_command_that_worked_is_a_review(self, stream: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._gate(Path(tmp), EMPTY_EXAMPLE, stream)
+        assert code == 0, err
+        assert "0 findings" in out
+
+    def test_failed_commands_beside_an_unrecognized_kind_are_not_drift(self):
+        # The drift check reads ATTEMPTS: these commands are a kind this build knows, and
+        # calling their failure a renamed vocabulary would send someone to the wrong fix.
+        failed = codex_item(
+            "item.completed",
+            "command_execution",
+            exit_code=1,
+            status="failed",
+            aggregated_output="rg: f.py: No such file or directory (os error 2)\n",
+        )
+        renamed = codex_item("item.completed", "shell_call_v2", "item_2")
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(failed, renamed))
+        assert code == 3, message
+        assert out == ""
+        assert "none of whose local tool calls succeeded" in message, message
+        assert "drift" not in message, message
+
+    def test_a_run_whose_local_calls_never_finished_says_so(self):
+        started = codex_item("item.started", "command_execution", exit_code=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(started))
+        assert code == 3, message
+        assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
 
     def test_a_stream_this_build_cannot_count_leaves_no_artifact_behind(self):
         # Drift is decided BEFORE anything is written, unlike the vacuous refusal: there is no
@@ -1093,6 +1454,68 @@ class TestARefusalSurvivesBeingHandedOn:
                 code = findings.main([str(art)])
         assert code == 6
         assert "4 tool calls (0 local)" in err.getvalue(), err.getvalue()
+
+    def _banner(self, stats: dict[str, Any]) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), stats)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = findings.main([str(art)])
+        assert out.getvalue() == ""
+        return code, err.getvalue()
+
+    # The c156 run's sidecar as 0.3.5 writes it.
+    C156_SIDECAR: ClassVar[dict[str, Any]] = {
+        "tool_calls": 7,
+        "local_tool_calls": 0,
+        "local_tool_attempts": 5,
+        "turns": 1,
+        "output_tokens": 734,
+        "duration_s": 12.0,
+    }
+
+    def test_a_sidecar_whose_local_calls_all_failed_is_refused_as_the_exit_3_it_was(self):
+        code, banner = self._banner(self.C156_SIDECAR)
+        # 6 from this command either way: it has no environment status, and to its caller the
+        # two refusals mean the same thing. The banner says which one the review made.
+        assert code == 6, banner
+        assert "none of whose local tool calls succeeded" in banner, banner
+        assert "(5 local, 0 succeeded)" in banner, banner
+        assert "exit 3;" in banner and "exit 6" not in banner, banner
+
+    @pytest.mark.parametrize(
+        "stats",
+        [
+            # 0.3.4 and 0.3.3: no `local_tool_attempts`, and a zero `local_tool_calls` meant
+            # nothing local was attempted. Not reinterpreted as "attempted, none succeeded".
+            {"tool_calls": 4, "local_tool_calls": 0},
+            {"tool_calls": 0, "local_tool_calls": 0},
+            {"tool_calls": 0},
+            # 0.3.5 with nothing local attempted, and attempts that are not a count.
+            {"tool_calls": 4, "local_tool_calls": 0, "local_tool_attempts": 0},
+            {"tool_calls": 4, "local_tool_calls": 0, "local_tool_attempts": -1},
+            {"tool_calls": 4, "local_tool_calls": 0, "local_tool_attempts": "5"},
+            {"tool_calls": 4, "local_tool_calls": 0, "local_tool_attempts": True},
+        ],
+    )
+    def test_a_sidecar_that_attempted_nothing_local_keeps_the_exit_6_banner(
+        self, stats: dict[str, Any]
+    ):
+        code, banner = self._banner(stats)
+        assert code == 6, banner
+        assert "no local tool calls" in banner, banner
+        assert "exit 6;" in banner, banner
+        assert "succeeded" not in banner, banner
+
+    def test_a_0_3_4_sidecar_that_counted_failed_attempts_still_renders(self):
+        # THE KNOWN GAP, asserted so closing it fails loudly: 0.3.4 counted the c156 run's
+        # five failed commands as local calls, and a sidecar is read by the rule it was
+        # written under.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 7, "local_tool_calls": 5})
+            assert validate.refused_run(art) is None
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert findings.main([str(art)]) == 0
 
     @pytest.mark.parametrize(
         "stats", [{"tool_calls": 12}, {"tool_calls": 12, "local_tool_calls": 12}]
@@ -1530,15 +1953,17 @@ class TestProvenance:
         assert record["persona_sha256"] == hashlib.sha256(b"brief").hexdigest()
 
     def test_what_the_run_did_is_recorded_beside_what_produced_it(self):
-        # `tool_calls` decides the exit status, so it has to be auditable after the fact:
-        # a refusal a caller cannot check is one it has to take on trust.
+        # The local counts decide the exit status, so they have to be auditable after the
+        # fact: a refusal a caller cannot check is one it has to take on trust.
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "prov.json"
-            validate.write_provenance(out, [], {}, validate.RunStats(2, 0, 1, 151, 4.5))
+            stats = validate.RunStats(2, 0, 1, 151, 4.5, local_tool_attempts=2)
+            validate.write_provenance(out, [], {}, stats)
             record = json.loads(out.read_text(encoding="utf-8"))
         assert record["run_stats"] == {
             "tool_calls": 2,
             "local_tool_calls": 0,
+            "local_tool_attempts": 2,
             "turns": 1,
             "output_tokens": 151,
             "duration_s": 4.5,

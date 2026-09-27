@@ -233,8 +233,84 @@ MUTATIONS: list[Mutation] = [
         # message reads "3 tool calls" beside "made no local tool calls" with no way to see why.
         "the refusal's run description drops the local count",
         "persona_review/validate.py",
-        r"    if stats\.local_tool_calls != stats\.tool_calls:",
+        r"    elif stats\.local_tool_calls != stats\.tool_calls:",
+        "    elif False:",
+    ),
+    Mutation(
+        # "(0 local)" alone describes a run that never tried, beside a refusal of one whose
+        # every attempt failed.
+        "the refusal's run description drops the attempts",
+        "persona_review/validate.py",
+        r"    if attempts is not None and attempts > stats\.local_tool_calls:",
         "    if False:",
+    ),
+    Mutation(
+        # The c156 incident: every command failed, all five counted, exit 0 on nothing read.
+        "a codex command counts whatever its exit code",
+        "persona_review/validate.py",
+        r'        return _whole_number\(item\.get\("exit_code"\)\) == 0',
+        "        return True",
+    ),
+    Mutation(
+        "a codex file change counts whatever its status",
+        "persona_review/validate.py",
+        r'    return item\.get\("status"\) == "completed"',
+        "    return True",
+    ),
+    Mutation(
+        # `item.started` carries exit code null for every call, so reading it records a
+        # failure that has not happened and quotes the wrong output.
+        "codex success is read from the start event too",
+        "persona_review/validate.py",
+        r'            if not is_local or kind != "item\.completed":',
+        "            if not is_local:",
+    ),
+    Mutation(
+        "a codex call reported complete twice succeeds twice",
+        "persona_review/validate.py",
+        r"            elif ident not in worked:",
+        "            elif True:",
+    ),
+    Mutation(
+        "an id-less codex call that worked is never counted as succeeded",
+        "persona_review/validate.py",
+        r"            elif not isinstance\(ident, str\):\n                local \+= 1",
+        "            elif not isinstance(ident, str):\n                pass",
+    ),
+    Mutation(
+        # Not 6: the model tried. Reverting this blames it with the status that invites a
+        # retry, on every run of a provider that cannot start a command.
+        "a run whose every local call failed is refused as vacuous",
+        "persona_review/validate.py",
+        r"        if stats\.local_tool_attempts:",
+        "        if False:",
+    ),
+    Mutation(
+        "the exit-3 refusal quotes nothing a codex call printed",
+        "persona_review/validate.py",
+        r'                    failure = _first_line\(item\.get\("aggregated_output"\)\)',
+        '                    failure = ""',
+    ),
+    Mutation(
+        "the exit-3 refusal quotes the last codex failure, not the first",
+        "persona_review/validate.py",
+        r"                if failure is None:",
+        "                if True:",
+    ),
+    Mutation(
+        "the exit-3 refusal quotes a failed call's output uncut",
+        "persona_review/validate.py",
+        r"    return line if len\(line\) <= FAILURE_LINE_CHARS else "
+        r'line\[:FAILURE_LINE_CHARS\] \+ "\.\.\."',
+        "    return line",
+    ),
+    Mutation(
+        # The sidecar is what the reader refuses on, and all it could say without this is
+        # "no local tool calls" about a run that made five.
+        "provenance stops recording local attempts",
+        "persona_review/validate.py",
+        r'        "local_tool_attempts": stats\.local_tool_attempts,\n',
+        "",
     ),
     Mutation(
         "web_search is counted as a local tool call",
@@ -264,28 +340,77 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         # The id-less arm carries the local tally too; without it an id-less local call
-        # counts as a call and not as a local one, refusing a run that did inspect the tree.
-        "an id-less codex call is never counted as local",
+        # counts as a call and not as a local attempt, so its failure reads as exit 6.
+        "an id-less codex call is never counted as a local attempt",
         "persona_review/validate.py",
-        r"                calls \+= 1\n                local \+= is_local",
+        r"                calls \+= 1\n                attempts \+= is_local",
         "                calls += 1",
     ),
     Mutation(
         # Every grok call is local because the argv disables grok's web tools. Reporting
         # none as local would refuse every grok run, which is the refusal made meaningless.
-        "grok calls are not counted as local",
+        "grok calls that worked are not counted as local",
         "persona_review/validate.py",
-        r"    return calls, calls, turns, output_tokens",
-        "    return calls, 0, turns, output_tokens",
+        r"                if _grok_succeeded\(block\):\n                    local \+= 1",
+        "                if _grok_succeeded(block):\n                    pass",
+    ),
+    Mutation(
+        "grok calls are not counted as local attempts",
+        "persona_review/validate.py",
+        r"        local_tool_attempts=calls,",
+        "        local_tool_attempts=0,",
     ),
     Mutation(
         # Counting every content block rather than the tool_use ones counts thinking and
         # text as evidence of work, which is exactly what the dud run produced.
         "any content block counts as a tool call",
         "persona_review/validate.py",
-        r'                    if isinstance\(block, dict\) and block\.get\("type"\) '
-        r"== GROK_TOOL_BLOCK",
-        "                    if isinstance(block, dict)",
+        r'                if block\.get\("type"\) == GROK_TOOL_BLOCK:',
+        "                if True:",
+    ),
+    Mutation(
+        "a grok result reporting an error counts",
+        "persona_review/validate.py",
+        r'    if block\.get\("is_error"\) is not False:\n        return False',
+        "    if False:\n        return False",
+    ),
+    Mutation(
+        # grok returns a command that exited 2 with `is_error` false.
+        "a grok command counts whatever its exit code",
+        "persona_review/validate.py",
+        r'        if "exit_code" in report and _whole_number\(report\["exit_code"\]\) != 0:',
+        "        if False:",
+    ),
+    Mutation(
+        "a grok command still running counts",
+        "persona_review/validate.py",
+        r'        if report\.get\("status"\) == "running":',
+        "        if False:",
+    ),
+    Mutation(
+        # A background command's own status and exit code arrive one level down.
+        "a background command's own report is not read",
+        "persona_review/validate.py",
+        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[content\]",
+        "    return [content]",
+    ),
+    Mutation(
+        "a grok result for a call this run never made counts",
+        "persona_review/validate.py",
+        r"                if ident not in pending:\n                    continue\n",
+        "",
+    ),
+    Mutation(
+        "a grok call answered twice succeeds twice",
+        "persona_review/validate.py",
+        r"                pending\.discard\(ident\)\n",
+        "",
+    ),
+    Mutation(
+        "the exit-3 refusal quotes nothing a grok call printed",
+        "persona_review/validate.py",
+        r"                    failure = _first_line\(_grok_output\(block\)\)",
+        '                    failure = ""',
     ),
     Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call
@@ -317,7 +442,7 @@ MUTATIONS: list[Mutation] = [
         # after a provider-CLI rename — a falsehood about the one component that was working.
         "a renamed codex vocabulary is blamed on the model instead of the wrapper",
         "persona_review/validate.py",
-        r"    if local == 0 and unknown:",
+        r"    if attempts == 0 and unknown:",
         "    if False:",
     ),
     Mutation(
@@ -332,12 +457,20 @@ MUTATIONS: list[Mutation] = [
         "",
     ),
     Mutation(
-        # The refusal reads the local count, so a web search beside a renamed local kind
+        # The refusal reads the local counts, so a web search beside a renamed local kind
         # has to be reported as drift rather than as a model that never opened the diff.
         "a web search hides a renamed codex vocabulary from the drift check",
         "persona_review/validate.py",
-        r"    if local == 0 and unknown:",
+        r"    if attempts == 0 and unknown:",
         "    if calls == 0 and unknown:",
+    ),
+    Mutation(
+        # Recognized commands that all failed are not a renamed vocabulary, and saying so
+        # sends someone to add kinds to a list that already has them.
+        "failed commands beside an unrecognized kind are reported as drift",
+        "persona_review/validate.py",
+        r"    if attempts == 0 and unknown:",
+        "    if local == 0 and unknown:",
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
@@ -404,6 +537,34 @@ MUTATIONS: list[Mutation] = [
         r'if "local_tool_calls" in stats else calls',
         '    local = _whole_number(stats.get("local_tool_calls")) '
         'if "local_tool_calls" in stats else 0',
+    ),
+    Mutation(
+        # The reader's banner would then tell the c156 run's refusal as exit 6.
+        "the reader drops the recorded local attempts",
+        "persona_review/validate.py",
+        r"        local_tool_attempts=attempts if attempts is not None and attempts >= 0 "
+        r"else None,",
+        "        local_tool_attempts=None,",
+    ),
+    Mutation(
+        # A 0.3.4 sidecar's zero meant nothing local was attempted; reading its total as the
+        # attempts retells that refusal as a run that tried and failed.
+        "a sidecar without local_tool_attempts is read as having attempted its total",
+        "persona_review/validate.py",
+        r'    attempts = _whole_number\(stats\.get\("local_tool_attempts"\)\)',
+        '    attempts = _whole_number(stats.get("local_tool_attempts", calls))',
+    ),
+    Mutation(
+        "a negative attempts count is read as a count",
+        "persona_review/validate.py",
+        r"attempts if attempts is not None and attempts >= 0 else None",
+        "attempts",
+    ),
+    Mutation(
+        "the reader's banner tells a run whose calls all failed as exit 6",
+        "persona_review/findings.py",
+        r"    if stats\.local_tool_attempts:",
+        "    if False:",
     ),
     Mutation(
         "a zero local count beside a malformed total is read as a refusal",
