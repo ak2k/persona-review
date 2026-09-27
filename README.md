@@ -58,16 +58,16 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `0` | schema-valid findings (an empty findings array is valid) |
 | `1` | the answer was not schema-valid findings — the gate refused |
 | `2` | usage error: bad arguments, unknown or markdown-only persona, bad `-C`, unresolvable `-b`, malformed `CE_PERSONA_*` value |
-| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, or the runner's event vocabulary changed and this build can no longer count what a run did |
+| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, the runner's event vocabulary changed and this build can no longer count what a run did, or the model attempted local tool calls and none succeeded — it read nothing, and the artifacts are kept as evidence |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
-| `6` | the model answered without making a single local tool call — it inspected nothing. Through codex a local call is a `command_execution`, `local_shell_call`, `file_change` or `patch_apply` item; a web search, MCP call or function call is not one |
+| `6` | the model answered without attempting a single local tool call — it inspected nothing. Through codex a local call is a `command_execution`, `local_shell_call`, `file_change` or `patch_apply` item; a web search, MCP call or function call is not one |
 | `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
 
 The distinctions that matter to a caller are `1`, `4` and `6`. `1` is the model's fault — it
 answered with something that is not findings. `4` is the runner's — it exited non-zero and
 never got that far. **`6` is the one worth retrying**: the model answered, the answer may be
-perfectly schema-valid, and it made zero local tool calls, so it never opened the diff and
+perfectly schema-valid, and it attempted zero local tool calls, so it never opened the diff and
 certified nothing — empty findings or a page of them. That is a run that happened, not a
 hypothetical: one turn, 151 output tokens, four and a half seconds, `{"findings": []}`, exit
 `0`. Nothing is wrong with the machine or the invocation, so the same command is worth
@@ -82,9 +82,21 @@ carrying kinds this build does not recognize, or no events at all, exits `3` nam
 unrecognized kinds instead; `6` is reached only when the stream was understood and there was
 genuinely nothing in it.
 
+**A local call counts only if it succeeded.** Through codex, a command counts when its
+`item.completed` carries `exit_code` 0, and a file change or patch when its status is
+`completed`. Through grok, a call counts when its `tool_result` has `is_error` false and reports
+no non-zero or null exit code and no command still running. A run that attempted local calls
+and had none succeed exits `3`, not `6`: the model tried, and a provider that cannot start a
+command fails every call the same way on every run. That is a run that happened too —
+codex-cli 0.156.1 could not start five commands, each completed `failed` with exit code 1, and
+0.3.4 passed its empty findings at exit `0`. The one stderr line gives the counts and the first
+line the first failed call printed; it does not name a cause, because a command that ran and
+exited non-zero, like `rg` finding nothing, reads the same as one that never started. The
+artifacts are kept as evidence, as for `6`.
+
 **A review is defined as inspecting the repository.** Passing the material in the prompt
 (`-c -`, or a large `-c` file) and expecting the model to review it without touching the
-working tree still exits `6`: the local tool-call count is what makes a finding checkable
+working tree still exits `6`: the successful local tool-call count is what makes a finding checkable
 against the code, and there is no mode in which this package certifies a review of text it
 cannot tie to a file. Use the model directly for that.
 
@@ -96,10 +108,12 @@ verdict number, `--return` with `--json` or `--show`, `--anchors` with `--json`,
 `--verify-quotes` without `--return` or without `-C`, `--anchors` without `-C`, a `-C` given
 without `--verify-quotes` or `--anchors`, and a `-C` that is missing, is not a directory, or
 names an unknown user —
-and `6` when the artifact's provenance records a run that made no local tool calls. That last
-one matters because a refusal has to survive being handed on: the review command keeps the dud
-artifact as evidence, and without the check this package would launder its own refusal into an
-ordinary listing at exit `0`, one command later.
+and `6` when the artifact's provenance records a run that made no local tool calls, or none that
+succeeded. That last one matters because a refusal has to survive being handed on: the review
+command keeps the dud artifact as evidence, and without the check this package would launder its
+own refusal into an ordinary listing at exit `0`, one command later. A run whose every local call
+failed is refused with `6` here although the review command exited `3` for it — this command has
+no environment status, and the refusal says which status the review gave.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
 per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
@@ -176,7 +190,8 @@ ce-persona-findings: anchors: 7 findings (5 verified, 1 relocated, 0 ambiguous, 
 `-C` is required and names the tree that was reviewed; as with `--verify-quotes`, the working
 tree under it is read and git is not asked. `--anchors` cannot be combined with `--json`,
 `--show` or `--return`, and on a verdicts artifact it is a usage error. An artifact whose
-provenance records no local tool calls exits `6` with nothing on stdout, as in every other mode.
+provenance records no local tool calls, or none that succeeded, exits `6` with nothing on stdout,
+as in every other mode.
 Written beside the artifact as `<persona>-<provider>-anchors.json`, the file is cleared with the
 run's other artifacts when the next run of that persona and provider starts.
 
@@ -408,8 +423,9 @@ attested as the one the validator saw.
 
 **The exit statuses are the review commands' own**, with the nouns changed: `0` schema-valid
 verdicts covering the batch, `1` the answer was not that, or also carries a findings list, `2`
-usage or a malformed batch, `3` environment, `4` the runner exited non-zero, `5` timeout, `6`
-the model made no local tool calls, `78` over budget. `--help` renders the table in the
+usage or a malformed batch, `3` environment or local tool calls that all failed, `4` the runner
+exited non-zero, `5` timeout, `6` the model attempted no local tool call, `78` over budget.
+`--help` renders the table in the
 validate mode's words. The second half of `1` is the reader's rule asked at the writing end: a file
 carrying both lists is neither artifact, so `ce-persona-findings` refuses it, and a run that
 reported success for one would be certifying verdicts nothing can render.
@@ -501,22 +517,53 @@ append to one events file, and the gate then validates an interleaving of two tr
 Each run writes `<persona>-<provider>-provenance.json` beside its findings, recording what produced
 them: the provider, model and effort; the persona brief, the findings schema and **the exact prompt
 the model received**, each by SHA-256; the repository with the resolved `head_sha` and `base_sha`;
-and a `run_stats` object counting what the run *did* — `tool_calls`, `local_tool_calls`, `turns`,
-`output_tokens` and `duration_s`. `tool_calls` is every call the run made; `local_tool_calls` is
-the ones shown to act on the working directory. Through codex those are the `command_execution`,
-`local_shell_call`, `file_change` and `patch_apply` items. `web_search`, `mcp_tool_call`,
-`function_call` and `custom_tool_call` count in `tool_calls` only, because none of them proves the
-tree was read. Every grok call is local: `--disable-web-search` removes its web tools. The exit status
-turns on `local_tool_calls` — no local tool calls is exit `6` — so it is recorded rather than only
-acted on: a refusal you cannot audit afterwards is one you have to take on trust. A sidecar
-written before 0.3.3 carries no `local_tool_calls`; `ce-persona-findings` reads it by the rule it
-was written under, refusing it when `tool_calls` is zero.
+and a `run_stats` object counting what the run *did* — `tool_calls`, `local_tool_calls`,
+`local_tool_attempts`, `turns`, `output_tokens` and `duration_s`. `tool_calls` is every call the
+run made; `local_tool_attempts` is the ones that act on the working directory, and
+`local_tool_calls` the ones among them that succeeded. Through codex the local calls are the
+`command_execution`, `local_shell_call`, `file_change` and `patch_apply` items; a command
+succeeded when it completed with `exit_code` 0, a file change or patch when it completed with
+status `completed`. `web_search`, `mcp_tool_call`, `function_call` and `custom_tool_call` count
+in `tool_calls` only, because none of them proves the tree was read. Every grok call is a local
+attempt, since `--disable-web-search` removes its web tools, and it succeeded when its
+`tool_result` has `is_error` false and reports no non-zero or null exit code and no command still
+running. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
+and no successes exit `3` — so they are recorded rather than only acted on: a refusal you cannot
+audit afterwards is one you have to take on trust. `ce-persona-findings` refuses a sidecar whose
+`local_tool_calls` is zero.
+
+Older sidecars are read by the rule they were written under. One written before 0.3.3 carries no
+`local_tool_calls` and is refused when `tool_calls` is zero. One written by 0.3.3 or 0.3.4 carries
+no `local_tool_attempts`, and its `local_tool_calls` counted attempts, failed ones included: a
+zero there is refused as before, but a run whose every local call failed recorded a non-zero
+count and still renders. The codex-cli 0.156.1 run above, reviewed by 0.3.4, left
+`local_tool_calls: 5` and renders; the same run reviewed by 0.3.5 is refused at both ends.
 
 The hashes are the point. Briefs live in a plugin cache that updates underneath you, so two runs are
 only comparable if they ran the same brief — and `base_ref=HEAD~1` names a different commit every
 day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
+
+## Changes in 0.3.5
+
+A local tool call now counts only if it succeeded, and a run that attempted local calls and had
+none succeed exits `3` instead of `0`. Every other command, flag and exit status is unchanged.
+
+- **A failed local call no longer counts as inspection.** Through codex a command counts when it
+  completes with `exit_code` 0, and a file change or patch when it completes with status
+  `completed`. Through grok a call counts when its `tool_result` has `is_error` false and reports
+  no non-zero or null exit code and no command still running; a call with no result does not
+  count. A codex run whose commands all failed to start used to exit `0` with empty findings.
+- **Exit `3` for a run whose every local call failed.** Its stderr line gives the counts and the
+  first line the first failed call printed. Nothing goes to stdout, and the artifacts are kept as
+  evidence. A run that attempted no local call still exits `6`.
+- **`run_stats` gains `local_tool_attempts`**, and `local_tool_calls` now counts the successes.
+  `ce-persona-findings` refuses a sidecar whose `local_tool_calls` is zero, as before, and its
+  refusal says whether the review exited `6` or `3`. Sidecars written by 0.3.3 and 0.3.4 are read
+  by the rule they were written under, so one whose failed calls were counted still renders.
+- **Codex vocabulary drift is keyed on local attempts.** A stream of recognized commands that all
+  failed, beside an unrecognized kind, exits `3` as failed calls rather than as drift.
 
 ## Changes in 0.3.4
 

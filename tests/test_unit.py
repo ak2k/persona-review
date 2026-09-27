@@ -1323,7 +1323,8 @@ class TestTheGateRefusesARunThatInspectedNothing:
 class TestARefusalSurvivesBeingHandedOn:
     """`validate.refused_run`: the reader's half of the vacuous-run refusal.
 
-    The review command refuses with exit 6 and keeps the artifact as evidence. Without this,
+    The review command refuses with exit 6, or 3 when every local call failed, and keeps the
+    artifact as evidence. Without this,
     `ce-persona-findings <artifact>` rendered that same dud as an ordinary listing at exit 0 —
     the package laundering its own refusal, one command later, through its own reader.
     """
