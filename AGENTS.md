@@ -164,16 +164,19 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   invites a retry, which would be wrong on every run there. The refusal quotes the first
   failure's first line rather than naming a cause, because a command that ran and exited
   non-zero reads the same as one that never started.
-- **The two tool-call adapters are shaped differently on purpose.** grok names a tool call
-  structurally — a `tool_use` content block — so any of them is an attempt and there is no
-  list to go stale; it succeeded when the `tool_result` answering it reports so. codex names
-  it by an item KIND, so that adapter carries a list, and a list can fall out of date. Hence
-  the drift check on the codex side only: a stream whose item kinds are all unrecognized,
-  with no local attempt, exits `3` naming them, never `6`. Getting that wrong would report
+- **Both tool-call adapters carry a list, and so both carry a drift check.** codex names a
+  call by an item KIND and grok by the tool `name` on a `tool_use` block. grok used to count
+  any `tool_use` and needed no list, but a call can succeed without reading anything: the
+  todo grok writes itself comes back with no error and no exit code, so a run whose every
+  command failed passed as inspected once it also wrote one. Only `GROK_INSPECTING_TOOLS`
+  are attempts now, and `GROK_QUIET_TOOLS` names the ones skipped on purpose. A list can fall
+  out of date, so on both sides a stream with no local attempt and a kind or tool name this
+  wrapper does not recognize exits `3` naming them, never `6`. Getting that wrong would report
   "the model never opened the diff" identically on every run after a provider upgrade — a
   permanent outage, misdiagnosed as a bad model, in the direction the README tells callers to
-  retry. `CODEX_QUIET_ITEMS` is what keeps "a kind we skip on purpose" and "a kind we have
-  never heard of" different facts, and its control test is what keeps exit `6` reachable.
+  retry. `CODEX_QUIET_ITEMS` and `GROK_QUIET_TOOLS` are what keep "a kind we skip on
+  purpose" and "a kind we have never heard of" different facts, and their control tests are
+  what keep exit `6` reachable.
 - **`ce-persona-findings` refuses an artifact whose provenance records zero local tool
   calls.** It looks like a reader reaching into a sidecar it has no business reading. It is
   the other half of the refusal: exits `6` and `3` KEEP the artifact as evidence, and an

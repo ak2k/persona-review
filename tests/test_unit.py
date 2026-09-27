@@ -227,6 +227,23 @@ BACKGROUND_STARTED = {
 }
 
 
+# A bookkeeping result (u55 gate-b2 grok events line 3): the plan the model wrote itself. It
+# has no exit code and no error, so it passes every result rule and inspected nothing.
+TODO_UPDATED = {
+    "type": "Todo",
+    "TodosUpdated": {
+        "summary_for_prompt": "1 todo",
+        "todos": [{"content": "Read the diff", "status": "in_progress"}],
+        "state": {},
+    },
+}
+KILL_TASK = {
+    "type": "KillTask",
+    "Result": {"task_id": "call-1", "outcome": "killed", "message": "Task was terminated"},
+}
+SEARCH_REPLACE = {"type": "SearchReplace", "path": "/work/repo/f.py", "replacements": 1}
+
+
 def task_output(status: str, exit_code: int | None, output: str) -> dict[str, Any]:
     """gate-P2 lines 43 and 51: the background command's own report, under `Result`."""
     return {
@@ -842,8 +859,9 @@ class TestRunEvidence:
         not_local = validate.CODEX_TOOL_ITEMS - local
         assert not_local == set(NOT_LOCAL_KINDS)
 
-    def test_grok_counts_every_call_as_local(self):
-        # The argv disables grok's web tools, so no call left is one known to leave the machine.
+    def test_grok_counts_every_inspecting_call_as_local(self):
+        # The argv disables grok's web tools, so no inspecting call left is one known to leave
+        # the machine.
         assert "--disable-web-search" in providers.GROK.argv(
             providers.Invocation(
                 model="m",
@@ -1011,6 +1029,48 @@ class TestACallCountsOnlyIfItSucceeded:
         assert (stats.tool_calls, stats.local_tool_attempts) == (1, 1)
         assert stats.local_tool_calls == succeeded
 
+    def test_a_bookkeeping_call_beside_failed_commands_is_not_inspection(self):
+        # The bypass reproduced on the poster's stopgap: every command failed, and one Todo
+        # result, which carries no exit code, read as "1 succeeded".
+        stats = self._grok(
+            grok_tool_call("run_terminal_command", BASH_FAILED),
+            grok_tool_call("todo_write", TODO_UPDATED),
+            grok_result(),
+        )
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 1, 0)
+
+    @pytest.mark.parametrize(
+        ("name", "report"),
+        [
+            ("todo_write", TODO_UPDATED),
+            ("kill_command_or_subagent", KILL_TASK),
+            ("search_replace", SEARCH_REPLACE),
+            ("write", SEARCH_REPLACE),
+        ],
+    )
+    def test_a_bookkeeping_call_alone_attempted_nothing(self, name: str, report: dict[str, Any]):
+        # And is not drift either: these names are known, so a run of nothing else stays the
+        # model's doing, exit 6.
+        stats = self._grok(grok_tool_call(name, report), grok_result())
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (1, 0, 0)
+
+    def test_an_unknown_grok_tool_with_no_inspecting_call_is_drift(self):
+        with pytest.raises(errors.EnvError) as caught:
+            self._grok(grok_tool_call("mcp_repo_search", READ_FILE), grok_result())
+        message = str(caught.value)
+        assert "mcp_repo_search" in message and "drift" in message, message
+        named = set(re.findall(r"validate\.([A-Z_]+)", message))
+        assert named == {"GROK_INSPECTING_TOOLS", "GROK_QUIET_TOOLS"}, message
+
+    def test_an_unknown_grok_tool_beside_an_inspecting_call_is_not_drift(self):
+        stats = self._grok(
+            grok_tool_call("mcp_repo_search", READ_FILE), grok_tool_call("read_file"), grok_result()
+        )
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 1, 1)
+
+    def test_the_grok_tool_lists_do_not_overlap(self):
+        assert not validate.GROK_INSPECTING_TOOLS & validate.GROK_QUIET_TOOLS
+
     def test_a_grok_result_without_is_error_false_does_not_count(self):
         call = grok_tool_call("read_file", None)
         result = json.loads(grok_tool_result("toolu_read_file"))
@@ -1119,14 +1179,13 @@ class TestDriftIsNotBlamedOnTheModel:
             self._codex("")
         assert "no events at all" in str(caught.value)
 
-    def test_grok_has_no_kind_list_to_drift(self):
-        # Stated so the asymmetry is deliberate rather than an omission: grok names a tool
-        # call structurally (`tool_use`), so there is no vocabulary to fall out of date and
-        # nothing for a drift check to detect.
+    def test_a_grok_run_that_called_nothing_is_not_drift(self):
+        # The grok side's control: with no tool name to be unfamiliar, a run that called
+        # nothing is still the model's doing, so exit 6 stays reachable.
         stats = validate.run_stats(
             "grok-messages", validate.objects(grok_result().splitlines()), None
         )
-        assert stats.tool_calls == 0
+        assert (stats.tool_calls, stats.local_tool_attempts) == (0, 0)
 
 
 class TestTheGateRefusesARunThatInspectedNothing:

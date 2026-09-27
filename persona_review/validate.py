@@ -538,10 +538,10 @@ class Evidence:
 # reached for work? They answer them differently because the streams differ in kind, and
 # the difference is worth stating rather than discovering.
 #
-# grok names a tool call structurally — a `tool_use` content block — so ANY of them is an
-# attempt and there is no list of tool names to go stale. codex names it by an item KIND, so
-# the adapter has to carry a list, and a list can go out of date. That asymmetry is why only
-# the codex side needs the drift detection below.
+# grok names a tool call structurally — a `tool_use` content block — and codex by an item
+# KIND. Both adapters still carry a list of what reads the tree, grok's by tool name, because
+# some calls that succeed read nothing; and a list can go out of date, so both carry the
+# drift detection below.
 #
 # A call SUCCEEDED only when the provider reports that it ran and worked. Neither a
 # `failed` status nor a non-zero exit code separates a command that never started from one
@@ -560,6 +560,20 @@ GROK_TOOL_BLOCK = "tool_use"
 # by `tool_use_id`. Its `content` is a JSON object serialized as a string, and a command's
 # carries its `exit_code` there, beside `is_error` false even when the command failed.
 GROK_RESULT_BLOCK = "tool_result"
+
+# The tools whose success means the working tree was read, by the `name` on the `tool_use`
+# block. A result is not enough on its own: the plan grok writes itself (`todo_write`) comes
+# back with no error and no exit code, so a run whose every command failed passed as
+# inspected once it also wrote a todo. Verified against 185 local grok-4.7 streams, where
+# every call used one of the names in this list or the next.
+GROK_INSPECTING_TOOLS = frozenset(
+    {"get_command_or_subagent_output", "grep", "list_dir", "read_file", "run_terminal_command"}
+)
+
+# Known tools that read nothing: bookkeeping, and edits. Named, like `CODEX_QUIET_ITEMS`, so
+# that "a tool we skip on purpose" and "a tool we have never heard of" stay different facts —
+# a list of names can go stale, and the drift check in `_grok_stats` is what notices.
+GROK_QUIET_TOOLS = frozenset({"kill_command_or_subagent", "search_replace", "todo_write", "write"})
 
 # A command grok moved to the background reports `status` "running" at once, and its real
 # outcome arrives later as a `TaskOutput` with the command's own `status` and `exit_code`
@@ -689,10 +703,13 @@ def _grok_output(block: JSONObject) -> str:
 
 def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     calls = 0
+    attempts = 0
     local = 0
     failure: str | None = None
-    # The calls made and not yet answered. A result counts once, for a call this run made: a
-    # second result for the same id, or one for an id never called, is evidence of nothing.
+    unknown: set[str] = set()
+    # The inspecting calls made and not yet answered. A result counts once, for such a call
+    # this run made: a second result for the same id, one for an id never called, or one
+    # answering a bookkeeping call, is evidence of nothing.
     pending: set[str] = set()
     turns: int | None = None
     output_tokens: int | None = None
@@ -705,6 +722,13 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             for block in blocks:
                 if block.get("type") == GROK_TOOL_BLOCK:
                     calls += 1
+                    name = block.get("name")
+                    tool = name if isinstance(name, str) else ""
+                    if tool not in GROK_INSPECTING_TOOLS:
+                        if tool not in GROK_QUIET_TOOLS:
+                            unknown.add(tool or "<unnamed>")
+                        continue
+                    attempts += 1
                     ident = block.get("id")
                     if isinstance(ident, str):
                         pending.add(ident)
@@ -729,17 +753,25 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
-    # Every grok call is an attempt at a local one. `_grok_argv` passes
-    # `--disable-web-search`, which removes grok's web search and web fetch tools, and grok's
-    # events carry no kind that separates a built-in tool from a configured MCP server's, only
-    # a tool name.
+    if attempts == 0 and unknown:
+        # The codex drift check's reason, for a list of names instead of kinds: a renamed
+        # inspecting tool would otherwise make every run exit 6, blaming the model. An MCP
+        # server's tool lands here too when nothing else was called, since grok's events name
+        # a tool without saying where it runs.
+        raise errors.EnvError(
+            "counted no inspecting tool calls, but grok's stream carries tool name(s) this "
+            f"wrapper does not recognize: {', '.join(sorted(unknown))}. That is provider CLI "
+            "drift or an unfamiliar tool, not model behavior, and no run through grok can be "
+            "believed until each name is added to validate.GROK_INSPECTING_TOOLS if it reads "
+            "the working tree, or validate.GROK_QUIET_TOOLS if it does not."
+        )
     return RunStats(
         tool_calls=calls,
         local_tool_calls=local,
         turns=turns,
         output_tokens=output_tokens,
         duration_s=None,
-        local_tool_attempts=calls,
+        local_tool_attempts=attempts,
         first_failure=failure,
     )
 

@@ -84,8 +84,10 @@ genuinely nothing in it.
 
 **A local call counts only if it succeeded.** Through codex, a command counts when its
 `item.completed` carries `exit_code` 0, and a file change or patch when its status is
-`completed`. Through grok, a call counts when its `tool_result` has `is_error` false and reports
-no non-zero or null exit code and no command still running. A run that attempted local calls
+`completed`. Through grok, a call counts when it is a tool that reads the tree (a command, a
+search, a file read, a directory listing, or a background command's output) and its
+`tool_result` has `is_error` false and reports no non-zero or null exit code and no command
+still running; a todo, a task kill or a file edit never counts. A run that attempted local calls
 and had none succeed exits `3`, not `6`: the model tried, and a provider that cannot start a
 command fails every call the same way on every run. That is a run that happened too —
 codex-cli 0.156.1 could not start five commands, each completed `failed` with exit code 1, and
@@ -524,10 +526,13 @@ run made; `local_tool_attempts` is the ones that act on the working directory, a
 `command_execution`, `local_shell_call`, `file_change` and `patch_apply` items; a command
 succeeded when it completed with `exit_code` 0, a file change or patch when it completed with
 status `completed`. `web_search`, `mcp_tool_call`, `function_call` and `custom_tool_call` count
-in `tool_calls` only, because none of them proves the tree was read. Every grok call is a local
-attempt, since `--disable-web-search` removes its web tools, and it succeeded when its
-`tool_result` has `is_error` false and reports no non-zero or null exit code and no command still
-running. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
+in `tool_calls` only, because none of them proves the tree was read. Through grok a local attempt
+is a call to one of `run_terminal_command`, `grep`, `read_file`, `list_dir` or
+`get_command_or_subagent_output` (`--disable-web-search` removes its web tools), and it succeeded
+when its `tool_result` has `is_error` false and reports no non-zero or null exit code and no
+command still running. `todo_write`, `kill_command_or_subagent`, `search_replace` and `write`
+count in `tool_calls` only. A grok stream with no local attempt that calls a tool name this build
+does not know exits `3` naming it, as codex kind drift does. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
 and no successes exit `3` — so they are recorded rather than only acted on: a refusal you cannot
 audit afterwards is one you have to take on trust. `ce-persona-findings` refuses a sidecar whose
 `local_tool_calls` is zero.
@@ -552,9 +557,12 @@ none succeed exits `3` instead of `0`. Every other command, flag and exit status
 
 - **A failed local call no longer counts as inspection.** Through codex a command counts when it
   completes with `exit_code` 0, and a file change or patch when it completes with status
-  `completed`. Through grok a call counts when its `tool_result` has `is_error` false and reports
-  no non-zero or null exit code and no command still running; a call with no result does not
-  count. A codex run whose commands all failed to start used to exit `0` with empty findings.
+  `completed`. Through grok a call counts when it is one of the tools that read the tree and its
+  `tool_result` has `is_error` false and reports no non-zero or null exit code and no command
+  still running; a call with no result, or a todo, task kill or file edit, does not count. A
+  codex run whose commands all failed to start used to exit `0` with empty findings.
+- **grok tool-name drift is detected.** A grok stream with no local attempt that calls a tool
+  this build does not know exits `3` naming it. Before, any grok call counted, whatever it was.
 - **Exit `3` for a run whose every local call failed.** Its stderr line gives the counts and the
   first line the first failed call printed. Nothing goes to stdout, and the artifacts are kept as
   evidence. A run that attempted no local call still exits `6`.

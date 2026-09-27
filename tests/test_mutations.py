@@ -357,8 +357,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "grok calls are not counted as local attempts",
         "persona_review/validate.py",
-        r"        local_tool_attempts=calls,",
-        "        local_tool_attempts=0,",
+        r"                    attempts \+= 1\n",
+        "",
     ),
     Mutation(
         # Counting every content block rather than the tool_use ones counts thinking and
@@ -442,8 +442,8 @@ MUTATIONS: list[Mutation] = [
         # after a provider-CLI rename — a falsehood about the one component that was working.
         "a renamed codex vocabulary is blamed on the model instead of the wrapper",
         "persona_review/validate.py",
-        r"    if attempts == 0 and unknown:",
-        "    if False:",
+        r"    if attempts == 0 and unknown:\n        # THE MISDIAGNOSIS",
+        "    if False:\n        # THE MISDIAGNOSIS",
     ),
     Mutation(
         # Recovering by the tool list alone silences the drift check for a renamed
@@ -461,16 +461,46 @@ MUTATIONS: list[Mutation] = [
         # has to be reported as drift rather than as a model that never opened the diff.
         "a web search hides a renamed codex vocabulary from the drift check",
         "persona_review/validate.py",
-        r"    if attempts == 0 and unknown:",
-        "    if calls == 0 and unknown:",
+        r"    if attempts == 0 and unknown:\n        # THE MISDIAGNOSIS",
+        "    if calls == 0 and unknown:\n        # THE MISDIAGNOSIS",
     ),
     Mutation(
         # Recognized commands that all failed are not a renamed vocabulary, and saying so
         # sends someone to add kinds to a list that already has them.
         "failed commands beside an unrecognized kind are reported as drift",
         "persona_review/validate.py",
-        r"    if attempts == 0 and unknown:",
-        "    if local == 0 and unknown:",
+        r"    if attempts == 0 and unknown:\n        # THE MISDIAGNOSIS",
+        "    if local == 0 and unknown:\n        # THE MISDIAGNOSIS",
+    ),
+    Mutation(
+        # The poster-stopgap bypass: a todo, which returns no error and no exit code, beside
+        # commands that all failed read as one successful inspection.
+        "a grok bookkeeping call counts as inspection",
+        "persona_review/validate.py",
+        r"                    if tool not in GROK_INSPECTING_TOOLS:",
+        "                    if False:",
+    ),
+    Mutation(
+        # The control side: known bookkeeping names reported as drift would make every
+        # run of nothing but a todo exit 3, and exit 6 dead for grok.
+        "grok tools skipped on purpose are reported as drift",
+        "persona_review/validate.py",
+        r"                        if tool not in GROK_QUIET_TOOLS:",
+        "                        if True:",
+    ),
+    Mutation(
+        # A renamed inspecting tool would otherwise make every grok run exit 6, blaming the
+        # model for the wrapper's stale list.
+        "a renamed grok tool is blamed on the model instead of the wrapper",
+        "persona_review/validate.py",
+        r"    if attempts == 0 and unknown:\n        # The codex drift check's reason",
+        "    if False:\n        # The codex drift check's reason",
+    ),
+    Mutation(
+        "an unfamiliar grok tool beside an inspecting call is reported as drift",
+        "persona_review/validate.py",
+        r"    if attempts == 0 and unknown:\n        # The codex drift check's reason",
+        "    if unknown:\n        # The codex drift check's reason",
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
