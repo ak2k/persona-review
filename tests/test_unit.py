@@ -808,7 +808,7 @@ class TestDriftIsNotBlamedOnTheModel:
     def test_the_kinds_we_deliberately_skip_are_not_mistaken_for_drift(self):
         # THE OTHER CONTROL, and the one that decides whether exit 6 still exists: a genuine
         # dud emits agent_message and reasoning and nothing else. If those counted as
-        # unrecognised, every vacuous run would report drift and the refusal would be dead.
+        # unrecognized, every vacuous run would report drift and the refusal would be dead.
         stats = self._codex(CODEX_NO_CALLS)
         assert stats.tool_calls == 0
 
@@ -1051,6 +1051,17 @@ class TestARefusalSurvivesBeingHandedOn:
             )
             assert validate.refused_run(art) is None
 
+    @pytest.mark.parametrize("sidecar", ["[]", '[{"run_stats": {"tool_calls": 0}}]', "0"])
+    def test_a_sidecar_that_is_not_an_object_is_no_record(self, sidecar: str):
+        # Valid JSON with no fields to read: read as a record, it raises out of every mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self._artifact(Path(tmp), {"tool_calls": 0})
+            (Path(tmp) / "adversarial-reviewer-grok-provenance.json").write_text(
+                sidecar, encoding="utf-8"
+            )
+            assert validate.refused_run(art) is None
+            assert validate.reviewed_head(art) == "unresolved: no provenance"
+
     def test_the_command_refuses_every_output_mode_including_json(self):
         # --json especially. A programmatic caller is the one most likely to act on these
         # findings without a person ever reading them.
@@ -1064,6 +1075,7 @@ class TestARefusalSurvivesBeingHandedOn:
                 [str(art), "--all"],
                 [str(art), "--json"],
                 [str(art), "--show", "all"],
+                [str(art), "--anchors", "-C", tmp],
             ):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1956,7 +1968,7 @@ class TestGateIsFailClosed:
     def test_a_schema_keyword_is_either_enforced_or_refused_never_skipped(
         self, field: str, spec: dict[str, Any], value: Any
     ):
-        # Generalises the hand-written anyOf/oneOf/$ref/const case over the whole keyword
+        # Generalizes the hand-written anyOf/oneOf/$ref/const case over the whole keyword
         # vocabulary, including keywords the plugin has not invented yet. Silently ignoring
         # one certifies a review against rules nobody checked -- so acceptance has to mean
         # every keyword present was one of the two declared sets.
@@ -2267,8 +2279,8 @@ class TestTheMergeTierProjection:
             # A -C nobody asked to use is not discarded: the output would be byte-identical
             # to an unverified --return at exit 0, and a machine caller has no channel on
             # which to notice it got no verification.
-            ((ARTIFACT, "--return", "-C", "."), "-C only applies to --verify-quotes"),
-            ((ARTIFACT, "-C", "."), "-C only applies to --verify-quotes"),
+            ((ARTIFACT, "--return", "-C", "."), "-C only applies to --verify-quotes or --anchors"),
+            ((ARTIFACT, "-C", "."), "-C only applies to --verify-quotes or --anchors"),
         ],
     )
     def test_a_mode_that_does_not_exist_is_a_usage_error(
@@ -2314,7 +2326,7 @@ class TestTheMergeTierProjection:
     def test_help_documents_the_new_modes(self):
         code, out, _ = self._run("--help")
         assert code == 0
-        for token in ("--return", "--verify-quotes", "-C <dir>"):
+        for token in ("--return", "--verify-quotes", "-C <dir>", "--anchors -C <dir>"):
             assert token in out
         # Wrapped in HELP, one sentence in README: the words are the contract, the line
         # breaks are layout, so the comparison is against the collapsed text.
@@ -2427,6 +2439,22 @@ class TestQuotesAreCheckedAgainstTheTree:
     def test_a_quote_the_tree_carries_is_kept(self, quote: str):
         _, err, after = self._run(quote)
         assert after["first_evidence"] == quote
+        assert err.strip().endswith("0 dropped by --verify-quotes")
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            "src/f.py:1-2: import billing\n    return bill(account)",
+            "src/f.py:1–2: import billing\n    return bill(account)",
+            "src/f.py:2-2 -- return bill(account)",
+            "`return bill(account)` -- src/f.py:2-3",
+        ],
+    )
+    def test_a_range_cited_quote_the_tree_carries_is_kept(self, quote: str):
+        # Half of the lenses' citations are ranges. Read as `path:first`, the rest of the
+        # range stayed in the compared text, and every one of them was dropped.
+        _, err, after = self._run(quote)
+        assert after["first_evidence"] == quote, err
         assert err.strip().endswith("0 dropped by --verify-quotes")
 
     def test_a_basename_citation_is_resolved_through_the_findings_own_file(self):
@@ -2787,6 +2815,1237 @@ class TestQuotesAreCheckedAgainstTheTree:
             quote = f"{cited}:2 -- return bill(account)"
             _, err, after = self._run(quote, file="src/f.py")
             assert after["first_evidence"] == quote, err
+
+
+def _decorated(path: str, where: str, shape: str) -> str:
+    """A named function rather than a lambda: strict mode cannot infer a lambda's parameter."""
+    return f"`{path}`:{where}" if shape == "`path`" else shape.format(f"{path}:{where}")
+
+
+# A leading citation in every shape `claim_v1` takes off, with what joins it to the code.
+_leading_citations = st.tuples(
+    st.builds(
+        _decorated,
+        st.sampled_from(
+            ["src/a.py", "a.py", "lib/other.py", "docs/guide.md", "src\\win.py", "Makefile.am"]
+        ),
+        st.tuples(
+            st.integers(min_value=1, max_value=99999).map(str),
+            st.sampled_from(["", ":7"]),
+            st.sampled_from(["", "-40", "–40", "—40"]),
+        ).map("".join),
+        st.sampled_from(["{}", "**{}**", "({})", "`{}`", "<{}>", "[{}]", "`path`"]),
+    ),
+    st.sampled_from(["", " (verbatim)", " (Verbatim)"]),
+    st.sampled_from([": ", " : ", " -- ", "-- ", " — ", " – ", " - ", " "]),
+).map("".join)
+
+# Code a claim is made of. No colon, so it holds no citation of its own, and a letter first,
+# so it opens with neither a separator nor `(verbatim)`.
+_claimed_code = st.tuples(
+    st.sampled_from("abcxyz"), st.text(alphabet="abcxyz_019 =+.,()[]{}/\"'#", max_size=30)
+).map("".join)
+
+
+class TestTheCitationScanner:
+    """One reading of a quote's citations, which the claim is cut from."""
+
+    def test_a_bracketed_own_path_is_one_citation(self):
+        # `_REFERENCE` alone reads `id]/page.tsx:12` from offset 4. Kept beside the literal,
+        # the two readings would cut the quote in two different places.
+        found = findings.citations("app/[id]/page.tsx:12: foo(bar, baz)", "app/[id]/page.tsx")
+        assert found == [findings.Citation("app/[id]/page.tsx", "12", 0, 20, True)]
+
+    def test_a_trailing_bracketed_own_path_is_one_citation(self):
+        found = findings.citations("foo(bar, baz) -- app/[id]/page.tsx:12", "app/[id]/page.tsx")
+        assert found == [findings.Citation("app/[id]/page.tsx", "12", 17, 37, True)]
+
+    def test_a_path_ending_in_the_basename_is_another_file(self):
+        # `lib/a.py` ends in `a.py`, and a finding at `src/a.py` tries that basename. Read as
+        # its own citation, a quote of another file would found this one.
+        found = findings.citations("lib/a.py:5 -- total = compute(a, b)", "src/a.py")
+        assert found == [findings.Citation("lib/a.py", "5", 0, 10, False)]
+
+    def test_a_decorated_basename_is_the_findings_own_file(self):
+        found = findings.citations("(a.py:12) total = compute(a, b)", "src/a.py")
+        assert found == [findings.Citation("a.py", "12", 0, 9, True)]
+
+    def test_an_empty_own_path_names_no_citation(self):
+        # An empty literal would match every `:N` that follows whitespace.
+        for own in ("", "src/"):
+            found = findings.citations("retry(limit) :12 and (:40)", own)
+            assert not any(c.own for c in found), (own, found)
+
+
+class TestKeysV1:
+    """The claim and the two keys a poster writes into hidden markers. Frozen.
+
+    A marker outlives every release, so these vectors are never updated to follow the code:
+    a failure here means a definition moved, which orphans every comment already posted. A
+    different definition is a `v2` beside these, with a one-time re-post.
+    """
+
+    CODE = "total = compute(a, b)"
+    OWN = "src/a.py"
+
+    # (quote, the finding's file, the claim). Each claim is read off the grammar in
+    # `claim_v1`'s docstring, not off its output, or a vector would pin whatever the code does.
+    CLAIMS: tuple[tuple[str, str | None, str], ...] = (
+        # A leading citation, with each separator a lens writes.
+        ("src/a.py:12: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 — total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 – total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 - total = compute(a, b)", OWN, CODE),
+        # No separator: the rest is re-stripped before it is unwrapped.
+        ("src/a.py:12 `total = compute(a, b)`", OWN, CODE),
+        ("src/a.py:12 (verbatim): `total = compute(a, b)`", OWN, CODE),
+        ("src/a.py:12–14: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12—14: total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12-14 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12:5 -- total = compute(a, b)", OWN, CODE),
+        ("src/a.py:12 --     total   =  compute(a, b)", OWN, CODE),
+        ("src/a.py:12 -- `  total = compute(a, b)  `", OWN, CODE),
+        # A trailing citation: joined by a separator, or parenthesized.
+        ("`total = compute(a, b)` -- src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) (src/a.py:12)", OWN, CODE),
+        ("total = compute(a, b) -- (verbatim) src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) – src/a.py:12", OWN, CODE),
+        ("total = compute(a, b) -- (Verbatim) src/a.py:12", OWN, CODE),
+        # An opening parenthesis alone does not set a citation apart.
+        (
+            "total = compute(a, b) (src/a.py:12",
+            OWN,
+            "total = compute(a, b) (src/a.py:12",
+        ),
+        # A citation of another file at column 0 is the line's locator, though the finding's
+        # own path, read first, is cited later in the line.
+        ("lib/b.py:3 -- x … src/a.py:12", OWN, "x … src/a.py:12"),
+        # Bare and unjoined, it may be what the line says.
+        ("total = compute(a, b) src/a.py:12", OWN, "total = compute(a, b) src/a.py:12"),
+        ("total = a- src/a.py:12", OWN, "total = a- src/a.py:12"),
+        # Prose after the citation: it is not at the edge, so nothing is taken off.
+        (
+            "`total = compute(a, b)` -- src/a.py:12, called twice",
+            OWN,
+            "`total = compute(a, b)` -- src/a.py:12, called twice",
+        ),
+        # The finding's own path, read as a literal where `_REFERENCE` would stop at `[`/`(`.
+        ("app/[id]/page.tsx:12: foo(bar, baz)", "app/[id]/page.tsx", "foo(bar, baz)"),
+        ("(app/(auth)/page.tsx:12) -- foo(bar, baz)", "app/(auth)/page.tsx", "foo(bar, baz)"),
+        ("foo(bar, baz) -- app/[id]/page.tsx:12", "app/[id]/page.tsx", "foo(bar, baz)"),
+        # Spelled with a `./` on either side, which `norm_path` reads as the same file.
+        (
+            "app/[id]/page.tsx:2 -- return renderPage(props);",
+            "app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
+        (
+            "app/[id]/page.tsx:2 -- return renderPage(props);",
+            "./app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
+        (
+            "./app/[id]/page.tsx:2 -- return renderPage(props);",
+            "app/[id]/page.tsx",
+            "return renderPage(props);",
+        ),
+        # Its basename.
+        ("a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("(a.py:12) total = compute(a, b)", OWN, CODE),
+        # Another file, stripped because its path looks like one (step 2's path rule).
+        ("**src/f.py:2** -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("`src/f.py`:2 -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("lib/a.py:5 -- total = compute(a, b)", OWN, CODE),
+        ("src\\a.py:12 -- total = compute(a, b)", OWN, CODE),
+        ("f.py:2 -- return bill(account)", "src/g.py", "return bill(account)"),
+        ("bin/deploy:3 -- set -euo pipefail", OWN, "set -euo pipefail"),
+        ("C:\\bin\\Makefile:42 -- $(CC) -o app main.c", OWN, "$(CC) -o app main.c"),
+        # Citation-shaped, not a path: what the line says.
+        ("timeout:30 -- seconds", OWN, "timeout:30 -- seconds"),
+        ("`timeout`:30 -- seconds", OWN, "`timeout`:30 -- seconds"),
+        (
+            "https://example.com:443 - the port the proxy listens on",
+            OWN,
+            "https://example.com:443 - the port the proxy listens on",
+        ),
+        (":12 -- retry(limit)", "", ":12 -- retry(limit)"),
+        # Only a citation: no code is claimed.
+        ("a.py:12", OWN, ""),
+        ("(src/a.py:12)", OWN, ""),
+        # A citation mid-quote is what the line says.
+        (
+            "retry(3) # see src/a.py:12 for the limit",
+            OWN,
+            "retry(3) # see src/a.py:12 for the limit",
+        ),
+        # Never split, never elided.
+        ("src/a.py:3 -- a = 1 / b = 2", OWN, "a = 1 / b = 2"),
+        ("src/a.py:3 -- first() ... last()", OWN, "first() ... last()"),
+        # A literal backslash-n stays; a real newline is whitespace.
+        ('src/a.py:3 -- log("one\\ntwo")', OWN, 'log("one\\ntwo")'),
+        ("src/a.py:3 -- a = 1\n    b = 2", OWN, "a = 1 b = 2"),
+        # A citation starting any line is that line's locator, in each shape a lens writes.
+        ("src/x.py:81: a = 1\nsrc/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        ("src/x.py:81: `a = 1`\nsrc/x.py:82: `b = 2`", "src/x.py", "a = 1 b = 2"),
+        (
+            "src/x.py:81 (verbatim) -- a = 1\nsrc/x.py:82 (verbatim) -- b = 2",
+            "src/x.py",
+            "a = 1 b = 2",
+        ),
+        (
+            "src/x.py:81 (verbatim) -- `a = 1`\nsrc/x.py:82 (verbatim) -- `b = 2`",
+            "src/x.py",
+            "a = 1 b = 2",
+        ),
+        ("a = 1\nsrc/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        ("src/x.py:81: a = 1\n    src/x.py:82: b = 2", "src/x.py", "a = 1 b = 2"),
+        # A line starting with a token that is not a path, or citing mid-line, is code.
+        ("src/x.py:81: a = 1\nretries:3 -- b = 2", "src/x.py", "a = 1 retries:3 -- b = 2"),
+        (
+            "src/x.py:81: a = 1\nb = 2 # see src/x.py:82 for c",
+            "src/x.py",
+            "a = 1 b = 2 # see src/x.py:82 for c",
+        ),
+        # Backticks on a line no citation came off are code; around the whole rest they are not.
+        ("src/x.py:81: a = 1\n`b = 2`", "src/x.py", "a = 1 `b = 2`"),
+        ("src/x.py:81:\n`a = 1`", "src/x.py", "a = 1"),
+        # A separator or `(verbatim)` not beside a removed citation stays.
+        ("-- SELECT id FROM users", OWN, "-- SELECT id FROM users"),
+        (
+            "src/a.py:12 -- `total = compute(a, b)` (verbatim)",
+            OWN,
+            "`total = compute(a, b)` (verbatim)",
+        ),
+        ("src/a.py:12 -1 if index is None else index", OWN, "-1 if index is None else index"),
+        ("config.yml:42-column-limit", "config.yml", "-column-limit"),
+        # Backticks are taken off only when they wrap the whole rest.
+        (
+            "src/a.py:12 -- total = compute(a, b)  (the `compute` call)",
+            OWN,
+            "total = compute(a, b) (the `compute` call)",
+        ),
+        # The shapes the poster's own tests carry.
+        (
+            "tools/interval_stats.py:162 (verbatim): `merged[-1] = (merged[-1][0], end)`",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+        (
+            "tools/interval_stats.py:15–16: merged[-1] = (merged[-1][0], end)",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+        (
+            "`merged[-1] = (merged[-1][0], end)` -- tools/interval_stats.py:15",
+            "tools/interval_stats.py",
+            "merged[-1] = (merged[-1][0], end)",
+        ),
+    )
+
+    # sha256("persona-review/quote-key/1\0" + claim), each reproducible outside Python with
+    # `printf 'persona-review/quote-key/1\0<claim>' | shasum -a 256`.
+    QUOTE_KEYS: dict[str, str] = {
+        CODE: "f6d53bad0a55cc1481554a6bbc8409829d9663465c7a3069569a784f951ad97c",
+        "foo(bar, baz)": "a1eac5fd51a84970a6897ba2f848f1f07001d0c4ec7b8eb97a3ac979df0d4147",
+        "return renderPage(props);": (
+            "9abc73d462d4cb3277a9269340fe56936e230c6ee64799115ee2fb0014af75c3"
+        ),
+        "return bill(account)": "606eafd0681fda2ab232ea5812d0d13a2c8ab0a015af3899622c3718330aaa1e",
+        "merged[-1] = (merged[-1][0], end)": (
+            "2843e8f84c816e9b966ee53801fe30ce07a5c5c24f0f7a4b2d20768d0af46fda"
+        ),
+        "total = compute(a, b) src/a.py:12": (
+            "cf559ec1534669c7e302ee9faed89278afec47fa45d701962ecafd10edb447a5"
+        ),
+        "total = a- src/a.py:12": (
+            "7347abb80e57b21f2e1c2ea794aff5929ea9c7c04a10bc1a571a1a836432125d"
+        ),
+        "total = compute(a, b) (src/a.py:12": (
+            "fad40a85775f1f0d2ba14d679d2a699089ab905901c6d6c4d8d1e3695c43c9f6"
+        ),
+        "x … src/a.py:12": "8b021871d435fcd08fcbbaed9791b9a9691da7c81966078c57792dc82feb3904",
+        "`total = compute(a, b)` -- src/a.py:12, called twice": (
+            "e5cfafacc298867b95c3c3217fbd05201af58aa0ed8eb64f263c43ec1d49c7f0"
+        ),
+        "timeout:30 -- seconds": "569f99f20b19f5f460c0d938dbcb47da31bc75dc418e7fa76f35317ee8916252",
+        "`timeout`:30 -- seconds": (
+            "ac1c5725838a7d1bf30c4e9bc1dd1921d892a653b3797f6a84526cac500346d6"
+        ),
+        "https://example.com:443 - the port the proxy listens on": (
+            "19b2efec6d600516a24c6d00974c66aa97f5d021ee50b88be20ebad7b3b01c38"
+        ),
+        ":12 -- retry(limit)": "ce87b1e8d3a814e6ae270c81fd60823fe7cd6744f29a8ee673d1449e0bb23c03",
+        "retry(3) # see src/a.py:12 for the limit": (
+            "078393f24ca9e0b88c89527719aa02d3a8b2c76dfeb0580dda2147deafe1e2ba"
+        ),
+        "a = 1 / b = 2": "c45fbc9af3195b5caccba8fc12914bf79201155a8bac8b8ac59039cc52f68902",
+        "first() ... last()": "efe561ceaff7295351e0c532c42072ed6505880928a46ec38b1baba9de8a75c2",
+        'log("one\\ntwo")': "80b17a3b6e0d4e79905127a98b633e57754e45ad1cda77540d9db562ba24c630",
+        "a = 1 b = 2": "5e0b3835e0d80a4fd2b78939e7144a12db1d693d5c9e42f7869064945089534d",
+        "a = 1 retries:3 -- b = 2": (
+            "97f50348864a25d7c44d668b6ddf99339bc0d15ead98dd144aa2740600ebc52a"
+        ),
+        "a = 1 b = 2 # see src/x.py:82 for c": (
+            "2a39b5e50e42a47f90e0a0c23744e1f34eb81b4c9a9d9cc2ebe302d04b904166"
+        ),
+        "a = 1 `b = 2`": "57e371fa25a3711fc6659982926ae672be720e1f054a0178363b648cfa777019",
+        "a = 1": "679e59eae4622f19a810bac3bf4344383ff50238de3f265128a981eaf790cbb6",
+        "-- SELECT id FROM users": (
+            "d3a523425cdc9275fbfd8f1e0846bdb10836ba3b96fb6aad64b7a4d33b3b8d0b"
+        ),
+        "`total = compute(a, b)` (verbatim)": (
+            "db26194a59084ae1b2aa57d164cddfc9c0bd4d68183ac6402b0ed94805caf864"
+        ),
+        "-1 if index is None else index": (
+            "e91ec774b0b88bfdff4be7946efd62a84b4aa09c675cec86a8b885ea2c7f233b"
+        ),
+        "-column-limit": "ab755a113e1b4169b84ab122624213501e4ec7401df4d2f25465cf0f1cc7ac0d",
+        "set -euo pipefail": "d32999f83f5146ad89b77f328f7959bfd5eba509f1c0634bee75549c83c77574",
+        "$(CC) -o app main.c": "da72122c02dfcb681a06d5ffdce9875947f84f1308e2f1b3fb6db136ec686bff",
+        "total = compute(a, b) (the `compute` call)": (
+            "15253257dd06b90ce021219c42fff8a2922a4a53b22b6591ce8fd77ebd0b187d"
+        ),
+    }
+
+    @pytest.mark.parametrize(("quote", "own", "claim"), CLAIMS)
+    def test_the_claim(self, quote: str, own: str | None, claim: str):
+        assert findings.claim_v1(quote, own) == claim
+
+    @pytest.mark.parametrize(("quote", "own", "claim"), CLAIMS)
+    def test_the_quote_key(self, quote: str, own: str | None, claim: str):
+        # None for an empty claim: a key shared by every citation-only quote would let one
+        # finding adopt another's thread.
+        assert findings.quote_key_v1(findings.claim_v1(quote, own)) == self.QUOTE_KEYS.get(claim)
+
+    def test_every_vector_is_pinned(self):
+        claims = {claim for _, _, claim in self.CLAIMS}
+        assert claims - {""} == set(self.QUOTE_KEYS)
+        assert findings.quote_key_v1("") is None
+
+    @pytest.mark.parametrize(("claim", "key"), sorted(QUOTE_KEYS.items()))
+    def test_the_quote_key_is_the_documented_hash(self, claim: str, key: str):
+        spelled = hashlib.sha256(f"persona-review/quote-key/1\0{claim}".encode()).hexdigest()
+        assert spelled == key
+
+    def test_a_claim_holding_a_lone_surrogate_still_has_a_key(self):
+        # A lone surrogate is valid JSON (`"\ud800"`), and the key must not raise on it.
+        claim = "x = '\ud800'"
+        assert json.loads("\"x = '\\ud800'\"") == claim
+        assert findings.quote_key_v1(claim) == (
+            "38995cc362aa6d34b0e67804b18d3edb31b1fec8207b6770e3c1c394a85098af"
+        )
+
+    # sha256("persona-review/evidence-key/1\0" + path + "\0" + the span's non-blank lines,
+    # each whitespace-collapsed, joined by "\n"), reproducible the same way.
+    EVIDENCE_ONE_LINE = "b945015ae72d102ebf4ffc5c5cba50ec5e4abdf965bb3dee64925369f425b464"
+    EVIDENCE_TWO_LINES = "0c5b6db6414216e304f8f52adf0eaf5447614658bc961e90650e88a2503a399a"
+
+    def test_the_evidence_key(self):
+        assert (
+            findings.evidence_key_v1("src/a.py", ["    total = compute(a, b)"])
+            == self.EVIDENCE_ONE_LINE
+        )
+        assert (
+            findings.evidence_key_v1("src/a.py", ["  def   f():", "    return 1"])
+            == self.EVIDENCE_TWO_LINES
+        )
+
+    def test_a_blank_line_inside_the_span_does_not_move_the_evidence_key(self):
+        spans = (["def f():", "", "    return 1"], ["def f():", "   \t", "    return 1"])
+        for lines in spans:
+            assert findings.evidence_key_v1("src/a.py", lines) == self.EVIDENCE_TWO_LINES
+
+    def test_the_evidence_key_carries_the_path(self):
+        assert findings.evidence_key_v1("lib/a.py", ["    total = compute(a, b)"]) == (
+            "cc65c9d107387d4392abbac4bd1a0bf61e6c62846315906df5118c1da8b559f8"
+        )
+
+    @PROPERTY
+    @given(
+        cite=st.one_of(st.just(""), _leading_citations),
+        code=_claimed_code,
+        ticks=st.sampled_from(["{}", "`{}`", "` {} `"]),
+    )
+    def test_a_leading_citation_or_backticks_never_move_the_quote_key(
+        self, cite: str, code: str, ticks: str
+    ):
+        quote = cite + ticks.format(code)
+        assert findings.quote_key_v1(findings.claim_v1(quote, self.OWN)) == findings.quote_key_v1(
+            findings.claim_v1(code, self.OWN)
+        ), quote
+
+    @PROPERTY
+    @given(
+        cite=st.one_of(st.just(""), _leading_citations),
+        code=_claimed_code,
+        ticks=st.sampled_from(["{}", "`{}`"]),
+    )
+    def test_the_claim_is_its_own_claim(self, cite: str, code: str, ticks: str):
+        # Over the shapes lenses write. Not over any text: a quote opening with two
+        # citations loses one per pass, because only the edge citation is the lens's.
+        claim = findings.claim_v1(cite + ticks.format(code), self.OWN)
+        assert findings.claim_v1(claim, self.OWN) == claim
+
+    @PROPERTY
+    @given(
+        path=st.sampled_from(["app/[id]/page.tsx", "app/(auth)/page.tsx", "src/a.py"]),
+        form=st.sampled_from(["{}", "./{}", "/{}", "{}/"]),
+        separator=st.sampled_from(["/", "//", "/./", "\\"]),
+        written=st.sampled_from(["{}", "./{}"]),
+        decoration=st.sampled_from(["{}", "**{}**", "({})", "`{}`", "[{}]", "`path`"]),
+        shape=st.sampled_from(
+            ["{cite} -- {code}", "{code} -- {cite}", "{cite}: {code}\n{cite}: {code}"]
+        ),
+        code=_claimed_code,
+    )
+    def test_every_spelling_of_the_findings_file_makes_one_claim(
+        self,
+        path: str,
+        form: str,
+        separator: str,
+        written: str,
+        decoration: str,
+        shape: str,
+        code: str,
+    ):
+        # `norm_path` is how a poster keys the file, so every spelling it reads as one names
+        # the same file, in the finding's `file` and in the quote alike.
+        own = form.format(path.replace("/", separator))
+        assert findings.norm_path(own) == path
+        quote = shape.format(cite=_decorated(written.format(path), "2", decoration), code=code)
+        plain = shape.format(cite=_decorated(path, "2", decoration), code=code)
+        assert findings.claim_v1(quote, own) == findings.claim_v1(plain, path), (quote, own)
+
+
+# The file every `TestAnchors` case reads, one entry per line so a number is easy to check.
+_ANCHORED = (
+    "import billing",
+    "",
+    "def charge(account):",
+    "    total = compute_total(account)",
+    "    return bill(account, total)",
+    "",
+    "def refund(account):",
+    "    total = compute_total(account)",
+    "    return credit(account, total)",
+    "",
+    "def audit(account):",
+    '    log_event("audit", account)',
+    "    result = summarize(",
+    "        account, verbose=True)",
+    "    first_value = compute(a)",
+    "",
+    "    second_value = compute(b)",
+)
+
+
+def _citing(path: str, line: int, code: str) -> str:
+    return f"{path}:{line} -- {code}"
+
+
+def _as_finding(file: str | None, line: int | bool | None, quote: str | None) -> dict[str, Any]:
+    return {"file": file, "line": line, "first_evidence": quote}
+
+
+_ANCHORED_CODE = [line.strip() for line in _ANCHORED if line.strip()]
+
+# Quotes that reach every state against `_ANCHORED`: whole lines, lines cited from the file,
+# its basename or another file, two lines at once, and text it does not hold.
+_anchored_quotes = st.one_of(
+    st.sampled_from(_ANCHORED_CODE),
+    st.builds(
+        _citing,
+        st.sampled_from(["src/f.py", "f.py", "./src/f.py", "src/g.py"]),
+        st.integers(min_value=1, max_value=20),
+        st.sampled_from(_ANCHORED_CODE),
+    ),
+    st.sampled_from(["\n".join(_ANCHORED[n : n + 2]) for n in range(len(_ANCHORED) - 1)]),
+    st.text(max_size=20),
+)
+
+# The poster's own `norm_path` cases, shared so the two ends agree on which path an entry
+# names. (path, what it normalizes to).
+NORMALIZED_PATHS = (
+    ("../../../../evil-org/payload/x.py", "evil-org/payload/x.py"),
+    ("..%2fevil/x.py", "..%2fevil/x.py"),
+    ("%2e%2e/%2e%2e/evil/x.py", "%2e%2e/%2e%2e/evil/x.py"),
+    ("\\..\\..\\evil\\x.py", "evil/x.py"),
+    ("/etc/passwd", "etc/passwd"),
+    ("....//....//evil/x.py", "..../..../evil/x.py"),
+    ("a/./../../evil.py", "a/evil.py"),
+    ("../" * 40 + "evil.py", "evil.py"),
+    ("tools/a.py", "tools/a.py"),
+    ("tools/a b(c).py", "tools/a b(c).py"),
+    (".. /../evil.py", "evil.py"),
+    ("..\u2028/../evil.py", "evil.py"),
+    ("a /", "a"),
+    (".. /", ""),
+    ("a /..", "a"),
+)
+
+_STATES = ("verified", "relocated", "ambiguous", "not_found", "unverifiable", "no_evidence")
+
+
+class TestAnchors:
+    """`locate` and `anchors`: where each finding's quote is, and the keys a poster writes.
+
+    Every state is reached from a small tree, and each case asserts the span, `via` and
+    both keys, since those are what a poster places and deduplicates by.
+    """
+
+    def setup_method(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.tree = self.dir / "tree"
+        src = self.tree / "src"
+        src.mkdir(parents=True)
+        (src / "f.py").write_text("\n".join(_ANCHORED) + "\n", encoding="utf-8")
+        (src / "alias.py").symlink_to(src / "f.py")
+        outside = self.dir / "outside.py"
+        outside.write_text("\n".join(_ANCHORED) + "\n", encoding="utf-8")
+        (src / "out.py").symlink_to(outside)
+
+    def teardown_method(self) -> None:
+        self.tmp.cleanup()
+
+    def _locate(self, quote: str | None, line: Any = 5, file: Any = "src/f.py") -> dict[str, Any]:
+        finding: dict[str, Any] = {"line": line}
+        if file is not None:
+            finding["file"] = file
+        if quote is not None:
+            finding["first_evidence"] = quote
+        return cast(dict[str, Any], findings.locate(finding, self.tree))
+
+    @staticmethod
+    def _evidence(path: str, *numbers: int) -> str:
+        return findings.evidence_key_v1(path, [_ANCHORED[n - 1] for n in numbers])
+
+    def test_a_quote_on_the_findings_line_is_verified(self):
+        entry = self._locate("src/f.py:5 -- return bill(account, total)", line=5)
+        assert entry == {
+            "file": "src/f.py",
+            "path": "src/f.py",
+            "line": 5,
+            "state": "verified",
+            "via": "line",
+            "start": 5,
+            "end": 5,
+            "occurrences": 1,
+            "candidates": [],
+            "reason": "on the finding's line",
+            "quote_key": findings.quote_key_v1("return bill(account, total)"),
+            "evidence_key": self._evidence("src/f.py", 5),
+        }
+
+    def test_the_findings_line_wins_over_the_line_the_quote_cites(self):
+        # The code is on lines 4 and 8. The finding says 8, so 8 is corroborated, whatever
+        # line the lens wrote beside the quote.
+        entry = self._locate("src/f.py:4 -- total = compute_total(account)", line=8)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            8,
+            8,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    def test_a_quote_off_its_line_moves_to_the_line_it_cites(self):
+        # On lines 4 and 8, so searching alone is ambiguous: the citation says which.
+        entry = self._locate("src/f.py:8 -- total = compute_total(account)", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            8,
+            8,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [])
+        assert entry["quote_key"] == findings.quote_key_v1("total = compute_total(account)")
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    def test_a_quote_whose_citations_both_hold_it_moves_to_the_first_it_cites(self):
+        # Each line cites one of the two places the code is, and the finding names neither.
+        code = "total = compute_total(account)"
+        entry = self._locate(f"src/f.py:8: {code}\nsrc/f.py:4: {code}", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            8,
+            8,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 8)
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            # Spelled as the finding's own path, and resolving to it.
+            "./src/f.py:5 -- return bill(account, total)",
+            # Its basename, which resolves to nothing at the root.
+            "f.py:5 -- return bill(account, total)",
+            # Spelled so that no literal of its path matches, and naming it only once resolved.
+            "src//f.py:5 -- return bill(account, total)",
+            "src/../src/f.py:5 -- return bill(account, total)",
+            "src/alias.py:5 -- return bill(account, total)",
+        ],
+    )
+    def test_a_citation_of_the_findings_own_file_places_it(self, quote: str):
+        # One occurrence, so a search would find the same line: `via` says the citation did.
+        entry = self._locate(quote, line=40)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
+    def test_a_quote_occurring_once_moves_to_that_line(self):
+        entry = self._locate("return credit(account, total)", line=2)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "search",
+            9,
+            9,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (1, [])
+        assert entry["evidence_key"] == self._evidence("src/f.py", 9)
+
+    def test_a_quote_occurring_twice_off_its_line_is_ambiguous(self):
+        entry = self._locate("total = compute_total(account)", line=1)
+        assert entry["state"] == "ambiguous"
+        assert (entry["via"], entry["start"], entry["end"], entry["evidence_key"]) == (
+            None,
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [[4, 4], [8, 8]])
+        assert entry["quote_key"] == findings.quote_key_v1("total = compute_total(account)")
+        assert entry["reason"] == "occurs 2 times in the file"
+
+    def test_an_ambiguous_quote_lists_at_most_twenty_places(self):
+        (self.tree / "src" / "many.py").write_text(
+            "    retry_request(session)\n" * 25, encoding="utf-8"
+        )
+        entry = self._locate("retry_request(session)", line=100, file="src/many.py")
+        assert (entry["state"], entry["occurrences"]) == ("ambiguous", 25)
+        assert entry["candidates"] == [[n, n] for n in range(1, 21)]
+
+    def test_a_quote_the_file_does_not_carry_is_not_found(self):
+        entry = self._locate("src/f.py:5 -- return charge(account)", line=5)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "not_found",
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"], entry["evidence_key"]) == (0, [], None)
+        assert entry["quote_key"] == findings.quote_key_v1("return charge(account)")
+        assert entry["path"] == "src/f.py"
+
+    def test_the_span_is_the_lines_the_match_covers(self):
+        # One line of quote, two lines of file: a window sized by the quote would stop at 13.
+        entry = self._locate("src/f.py:13 -- result = summarize( account, verbose=True)", line=13)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 13, 14)
+        assert entry["evidence_key"] == self._evidence("src/f.py", 13, 14)
+
+    def test_a_blank_line_inside_the_match_is_inside_the_span(self):
+        entry = self._locate("first_value = compute(a)\n\n    second_value = compute(b)", line=15)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 15, 17)
+        assert entry["evidence_key"] == self._evidence("src/f.py", 15, 16, 17)
+
+    def test_a_locator_on_every_line_matches_the_lines_it_quotes(self):
+        quote = (
+            "src/f.py:4: total = compute_total(account)\nsrc/f.py:5: return bill(account, total)"
+        )
+        entry = self._locate(quote, line=4)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 4, 5)
+        assert entry["quote_key"] == findings.quote_key_v1(
+            "total = compute_total(account) return bill(account, total)"
+        )
+
+    def test_a_snippet_is_checked_at_the_line_its_citation_names(self):
+        # Two citations, each owning a snippet. Neither the whole remainder nor the primary
+        # claim is on any line; the second snippet is on the line it cites and the finding's.
+        quote = (
+            "src/f.py:4 -- total = compute_total(account); "
+            'src/f.py:12 -- log_event("audit", account)'
+        )
+        entry = self._locate(quote, line=12)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            12,
+            12,
+        )
+        assert entry["occurrences"] == 0
+        assert entry["evidence_key"] == self._evidence("src/f.py", 12)
+
+    def test_a_snippet_is_never_searched_for_off_its_cited_line(self):
+        # The second snippet is on lines 4 and 8, and the finding says 8, but it cites 9. Found
+        # wherever it occurs, a fragment would verify, or be ambiguous, on text it never cited.
+        quote = (
+            'src/f.py:12 -- log_event("nothing", account); '
+            "src/f.py:9 -- total = compute_total(account)"
+        )
+        entry = self._locate(quote, line=8)
+        assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
+
+    @pytest.mark.parametrize(
+        ("second", "occurrences"),
+        [
+            # On no line of the file.
+            ("src/f.py:5: return charge(account, fee)", 0),
+            # In the file, but not on the line it cites. The whole claim is on 4-5, so a search
+            # finds it once.
+            ("src/f.py:12: return bill(account, total)", 1),
+            # Past the end of the file.
+            ("src/f.py:40: return bill(account, total)", 1),
+            ("src/f.py:" + "9" * 5000 + ": return bill(account, total)", 1),
+            # Joined by `; ` rather than a newline.
+            ("; src/f.py:5 -- return charge(account, fee)", 0),
+        ],
+        ids=["absent", "elsewhere", "past-the-end", "unparsable-line", "semicolon-joined"],
+    )
+    def test_a_true_snippet_does_not_place_a_false_one_beside_it(
+        self, second: str, occurrences: int
+    ):
+        # The first snippet is on line 4, the finding's line. Placed, the comment would publish
+        # the second as code the file holds.
+        joiner = "" if second.startswith(";") else "\n"
+        quote = f"src/f.py:4: total = compute_total(account){joiner}{second}"
+        entry = self._locate(quote, line=4)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "not_found",
+            None,
+            None,
+            None,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (occurrences, [])
+        assert entry["reason"] == "a snippet is not on the lines its citation names"
+        assert entry["evidence_key"] is None
+        assert entry["quote_key"] == findings.quote_key_v1(findings.claim_v1(quote, "src/f.py"))
+
+    def _other(self) -> None:
+        (self.tree / "src" / "g.py").write_text(
+            "import credit\n    return credit(account, total)\n", encoding="utf-8"
+        )
+
+    @pytest.mark.parametrize(
+        "second",
+        [
+            # On no line of that file.
+            "src/g.py:2: this is not in g.py at all",
+            # In that file, but not on the line it cites.
+            "src/g.py:1: return credit(account, total)",
+            # In a file the tree does not have.
+            "src/h.py:2: return credit(account, total)",
+            # Through a link to a file outside the tree that holds it on line 9: never read.
+            "src/out.py:9: return credit(account, total)",
+        ],
+        ids=["absent", "elsewhere", "no-such-file", "outside-the-tree"],
+    )
+    def test_a_snippet_of_another_file_is_checked_in_that_file(self, second: str):
+        self._other()
+        entry = self._locate(f"src/f.py:5: return bill(account, total)\n{second}", line=5)
+        assert (entry["state"], entry["start"], entry["evidence_key"]) == ("not_found", None, None)
+        assert entry["reason"] == "a snippet is not on the lines its citation names"
+
+    def test_a_true_snippet_of_another_file_leaves_the_quote_placed(self):
+        # The second snippet is also on line 9 of this file, but it cites line 2 of g.py.
+        self._other()
+        quote = "src/f.py:5: return bill(account, total)\nsrc/g.py:2: return credit(account, total)"
+        entry = self._locate(quote, line=5)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "verified",
+            "line",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
+    def _ranged(self) -> None:
+        body = [f"# line {n}" for n in range(1, 41)]
+        body[9] = body[20] = "    total = compute_total(items)"
+        (self.tree / "src" / "range.py").write_text("\n".join(body) + "\n", encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            "src/range.py:20-22 -- total = compute_total(items)",
+            "src/range.py:20–22: total = compute_total(items)",
+            "**src/range.py:20:5—22** total = compute_total(items)",
+            "`total = compute_total(items)` -- src/range.py:20-22",
+        ],
+    )
+    def test_a_quote_inside_the_range_it_cites_moves_there(self, quote: str):
+        # On lines 10 and 21, so searching alone is ambiguous: the range covers 21 without
+        # starting on it.
+        self._ranged()
+        entry = self._locate(quote, line=5, file="src/range.py")
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            21,
+            21,
+        )
+        assert (entry["occurrences"], entry["candidates"]) == (2, [])
+
+    def test_a_range_written_backwards_cites_its_first_line(self):
+        self._ranged()
+        quote = "src/range.py:21-20 -- total = compute_total(items)"
+        entry = self._locate(quote, line=5, file="src/range.py")
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            21,
+            21,
+        )
+
+    def test_a_range_end_too_long_to_parse_cites_its_first_line(self):
+        entry = self._locate("src/f.py:5-" + "9" * 5000 + " -- return bill(account, total)", 30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+
+    def test_a_snippet_is_checked_across_the_range_its_citation_names(self):
+        # The first snippet is on line 5, inside the 3-5 it cites, and the second on the 9 it
+        # cites. Neither the whole remainder nor the primary claim is on any line.
+        first, second = "return bill(account, total)", "return credit(account, total)"
+        entry = self._locate(f"src/f.py:3-5 -- {first}\nsrc/f.py:9 -- {second}", line=30)
+        assert (entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "relocated",
+            "citation",
+            5,
+            5,
+        )
+        assert entry["evidence_key"] == self._evidence("src/f.py", 5)
+
+    @pytest.mark.parametrize("end", ["", "\n"])
+    def test_a_doubly_escaped_quote_matches_as_the_lines_it_escaped(self, end: str):
+        # A newline ending the quote is not one inside it.
+        quote = "src/f.py:3 -- def charge(account):\\n\\ttotal = compute_total(account)" + end
+        entry = self._locate(quote, line=3)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 3, 4)
+        # Matching only: the key is the claim as written.
+        assert entry["quote_key"] == findings.quote_key_v1(
+            "def charge(account):\\n\\ttotal = compute_total(account)"
+        )
+
+    def test_an_escape_beside_a_real_newline_is_the_codes_own(self):
+        quote = (
+            "def charge(account):\\n    total = compute_total(account)\nreturn bill(account, total)"
+        )
+        entry = self._locate(quote, line=3)
+        assert (entry["state"], entry["occurrences"]) == ("not_found", 0)
+
+    def test_an_escaped_quote_is_held_to_the_floor_once_unescaped(self):
+        # Unescaped, it is empty, and an empty string occurs everywhere.
+        entry = self._locate("src/f.py:2 -- \\n\\n\\n\\n\\n\\n", line=2)
+        assert (entry["state"], entry["occurrences"], entry["candidates"]) == ("not_found", 0, [])
+
+    def test_a_citation_line_too_long_to_parse_is_a_state_not_a_crash(self):
+        entry = self._locate("src/f.py:" + "9" * 5000 + " -- return bill(account, total)", line=5)
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 5, 5)
+
+    def test_a_line_that_is_a_boolean_is_no_line(self):
+        entry = self._locate("import billing", line=True)
+        assert entry["line"] is None
+        assert (entry["state"], entry["via"], entry["start"]) == ("relocated", "search", 1)
+
+    def test_lines_are_numbered_as_a_diff_numbers_them(self):
+        # A form feed is a line break to `splitlines` and not to a diff, which would put the
+        # code on line 5.
+        (self.tree / "src" / "ff.py").write_text(
+            "import billing\n\x0c\ndef g(account):\n    return bill(account, total)\n",
+            encoding="utf-8",
+        )
+        entry = self._locate("return bill(account, total)", line=4, file="src/ff.py")
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 4, 4)
+
+    def test_a_crlf_file_anchors_like_its_lf_twin(self):
+        (self.tree / "src" / "crlf.py").write_bytes(
+            "\r\n".join(_ANCHORED).encode("utf-8") + b"\r\n"
+        )
+        entry = self._locate("src/crlf.py:5 -- return bill(account, total)", file="src/crlf.py")
+        assert (entry["state"], entry["start"], entry["end"]) == ("verified", 5, 5)
+        assert entry["evidence_key"] == self._evidence("src/crlf.py", 5)
+
+    @pytest.mark.parametrize("file", ["./src/f.py", "src//f.py", "src/./f.py"])
+    def test_a_path_spelled_another_way_still_names_its_file(self, file: str):
+        entry = self._locate("return bill(account, total)", file=file)
+        assert (entry["path"], entry["state"]) == ("src/f.py", "verified")
+
+    @pytest.mark.parametrize(
+        ("file", "quote"),
+        [
+            ("./app/[id]/page.tsx", "app/[id]/page.tsx:2 -- return renderPage(props);"),
+            ("app/[id]/page.tsx", "./app/[id]/page.tsx:2 -- return renderPage(props);"),
+        ],
+    )
+    def test_a_bracketed_path_spelled_another_way_still_cites_its_file(self, file: str, quote: str):
+        # `_REFERENCE` reads either citation as one of `id]/page.tsx`, another file, so only
+        # the finding's own path can say which file the quote cites.
+        page = self.tree / "app" / "[id]"
+        page.mkdir(parents=True)
+        (page / "page.tsx").write_text(
+            "export default function Page() {\n  return renderPage(props);\n}\n",
+            encoding="utf-8",
+        )
+        entry = self._locate(quote, line=7, file=file)
+        assert (entry["path"], entry["state"], entry["via"], entry["start"], entry["end"]) == (
+            "app/[id]/page.tsx",
+            "relocated",
+            "citation",
+            2,
+            2,
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("return renderPage(props);")
+
+    def test_a_file_whose_name_is_padded_is_another_path(self):
+        # The poster strips each segment, so it would look up `src/f.py`, not this file.
+        (self.tree / " src ").mkdir()
+        (self.tree / " src " / " f.py").write_text("\n".join(_ANCHORED), encoding="utf-8")
+        entry = self._locate("return bill(account, total)", file=" src / f.py")
+        assert (entry["state"], entry["reason"]) == ("unverifiable", "resolves to another path")
+
+    @pytest.mark.parametrize(
+        ("file", "reason"),
+        [
+            ("src/missing.py", "no such file"),
+            ("src/f\x00.py", "no such file"),
+            ("src", "not a file"),
+            ("src/out.py", "outside the tree"),
+            ("../outside.py", "outside the tree"),
+            # Through a link or a `..` the file read is another path than the one a poster
+            # would place the finding on.
+            ("src/alias.py", "resolves to another path"),
+            ("src/../src/f.py", "resolves to another path"),
+        ],
+    )
+    def test_a_file_that_cannot_be_read_as_named_is_unverifiable(self, file: str, reason: str):
+        entry = self._locate("src/f.py:5 -- return bill(account, total)", file=file)
+        assert (entry["state"], entry["reason"], entry["path"]) == ("unverifiable", reason, None)
+        assert (entry["start"], entry["end"], entry["evidence_key"]) == (None, None, None)
+        assert entry["quote_key"] == findings.quote_key_v1("return bill(account, total)")
+
+    def test_an_absolute_path_outside_the_tree_is_unverifiable(self):
+        entry = self._locate("return bill(account, total)", file=str(self.dir / "outside.py"))
+        assert (entry["state"], entry["reason"]) == ("unverifiable", "outside the tree")
+
+    def test_an_unreadable_file_is_unverifiable(self):
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file, so the case cannot be produced")
+        secret = self.tree / "src" / "secret.py"
+        secret.write_text("return bill(account, total)\n", encoding="utf-8")
+        secret.chmod(0o000)
+        try:
+            entry = self._locate("return bill(account, total)", file="src/secret.py")
+        finally:
+            secret.chmod(0o600)
+        assert (entry["state"], entry["reason"], entry["path"]) == (
+            "unverifiable",
+            "unreadable",
+            None,
+        )
+
+    def test_a_finding_with_no_file_is_unverifiable(self):
+        entry = self._locate("return bill(account, total)", file=None)
+        assert (entry["file"], entry["state"], entry["reason"]) == (None, "unverifiable", "no file")
+
+    def test_a_quote_citing_only_another_file_is_unverifiable(self):
+        # The code IS in src/f.py, and a search would find it: the quote says it is elsewhere.
+        entry = self._locate("src/g.py:5 -- return bill(account, total)", line=5)
+        assert (entry["state"], entry["reason"], entry["path"]) == (
+            "unverifiable",
+            "cites only other files",
+            "src/f.py",
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("return bill(account, total)")
+
+    def test_a_quote_under_the_floor_is_unverifiable(self):
+        # It is on line 5, and short enough to be on many lines of any tree.
+        entry = self._locate("src/f.py:5 -- return bill", line=5)
+        assert (entry["state"], entry["reason"]) == (
+            "unverifiable",
+            "too short (11 chars, floor 12)",
+        )
+        assert entry["quote_key"] == findings.quote_key_v1("return bill")
+
+    @pytest.mark.parametrize(
+        ("quote", "reason"),
+        [
+            (None, "no quote"),
+            ("   ", "no quote"),
+            ("src/f.py:5", "the quote is only a citation"),
+            # Before the file it cites is looked at: an empty claim has no key, and a poster
+            # refuses any other state without one.
+            ("src/g.py:5", "the quote is only a citation"),
+        ],
+    )
+    def test_a_finding_with_no_code_to_look_for_has_no_evidence(
+        self, quote: str | None, reason: str
+    ):
+        entry = self._locate(quote, line=5)
+        assert (entry["state"], entry["reason"]) == ("no_evidence", reason)
+        assert (entry["path"], entry["quote_key"], entry["evidence_key"]) == (None, None, None)
+
+    @pytest.mark.parametrize(("path", "expected"), NORMALIZED_PATHS)
+    def test_paths_normalize_as_the_poster_normalizes_them(self, path: str, expected: str):
+        assert findings.norm_path(path) == expected
+
+    # ---- the document ----
+
+    def _artifact(self, raw: bytes, head: str | None) -> Path:
+        art = self.dir / "correctness-grok.json"
+        art.write_bytes(raw)
+        if head is not None:
+            (self.dir / "correctness-grok-provenance.json").write_text(
+                json.dumps({"head_sha": head, "run_stats": {"tool_calls": 3}}), encoding="utf-8"
+            )
+        return art
+
+    def test_the_document(self):
+        items: list[Any] = [
+            finding(file="src/f.py", line=5, first_evidence="return bill(account, total)"),
+            "not a finding",
+            finding(file="src/f.py", line=1, first_evidence="src/f.py:9"),
+        ]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        doc = findings.anchors(str(art), raw, self.tree)
+        assert list(doc) == [
+            "anchors_version",
+            "artifact",
+            "artifact_sha256",
+            "tree",
+            "head",
+            "findings",
+        ]
+        assert doc["anchors_version"] == 1
+        assert doc["artifact"] == str(art)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert doc["tree"] == str(self.tree.resolve())
+        assert doc["head"] == "a" * 40
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        # Keyed by raw position, the entry that is not a finding skipped rather than renumbered.
+        assert [(row["#"], row["state"]) for row in rows] == [(1, "verified"), (3, "no_evidence")]
+        assert list(rows[0]) == [
+            "#",
+            "file",
+            "path",
+            "line",
+            "state",
+            "via",
+            "start",
+            "end",
+            "occurrences",
+            "candidates",
+            "reason",
+            "quote_key",
+            "evidence_key",
+        ]
+        json.dumps(doc, allow_nan=False)
+
+    def test_the_bytes_given_are_the_bytes_located(self):
+        # Hashed and located from one read: a file rewritten in between changes neither.
+        raw = json.dumps({"findings": [finding(file="src/f.py", line=5)]}).encode("utf-8")
+        art = self._artifact(b'{"findings": []}', "a" * 40)
+        doc = findings.anchors(str(art), raw, self.tree)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert len(cast(list[Any], doc["findings"])) == 1
+
+    def test_a_tree_reached_through_a_link_still_holds_its_files(self):
+        # Containment compares resolved paths, so the root has to be resolved too.
+        link = self.dir / "link"
+        link.symlink_to(self.tree)
+        items = [finding(file="src/f.py", line=5, first_evidence="return bill(account, total)")]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        doc = findings.anchors(str(self._artifact(raw, None)), raw, link)
+        assert doc["tree"] == str(self.tree.resolve())
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        assert (rows[0]["state"], rows[0]["path"]) == ("verified", "src/f.py")
+        entry = findings.locate(items[0], link)
+        assert (entry["state"], entry["path"]) == ("verified", "src/f.py")
+
+    @pytest.mark.parametrize(
+        ("head", "expected"),
+        [
+            ("0123456789abcdef" * 2 + "01234567", "0123456789abcdef" * 2 + "01234567"),
+            ("0123456789abcdef" * 4, "0123456789abcdef" * 4),
+            (None, "unresolved: no provenance"),
+            ("unresolved: HEAD", "unresolved: the provenance records no head commit"),
+            (
+                "0123456789ABCDEF" * 2 + "01234567",
+                "unresolved: the provenance records no head commit",
+            ),
+            ("a" * 41, "unresolved: the provenance records no head commit"),
+            ("", "unresolved: the provenance records no head commit"),
+        ],
+    )
+    def test_the_head_is_the_reviewed_commit_or_unresolved(self, head: str | None, expected: str):
+        raw = json.dumps({"findings": []}).encode("utf-8")
+        art = self._artifact(raw, head)
+        assert findings.anchors(str(art), raw, self.tree)["head"] == expected
+
+    def test_a_head_recorded_as_no_string_is_unresolved(self):
+        raw = json.dumps({"findings": []}).encode("utf-8")
+        art = self._artifact(raw, None)
+        (self.dir / "correctness-grok-provenance.json").write_text(
+            json.dumps({"head_sha": 7}), encoding="utf-8"
+        )
+        assert findings.anchors(str(art), raw, self.tree)["head"] == (
+            "unresolved: the provenance records no head commit"
+        )
+
+    def test_a_verdicts_artifact_is_refused(self):
+        raw = json.dumps({"verdicts": [{"#": 1, "validated": True}]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        with pytest.raises(findings.FindingsError, match="not a findings artifact"):
+            findings.anchors(str(art), raw, self.tree)
+
+    def test_bytes_that_are_not_an_artifact_are_refused(self):
+        for raw in (b"\xff\xfe", b"[]", b"{}"):
+            with pytest.raises(findings.FindingsError):
+                findings.anchors(str(self.dir / "x.json"), raw, self.tree)
+
+    # ---- the command ----
+
+    def _main(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = findings.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_command_prints_the_document_and_counts_every_state(self):
+        bill = "return bill(account, total)"
+        items: list[Any] = [
+            finding(file="src/f.py", line=5, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence="total = compute_total(account)"),
+            finding(file="src/f.py", line=1, first_evidence="this text is in no file at all"),
+            finding(file="src/missing.py", line=1, first_evidence=bill),
+            finding(file="src/f.py", line=1, first_evidence="src/f.py:9"),
+            finding(file="src/f.py", line=5, first_evidence=f"src/f.py:5 -- {bill}"),
+        ]
+        raw = json.dumps({"findings": items}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 0, err
+        doc = json.loads(out)
+        assert doc == findings.anchors(str(art), raw, self.tree)
+        assert doc["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert [row["state"] for row in doc["findings"]] == [
+            "verified",
+            "relocated",
+            "ambiguous",
+            "not_found",
+            "unverifiable",
+            "no_evidence",
+            "verified",
+        ]
+        assert err == (
+            "ce-persona-findings: anchors: 7 findings (2 verified, 1 relocated, 1 ambiguous,"
+            " 1 not found, 1 unverifiable, 1 no evidence)\n"
+        )
+
+    def test_the_summary_of_an_artifact_with_no_findings_counts_zero_in_every_state(self):
+        raw = json.dumps({"findings": ["not a finding"]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 0, err
+        assert json.loads(out)["findings"] == []
+        assert err == (
+            "ce-persona-findings: anchors: 0 findings (0 verified, 0 relocated, 0 ambiguous,"
+            " 0 not found, 0 unverifiable, 0 no evidence)\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (("--anchors",), "--anchors wants -C <dir>"),
+            (("--anchors", "-C"), "-C wants a directory"),
+            (("--anchors", "-C", "ARTIFACT"), "is not a directory"),
+            (("--anchors", "--json", "-C", "TREE"), "--anchors cannot be combined with --json"),
+            (("--json", "--anchors", "-C", "TREE"), "--anchors cannot be combined with --json"),
+            (("--anchors", "--show", "1", "-C", "TREE"), "cannot be combined with --show"),
+            (("--anchors", "--show", "all", "-C", "TREE"), "cannot be combined with --show"),
+            (("--anchors", "--return", "-C", "TREE"), "cannot be combined with --return"),
+            (("--anchors", "--verify-quotes", "-C", "TREE"), "only applies to --return"),
+        ],
+    )
+    def test_a_mode_it_cannot_serve_is_a_usage_error(self, args: tuple[str, ...], expected: str):
+        raw = json.dumps({"findings": [finding(file="src/f.py", line=5)]}).encode("utf-8")
+        art = self._artifact(raw, "a" * 40)
+        given = {"ARTIFACT": str(art), "TREE": str(self.tree)}
+        code, out, err = self._main(str(art), *(given.get(a, a) for a in args))
+        assert code == 2, err
+        assert expected in err, err
+        assert out == ""
+
+    def test_a_verdicts_artifact_is_a_usage_error_before_anything_is_located(self):
+        raw = json.dumps({"verdicts": [{"#": 1, "validated": True, "reason": "r"}]}).encode()
+        art = self._artifact(raw, "a" * 40)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 2, err
+        assert "a verdict has no quote to locate" in err
+        assert out == ""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(None, "cannot read findings artifact"), (b"[]", "is not a findings or verdicts")],
+    )
+    def test_an_artifact_it_cannot_use_is_a_data_error(self, raw: bytes | None, expected: str):
+        art = self.dir / "correctness-grok.json" if raw is None else self._artifact(raw, None)
+        code, out, err = self._main(str(art), "--anchors", "-C", str(self.tree))
+        assert code == 1, err
+        assert expected in err, err
+        assert out == ""
+
+    # ---- properties, over findings drawn from the shapes that reach every state ----
+
+    @PROPERTY
+    @given(
+        entries=st.lists(
+            st.one_of(
+                st.builds(
+                    _as_finding,
+                    st.sampled_from(
+                        ["src/f.py", "./src/f.py", "src/alias.py", "src/missing.py", "src", None]
+                    ),
+                    st.one_of(st.none(), st.booleans(), st.integers(min_value=-1, max_value=20)),
+                    st.one_of(st.none(), _anchored_quotes),
+                ),
+                st.sampled_from(["text", 3, None, ["list"]]),
+            ),
+            max_size=6,
+        )
+    )
+    def test_every_entry_keeps_the_contract_a_poster_enforces(self, entries: list[Any]):
+        raw = json.dumps({"findings": entries}).encode("utf-8")
+        doc = findings.anchors(str(self.dir / "a.json"), raw, self.tree)
+        rows = cast(list[dict[str, Any]], doc["findings"])
+        # One entry per finding that is an object, at its raw position.
+        assert [row["#"] for row in rows] == [
+            n for n, item in enumerate(entries, 1) if isinstance(item, dict)
+        ]
+        for row in rows:
+            state = row["state"]
+            placed = state in ("verified", "relocated")
+            assert state in _STATES
+            assert (row["evidence_key"] is not None) == placed, row
+            assert (row["start"] is not None) == placed == (row["end"] is not None), row
+            assert (row["quote_key"] is None) == (state == "no_evidence"), row
+            assert (row["candidates"] != []) == (state == "ambiguous"), row
+            if placed:
+                assert 1 <= row["start"] <= row["end"], row
+            if state == "verified":
+                assert row["start"] <= row["line"] <= row["end"], row
+            if row["path"] is not None:
+                assert row["path"] == findings.norm_path(row["file"]), row
 
 
 # ---------------------------------------------------------------------------------------

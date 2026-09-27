@@ -118,7 +118,7 @@ def _git_env() -> dict[str, str]:
     sandbox the review itself gets, so those would execute as the user with full privileges.
     System and global configuration are dropped and the drivers are disabled below.
 
-    Residual, and worth knowing: a repository's own `.git/config` is still honoured, because
+    Residual, and worth knowing: a repository's own `.git/config` is still honored, because
     git offers no way to ignore it. Cloning never transfers `.git/config`, so this bites only
     for a working directory handed over wholesale rather than cloned.
     """

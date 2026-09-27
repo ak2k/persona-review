@@ -341,7 +341,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         # The control side of the same guard: if the kinds we skip on purpose counted as
-        # unrecognised, every genuine dud would report drift and exit 6 would be dead code.
+        # unrecognized, every genuine dud would report drift and exit 6 would be dead code.
         "kinds this wrapper skips on purpose are reported as drift",
         "persona_review/validate.py",
         r"                if item_kind not in CODEX_QUIET_ITEMS:",
@@ -416,6 +416,14 @@ MUTATIONS: list[Mutation] = [
         "persona_review/validate.py",
         r"    if calls is None or calls < 0:\n        return None\n    local =",
         "    if calls is None:\n        return None\n    local =",
+    ),
+    Mutation(
+        # `[]` is valid JSON with no fields: every reader of the sidecar raises on it, and
+        # both run before any output mode, `--anchors` included.
+        "a sidecar that is not an object is returned as the record",
+        "persona_review/validate.py",
+        r"    return record if isinstance\(record, dict\) else None",
+        "    return record",
     ),
     Mutation(
         "persona name may be a path again",
@@ -724,6 +732,586 @@ MUTATIONS: list[Mutation] = [
         r'''(\\d+)(?::\\d+)?\\b[*)\\]>`]*""")''',
     ),
     Mutation(
+        # Half the citations lenses write are ranges. Read as `path:first`, the rest of the
+        # range stays in the compared text and every range-cited true quote is dropped.
+        "a line range ends the citation at its first number again",
+        "persona_review/findings.py",
+        r"^(_REFERENCE = re\.compile\(.*)\(\?:\[-–—\]\\d\+\)\?",
+        r"\1",
+    ),
+    # The citation scanner and the frozen claim and keys. A moved claim or key orphans every
+    # comment a poster already wrote, so each rule of the grammar is reverted here and a
+    # golden vector must die.
+    Mutation(
+        # `_REFERENCE` first reads `app/[id]/page.tsx:12` from offset 4 as `id]/page.tsx`,
+        # and the claim keeps the line number the key exists to leave out.
+        "the generic citation pattern is read before the finding's own path",
+        "persona_review/findings.py",
+        r"    patterns\.append\(\(_REFERENCE, False\)\)",
+        "    patterns.insert(0, (_REFERENCE, False))",
+    ),
+    Mutation(
+        # Two readings of one citation cut the quote in two different places.
+        "a citation overlapping the finding's own path is kept beside it",
+        "persona_review/findings.py",
+        r"            if any\(start < c\.end and c\.start < end for c in found\):",
+        "            if False:",
+    ),
+    Mutation(
+        # In pattern order the finding's own path comes first wherever it stands, and a line
+        # opening with another file's citation keeps it.
+        "citations come back in pattern order, not text order",
+        "persona_review/findings.py",
+        r"    return sorted\(found, key=lambda c: c\.start\)",
+        "    return found",
+    ),
+    Mutation(
+        # `lib/a.py:5` would read as a citation of `a.py`, the basename a finding at
+        # `src/a.py` tries, and a quote of another file would be claimed as this one's.
+        "the finding's own path is read inside a longer path",
+        "persona_review/findings.py",
+        r"\(\?<!\[\^\\s\(\\\[\*<`\]\)",
+        "",
+    ),
+    Mutation(
+        # An empty name compiles to a pattern matching every `:N` after whitespace.
+        "an empty own path is read as a citation",
+        "persona_review/findings.py",
+        r"    patterns = \[\(_literal\(name\), True\) "
+        r"for name in dict\.fromkeys\(names\) if name\]",
+        "    patterns = [(_literal(name), True) for name in dict.fromkeys(names)]",
+    ),
+    Mutation(
+        "the finding's basename is not read as its own path",
+        "persona_review/findings.py",
+        r'    names = \[\*paths, \*\(path\.rsplit\("/", 1\)\[-1\] for path in paths\)\]',
+        "    names = list(paths)",
+    ),
+    Mutation(
+        # `./app/[id]/page.tsx` as the finding's `file` is the file `app/[id]/page.tsx`
+        # cites, and `_REFERENCE` cannot read that citation for it.
+        "the finding's own path is read only as its file spells it",
+        "persona_review/findings.py",
+        r"    paths = \(own, norm_path\(own\)\) if own is not None else \(\)",
+        "    paths = (own,) if own is not None else ()",
+    ),
+    Mutation(
+        "a `./` before the finding's own path in a quote is not part of its citation",
+        "persona_review/findings.py",
+        r"\(\?:\\\./\)\?",
+        "",
+    ),
+    Mutation(
+        # The own path's literal has to wear what `_REFERENCE` does, or `(a.py:12)` leaves
+        # its `)` and `a.py:12:5` its column in the claim.
+        "the own path's literal loses the column, the range and the closing decoration",
+        "persona_review/findings.py",
+        r'^        r"`\?:\(\\d\+\).*$',
+        r'        r":(\\d+)\\b"',
+    ),
+    Mutation(
+        # `timeout:30 -- seconds` is what the line says, not a citation of a file `timeout`.
+        "a citation-shaped token that is not a path is stripped as one",
+        "persona_review/findings.py",
+        r"    return \[c for c in citations\(text, own\) if c\.own or _path_like\(c\.path\)\]",
+        "    return citations(text, own)",
+    ),
+    Mutation(
+        "a URL's port is read as a line number",
+        "persona_review/findings.py",
+        r'    if "://" in text:\n        return False',
+        "    if False:\n        return False",
+    ),
+    Mutation(
+        "a path is recognized only by a slash or a backslash",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "/" in text or "\\\\" in text',
+    ),
+    Mutation(
+        "a path is recognized only by a backslash or an extension",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "\\\\" in text or bool(_EXTENSION.search(text))',
+    ),
+    Mutation(
+        "a Windows path without an extension is not a path",
+        "persona_review/findings.py",
+        r'    return "/" in text or "\\\\" in text or bool\(_EXTENSION\.search\(text\)\)',
+        r'    return "/" in text or bool(_EXTENSION.search(text))',
+    ),
+    Mutation(
+        # A citation inside a line is what the line says: a log line, a comment, a fixture.
+        # Only one starting the line is a locator, on the first line or any other.
+        "a citation mid-quote is stripped as a leading one",
+        "persona_review/findings.py",
+        r"    if cites and cites\[0\]\.start == 0:",
+        "    if cites:",
+    ),
+    Mutation(
+        # `f.py:81: a = 1` then `f.py:82: b = 2`: the second locator stays in the claim, and
+        # the key moves whenever lines are inserted above the quoted code.
+        "only the quote's first line is read for a leading citation",
+        "persona_review/findings.py",
+        r'    for line in text\.split\("\\n"\):',
+        "    for line in [text]:",
+    ),
+    Mutation(
+        # An indented line's locator starts after its indentation, not at column 0.
+        "a line's locator is read only at column 0",
+        "persona_review/findings.py",
+        r"        body = line\.strip\(\)",
+        "        body = line",
+    ),
+    Mutation(
+        # A backticked line no citation came off is code, and its backticks are part of it.
+        "a backticked line is unwrapped though no citation came off it",
+        "persona_review/findings.py",
+        r"        else:\n            lines\.append\(line\)",
+        "        else:\n"
+        "            _m = _BACKTICKED.fullmatch(line.strip())\n"
+        "            lines.append(_m.group(1) if _m else line)",
+    ),
+    Mutation(
+        # A first line that was only a citation leaves a newline before the backticks.
+        "the uncited lines are not re-stripped before the whole rest is unwrapped",
+        "persona_review/findings.py",
+        r"        rest = uncited\.strip\(\)",
+        "        rest = uncited",
+    ),
+    Mutation(
+        "a citation followed by prose is stripped as a trailing one",
+        "persona_review/findings.py",
+        r"    elif cites and cites\[-1\]\.end == len\(text\):",
+        "    elif cites:",
+    ),
+    Mutation(
+        # `# see docs/setup.md:40` ends in a citation that is part of the line.
+        "a bare trailing citation is stripped with no separator joining it",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        "    return rest",
+    ),
+    Mutation(
+        "a parenthesized trailing citation is kept in the claim",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        "    return text",
+    ),
+    Mutation(
+        # `code (src/f.py:30` is not set apart from the code, so it may be what the line says.
+        "a trailing citation after an unclosed parenthesis is stripped as a parenthesized one",
+        "persona_review/findings.py",
+        r'    return rest if text\[cite\.start\] == "\(" '
+        r'and text\[cite\.end - 1\] == "\)" else text',
+        '    return rest if text[cite.start] == "(" else text',
+    ),
+    Mutation(
+        # Taken off anywhere, `(verbatim)` after the code is dropped from a claim the lens
+        # wrote with it.
+        "(verbatim) is taken off wherever it appears",
+        "persona_review/findings.py",
+        r"    if rest\[: len\(_VERBATIM\)\]\.lower\(\) == _VERBATIM:\n"
+        r"        rest = rest\[len\(_VERBATIM\) :\]\.strip\(\)",
+        '    rest = rest.replace(_VERBATIM, "").strip()',
+    ),
+    Mutation(
+        "a (verbatim) before a trailing citation is kept",
+        "persona_review/findings.py",
+        r"    if rest\[-len\(_VERBATIM\) :\]\.lower\(\) == _VERBATIM:",
+        "    if False:",
+    ),
+    Mutation(
+        "a (verbatim) before a trailing citation is matched only in lower case",
+        "persona_review/findings.py",
+        r"(    if rest\[-len\(_VERBATIM\) :\])\.lower\(\)",
+        r"\1",
+    ),
+    Mutation(
+        "an en dash before a trailing citation is not a separator",
+        "persona_review/findings.py",
+        r'(_TRAIL_SEPARATOR = re\.compile\(r"\(\?:--\|:\|—\|)–\|',
+        r"\1",
+    ),
+    Mutation(
+        # `-- SELECT id FROM users` is a line of SQL, not a separator after a citation.
+        "a separator is taken off a quote no citation was taken off",
+        "persona_review/findings.py",
+        r"^    rest = text$",
+        '    rest = _LEAD_SEPARATOR.sub("", text).strip()',
+    ),
+    Mutation(
+        "a backtick span anywhere in the claim replaces the claim",
+        "persona_review/findings.py",
+        r"    wrapped = _BACKTICKED\.fullmatch\(rest\)",
+        "    wrapped = _BACKTICKED.search(rest)",
+    ),
+    Mutation(
+        "the text after a leading citation is not stripped before its separator is read",
+        "persona_review/findings.py",
+        r"^    rest = rest\.strip\(\)$",
+        "    pass",
+    ),
+    Mutation(
+        # `f.py:12 -- `code`` leaves a space before the backticks, and the unwrap misses.
+        "the claim is not re-stripped before it is unwrapped",
+        "persona_review/findings.py",
+        r'    return _LEAD_SEPARATOR\.sub\("", rest, count=1\)\.strip\(\)',
+        '    return _LEAD_SEPARATOR.sub("", rest, count=1)',
+    ),
+    Mutation(
+        "the text before a trailing citation is not re-stripped before it is unwrapped",
+        "persona_review/findings.py",
+        r"        return rest\[: joined\.start\(\)\]\.strip\(\)",
+        "        return rest[: joined.start()]",
+    ),
+    Mutation(
+        # Every citation-only quote would share one key, and a thread withdrawn for one
+        # finding would be adopted by an unrelated one.
+        "a citation-only quote gets a key",
+        "persona_review/findings.py",
+        r"    if not claim:\n        return None",
+        "    if False:\n        return None",
+    ),
+    Mutation(
+        "a blank line inside the span moves the evidence key",
+        "persona_review/findings.py",
+        r'    text = "\\n"\.join\(line for line in map\(_normalized, lines\) if line\)',
+        r'    text = "\\n".join(map(_normalized, lines))',
+    ),
+    Mutation(
+        "a hyphen fused to the code is taken off as a separator",
+        "persona_review/findings.py",
+        r"-\(\?=\\s\)",
+        "-",
+    ),
+    Mutation(
+        "a hyphen fused to the code before a trailing citation is taken off as a separator",
+        "persona_review/findings.py",
+        r"\(\?<=\\s\)-",
+        "-",
+    ),
+    Mutation(
+        # JSON decodes `"\ud800"` to a lone surrogate, which strict UTF-8 refuses to encode.
+        "a claim holding a lone surrogate raises instead of getting a key",
+        "persona_review/findings.py",
+        r'\.encode\("utf-8", "surrogatepass"\)',
+        '.encode("utf-8")',
+    ),
+    # Where each quote is. A poster places and deduplicates comments by these states, spans
+    # and keys, so each rule of `locate` is reverted here and a `TestAnchors` case must die.
+    Mutation(
+        "a quote under the floor is searched for",
+        "persona_review/findings.py",
+        r"    return \[\(text, n\) for text, n in dict\.fromkeys\(texts\) "
+        r"if len\(text\) >= _QUOTE_FLOOR\]",
+        "    return [(text, n) for text, n in dict.fromkeys(texts) if text]",
+    ),
+    Mutation(
+        # A one-line quote of code the file wraps over two lines covers both.
+        "a match's span stops at its first line",
+        "persona_review/findings.py",
+        r"        found\[\(stream\.line_at\(at\), "
+        r"stream\.line_at\(at \+ len\(claim\) - 1\)\)\] = None",
+        "        found[(stream.line_at(at), stream.line_at(at))] = None",
+    ),
+    Mutation(
+        "a blank line inside the quoted code breaks the match",
+        "persona_review/findings.py",
+        r"        if part:\n            parts\.append\(part\)",
+        "        if True:\n            parts.append(part)",
+    ),
+    Mutation(
+        # The finding's own line is corroborated when the code is there, whatever line the
+        # lens wrote beside the quote.
+        "the line a quote cites wins over the finding's own line",
+        "persona_review/findings.py",
+        r"(    if on_line:\n        return .*\n)(    if on_cite:\n        return .*\n)",
+        r"\2\1",
+    ),
+    Mutation(
+        "a search wins over the line the quote cites",
+        "persona_review/findings.py",
+        r"(    if on_cite:\n        return .*\n)"
+        r"(    if searched is not None and len\(searched\) == 1:\n        return .*\n)",
+        r"\2\1",
+    ),
+    Mutation(
+        # Placed at its first occurrence, a quote on two lines lands on a guess.
+        "a quote occurring more than once is placed by search",
+        "persona_review/findings.py",
+        r"    if searched is not None and len\(searched\) == 1:",
+        "    if searched:",
+    ),
+    Mutation(
+        # Held in the order the quote cites, so the lens's first citation decides between
+        # two cited places that both hold the code.
+        "a relocation via citation takes the last candidate",
+        "persona_review/findings.py",
+        r"on_cite\[0\]",
+        "on_cite[-1]",
+    ),
+    Mutation(
+        # A snippet is a claim about the line its citation names. Found anywhere, a fragment
+        # verifies on text the lens never cited.
+        "a snippet is looked for off the line its citation names",
+        "persona_review/findings.py",
+        r"        held\.extend\(s for s in spans if lines is None or _overlaps\(s, lines\)\)",
+        "        held.extend(spans)",
+    ),
+    Mutation(
+        "a snippet's occurrences are counted as the quote's",
+        "persona_review/findings.py",
+        r"        if lines is None:\n            searched = spans",
+        "        if True:\n            searched = spans",
+    ),
+    Mutation(
+        # Placed on the one snippet that holds, the comment publishes the other beside it as
+        # code the tree holds.
+        "one true snippet places a quote whose other snippet is not where it cites",
+        "persona_review/findings.py",
+        r'    if refuted:\n        return _Place\(\n            "not_found"',
+        '    if False:\n        return _Place(\n            "not_found"',
+    ),
+    Mutation(
+        "a snippet citing a line too long to parse holds",
+        "persona_review/findings.py",
+        r"        if lines is None or not any\(",
+        "        if lines is not None and not any(",
+    ),
+    Mutation(
+        "a snippet of another file is not checked",
+        "persona_review/findings.py",
+        r"        if not is_own:\n            read = _read\(cite\.path, repo\)",
+        "        if not is_own:\n            continue\n            read = _read(cite.path, repo)",
+    ),
+    Mutation(
+        "a snippet of another file is looked for in the finding's file",
+        "persona_review/findings.py",
+        r"            where = _stream\(read\[1\]\)",
+        "            where = stream",
+    ),
+    Mutation(
+        # Half of all quotes cite a range, and the code is as often on its last line as on
+        # its first.
+        "a cited range counts only its first line",
+        "persona_review/findings.py",
+        r"    return first, first if last is None or last < first else last",
+        "    return first, first",
+    ),
+    Mutation(
+        "a place counts as cited only when it holds the range's first line",
+        "persona_review/findings.py",
+        r"    return span\[0\] <= lines\[1\] and lines\[0\] <= span\[1\]",
+        "    return span[0] <= lines[0] <= span[1]",
+    ),
+    Mutation(
+        # Read as written, `21-20` is a range no single line lies inside, so it cites nothing.
+        "a range written backwards is read as written",
+        "persona_review/findings.py",
+        r"    return first, first if last is None or last < first else last",
+        "    return first, first if last is None else last",
+    ),
+    Mutation(
+        "a cited range's end too long to parse raises",
+        "persona_review/findings.py",
+        r"    last = None if end is None else _line_number\(end\.group\(1\)\)",
+        "    last = None if end is None else int(end.group(1))",
+    ),
+    Mutation(
+        # Only a placed quote names lines of the file, and a key the poster dedupes by.
+        "an ambiguous quote gets a span and an evidence key",
+        "persona_review/findings.py",
+        r'"ambiguous", None, None, many',
+        '"ambiguous", None, searched[0], many',
+    ),
+    Mutation(
+        "an ambiguous quote lists every place it occurs",
+        "persona_review/findings.py",
+        r"        some = tuple\(searched\[:_CANDIDATE_CAP\]\)",
+        "        some = tuple(searched)",
+    ),
+    Mutation(
+        # A form feed or U+2028 is a line break to `splitlines` and not to a diff.
+        "a file's lines are numbered as splitlines numbers them",
+        "persona_review/findings.py",
+        r'    return text\.split\("\\n"\)',
+        "    return text.splitlines()",
+    ),
+    Mutation(
+        # Through a link or a `..` the file read is not the one a poster places the finding on.
+        "a file reached by another path is read as the finding's",
+        "persona_review/findings.py",
+        r"    if path != norm_path\(own\):",
+        "    if False:",
+    ),
+    Mutation(
+        "a padded path segment keeps its padding",
+        "persona_review/findings.py",
+        r"    segments = \(segment\.strip\(\) for segment in ",
+        "    segments = (segment for segment in ",
+    ),
+    Mutation(
+        "a backslash is not read as a path separator",
+        "persona_review/findings.py",
+        r'path\.replace\("\\\\", "/"\)\.split\("/"\)',
+        'path.split("/")',
+    ),
+    Mutation(
+        # An empty claim has no key, and a poster refuses any state but no_evidence without
+        # one: checked after the cited file, `src/g.py:5` became unverifiable.
+        "a citation-only quote is located as though it claimed code",
+        "persona_review/findings.py",
+        r'    if not claim:\n        return entry \| \{"reason": "the quote is only a citation"\}',
+        '    if False:\n        return entry | {"reason": "the quote is only a citation"}',
+    ),
+    Mutation(
+        "a finding with no file is looked for at the tree's root",
+        "persona_review/findings.py",
+        r'    if own is None:\n        return entry \| \{"reason": "no file"\}',
+        '    if False:\n        return entry | {"reason": "no file"}',
+    ),
+    Mutation(
+        # Every tree holds some twelve-character line that matches a quote of another file.
+        "a quote citing only another file is searched for in this one",
+        "persona_review/findings.py",
+        r"    if cites and not any\(mine\):",
+        "    if False:",
+    ),
+    Mutation(
+        "a citation of the finding's own path spelled another way names another file",
+        "persona_review/findings.py",
+        r"    return cite\.own or _founds\(_Reference\(cite\.path, \(\), 0, cite\.start, "
+        r"cite\.end\), own, repo\)",
+        "    return cite.own",
+    ),
+    Mutation(
+        "a basename citation names another file",
+        "persona_review/findings.py",
+        r"    return cite\.own or _founds\(_Reference\(cite\.path, \(\), 0, cite\.start, "
+        r"cite\.end\), own, repo\)",
+        "    return _founds(_Reference(cite.path, (), 0, cite.start, cite.end), own, repo)",
+    ),
+    Mutation(
+        "a citation line too long to parse raises",
+        "persona_review/findings.py",
+        r"    try:\n        return int\(digits\)\n    except ValueError:\n        return None",
+        "    return int(digits)",
+    ),
+    Mutation(
+        "a doubly escaped quote is never read as the lines it escaped",
+        "persona_review/findings.py",
+        r"    if spans or not escaped:\n        return spans",
+        "    if True:\n        return spans",
+    ),
+    Mutation(
+        # Beside a real newline, a literal `\n` is the code's own: a string, a format.
+        "an escape beside a real newline is unescaped too",
+        "persona_review/findings.py",
+        r"    if spans or not escaped:",
+        "    if spans:",
+    ),
+    Mutation(
+        "a newline ending the quote is read as one inside it",
+        "persona_review/findings.py",
+        r'"\\n" not in quote\.strip\(\)',
+        r'"\\n" not in quote',
+    ),
+    Mutation(
+        "an escaped tab is left as written",
+        "persona_review/findings.py",
+        r'\.replace\("\\\\t", " "\)',
+        "",
+    ),
+    Mutation(
+        # Unescaped, `\n\n\n\n\n\n` is empty, and an empty string occurs everywhere.
+        "an unescaped quote is not held to the floor",
+        "persona_review/findings.py",
+        r"    if len\(plain\) < _QUOTE_FLOOR:\n        return \[\]",
+        "    if False:\n        return []",
+    ),
+    Mutation(
+        "a boolean is read as a line number",
+        "persona_review/findings.py",
+        r"given if isinstance\(given, int\) and not isinstance\(given, bool\) else None",
+        "given if isinstance(given, int) else None",
+    ),
+    Mutation(
+        # `locate` is total: one finding naming a missing file cannot sink the document.
+        "a missing file raises instead of being unverifiable",
+        "persona_review/findings.py",
+        r"        target = \(repo / own\)\.resolve\(strict=True\)\n"
+        r"    except \(OSError, ValueError\):",
+        "        target = (repo / own).resolve(strict=True)\n    except ValueError:",
+    ),
+    Mutation(
+        "a file outside the tree is read",
+        "persona_review/findings.py",
+        r'    if not target\.is_relative_to\(repo\):\n        return "outside the tree"',
+        '    if False:\n        return "outside the tree"',
+    ),
+    Mutation(
+        "a directory is read as a file",
+        "persona_review/findings.py",
+        r'    if not target\.is_file\(\):\n        return "not a file"',
+        '    if False:\n        return "not a file"',
+    ),
+    Mutation(
+        "an unreadable file raises instead of being unverifiable",
+        "persona_review/findings.py",
+        r'        data = target\.read_bytes\(\)\n    except OSError:\n        return "unreadable"',
+        '        data = target.read_bytes()\n    except ValueError:\n        return "unreadable"',
+    ),
+    Mutation(
+        # Containment compares resolved paths, so a root reached through a link holds nothing.
+        "the tree is not resolved before a file is contained in it",
+        "persona_review/findings.py",
+        r"    repo = repo\.resolve\(\)\n    read = _read",
+        "    read = _read",
+    ),
+    Mutation(
+        "the document names the tree as given rather than resolved",
+        "persona_review/findings.py",
+        r"    tree = repo\.resolve\(\)\n    return \{",
+        "    tree = repo\n    return {",
+    ),
+    Mutation(
+        # The hash attests the bytes given; parsed from the path, the entries need not match.
+        "the artifact is parsed from disk rather than from the bytes hashed",
+        "persona_review/findings.py",
+        r'if data is None else data\.decode\("utf-8"\)',
+        'if data is None else Path(path).read_text(encoding="utf-8")',
+    ),
+    Mutation(
+        # An empty list would read as a review that found nothing.
+        "a verdicts artifact is located as an empty review",
+        "persona_review/findings.py",
+        r'    if not isinstance\(parsed\.get\("findings"\), list\):',
+        "    if False:",
+    ),
+    Mutation(
+        # A poster compares the head with the one it posts against, and only an object id
+        # can be equal to it for the right reason.
+        "any string recorded as the head is trusted",
+        "persona_review/validate.py",
+        r"    if not isinstance\(head, str\) or _OBJECT_ID\.fullmatch\(head\) is None:",
+        "    if not isinstance(head, str):",
+    ),
+    Mutation(
+        "a SHA-256 head is unresolved",
+        "persona_review/validate.py",
+        r"\[0-9a-f\]\{40\}\(\?:\[0-9a-f\]\{24\}\)\?",
+        "[0-9a-f]{40}",
+    ),
+    Mutation(
+        "an artifact with no provenance raises instead of being unresolved",
+        "persona_review/validate.py",
+        r'    if record is None:\n        return "unresolved: no provenance"',
+        '    if False:\n        return "unresolved: no provenance"',
+    ),
+    Mutation(
         # A newline inside the backticks decorates the quote rather than belonging to it.
         # Counted as a line, it widens the window past the line the citation names, and the
         # text on the NEXT line then certifies the citation.
@@ -803,6 +1391,50 @@ MUTATIONS: list[Mutation] = [
         "persona_review/findings.py",
         r"^    vacuous = validate\.refused_run\(Path\(path\)\)$",
         "    vacuous = None if as_return else validate.refused_run(Path(path))",
+    ),
+    Mutation(
+        # A poster places and keys comments from --anchors with nobody reading them, so a
+        # refused run reaching it is posted as a review that happened.
+        "the vacuous-run refusal stops preceding --anchors",
+        "persona_review/findings.py",
+        r"^    vacuous = validate\.refused_run\(Path\(path\)\)$",
+        "    vacuous = None if as_anchors else validate.refused_run(Path(path))",
+    ),
+    Mutation(
+        # Each prints a different document on the same stdout, so ranking them hands a
+        # parser a shape it did not ask for.
+        "--anchors together with --json is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--json", as_json\)',
+        '("--json", False)',
+    ),
+    Mutation(
+        "--anchors together with --show is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--show", show is not None\)',
+        '("--show", False)',
+    ),
+    Mutation(
+        "--anchors together with --return is ranked instead of refused",
+        "persona_review/findings.py",
+        r'\("--return", as_return\)',
+        '("--return", False)',
+    ),
+    Mutation(
+        # The quotes would be located in whatever happens to be checked out there, and the
+        # document would not say so.
+        "--anchors falls back to the current directory when -C is missing",
+        "persona_review/findings.py",
+        r'^            return _usage_error\("--anchors wants -C.*$',
+        '            repo_spec = "."',
+    ),
+    Mutation(
+        # A verdict carries no quote, so the listing it falls through to exits 0 as if the
+        # document had been written.
+        "--anchors on a verdicts artifact is not refused",
+        "persona_review/findings.py",
+        r'^    if as_anchors:\n        return _usage_error\(\n            f"--anchors locates',
+        '    if False:\n        return _usage_error(\n            f"--anchors locates',
     ),
     Mutation(
         "usage errors collapse back onto the data exit code",
@@ -955,11 +1587,12 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         # The documented way to consume --return pipes it into `jq -s .`. Without the handler
         # a reader that stops early leaves the interpreter's shutdown flush to raise where
-        # nothing can catch it, reporting failure for a projection that completed.
-        "a broken pipe turns a completed --return into a failure",
+        # nothing can catch it, reporting failure for a document that was completed. One
+        # handler serves --return and --anchors, and a test of each dies.
+        "a broken pipe turns a completed --return or --anchors into a failure",
         "persona_review/findings.py",
-        r"        except BrokenPipeError:",
-        "        except SystemError:",
+        r"^    except BrokenPipeError:$",
+        "    except SystemError:",
         suite="process",
         selector="piped_into_a_reader_that_stops_early",
     ),
@@ -1003,6 +1636,14 @@ MUTATIONS: list[Mutation] = [
         "    for suffix in ():",
         suite="process",
         selector="refusal_before_dispatch and grok",
+    ),
+    Mutation(
+        "a stale anchors file survives the run directory's clear",
+        "persona_review/cli.py",
+        r'^    "-anchors\.json",$',
+        "",
+        suite="process",
+        selector="stale_anchors_file and grok",
     ),
     Mutation(
         # The idle watchdog. Its `if secs > 0` guard is gone because config makes the value
@@ -1221,7 +1862,7 @@ class TestGuardsCanFail:
             #
             # That is not hypothetical. The `start_new_session=True` probe matched the
             # DOCSTRING three dozen lines above the code, mutated a sentence, changed no
-            # behaviour, and was duly reported as a surviving guard. The finding was a
+            # behavior, and was duly reported as a surviving guard. The finding was a
             # harness defect wearing the costume of a code defect.
             matches = len(re.findall(mutation.pattern, text, flags=re.M))
             if matches != 1:

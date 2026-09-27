@@ -32,6 +32,7 @@ provider), and **streaming on the grok route** (it constrains decoding in a way 
 | 2 | every finding | `ce-persona-findings <artifact> --show all` — the same render for every finding, every severity, in `#` order, inside one fence, each separated from the next by a line reading `----`. The separator is a reading aid: finding text can contain the same line, so the fence, not the separator, is the boundary |
 | — | whole artifact | `ce-persona-findings <artifact> --json` — the raw object, unchanged and unfenced, for a programmatic caller |
 | — | whole artifact | `ce-persona-findings <artifact> --return` — the compact **return** object compound-engineering's merge helper expects, unfenced |
+| — | whole artifact | `ce-persona-findings <artifact> --anchors -C <dir>` — for each finding, where its quote is in the reviewed tree and the keys a poster marks its comments with, unfenced |
 | — | ~10 tokens/verdict | `ce-persona-findings <verdicts-artifact>` — one row per verdict in `#` order: `#N validated — <reason>` or `#N REJECTED — <reason>` |
 | — | one verdict | `ce-persona-findings <verdicts-artifact> --show N` — the verdict addressed to finding `#N`; `--show all` is the listing above, accepted for symmetry |
 
@@ -77,8 +78,8 @@ budget to spend.
 **`6` is never the answer when the wrapper is the broken part.** If a provider CLI upgrade
 renames the event kinds this counts, every run would count zero and `6` would blame the model
 on every one of them — a permanent outage wearing the costume of a bad model. So a stream
-carrying kinds this build does not recognise, or no events at all, exits `3` naming the
-unrecognised kinds instead; `6` is reached only when the stream was understood and there was
+carrying kinds this build does not recognize, or no events at all, exits `3` naming the
+unrecognized kinds instead; `6` is reached only when the stream was understood and there was
 genuinely nothing in it.
 
 **A review is defined as inspecting the repository.** Passing the material in the prompt
@@ -90,9 +91,11 @@ cannot tie to a file. Use the model directly for that.
 `ce-persona-findings` uses the same vocabulary, narrowed to what it can hit: `0` rendered, `1`
 the file is unreadable, is neither a findings nor a verdicts artifact, is both at once, or
 could not be projected into a usable return, `2` usage error — including no such finding or
-verdict number, `--return` with `--json` or `--show`, `--return` or `--verify-quotes` on a
-verdicts artifact, `--verify-quotes` without `--return` or without `-C`, a `-C` given without
-`--verify-quotes`, and a `-C` that is missing, is not a directory, or names an unknown user —
+verdict number, `--return` with `--json` or `--show`, `--anchors` with `--json`, `--show` or
+`--return`, `--return`, `--verify-quotes` or `--anchors` on a verdicts artifact,
+`--verify-quotes` without `--return` or without `-C`, `--anchors` without `-C`, a `-C` given
+without `--verify-quotes` or `--anchors`, and a `-C` that is missing, is not a directory, or
+names an unknown user —
 and `6` when the artifact's provenance records a run that made no local tool calls. That last
 one matters because a refusal has to survive being handed on: the review command keeps the dud
 artifact as evidence, and without the check this package would launder its own refusal into an
@@ -100,8 +103,9 @@ ordinary listing at exit `0`, one command later.
 
 Everything `ce-persona-findings` renders is wrapped in `BEGIN/END UNTRUSTED MODEL OUTPUT` with a
 per-run nonce. It is text a model wrote about a repository it read, being handed to another agent
-as *its* input; the fence is what lets the consumer tell data from instructions. `--json` and
-`--return` are unfenced, because a programmatic caller parses them rather than reading them.
+as *its* input; the fence is what lets the consumer tell data from instructions. `--json`,
+`--return` and `--anchors` are unfenced, because a programmatic caller parses them rather than
+reading them.
 
 ### `--return`: an artifact as a merge input
 
@@ -156,6 +160,199 @@ text is empty, when the tree contradicts it, when no citation names the finding'
 the quote founds some other location, not this one — or when the compared text is **shorter than
 12 characters** — a one-word fragment is on the line as a substring while saying nothing about the
 finding, and verification that cannot fail is worse than none.
+
+### `--anchors`: where each finding's quote is
+
+A poster that turns findings into pull-request comments has two questions for every finding:
+which line the comment goes on, and whether an earlier run already posted it. `--anchors`
+answers both from the reviewed tree, so the poster never searches a diff for a quote itself:
+
+```console
+$ ce-persona-findings "$CE_PERSONA_RUN_DIR/correctness-codex.json" --anchors -C . \
+    > "$CE_PERSONA_RUN_DIR/correctness-codex-anchors.json"
+ce-persona-findings: anchors: 7 findings (5 verified, 1 relocated, 0 ambiguous, 1 not found, 0 unverifiable, 0 no evidence)
+```
+
+`-C` is required and names the tree that was reviewed; as with `--verify-quotes`, the working
+tree under it is read and git is not asked. `--anchors` cannot be combined with `--json`,
+`--show` or `--return`, and on a verdicts artifact it is a usage error. An artifact whose
+provenance records no local tool calls exits `6` with nothing on stdout, as in every other mode.
+Written beside the artifact as `<persona>-<provider>-anchors.json`, the file is cleared with the
+run's other artifacts when the next run of that persona and provider starts.
+
+stdout is one JSON document, unfenced, and stderr is the one summary line above:
+
+```json
+{
+ "anchors_version": 1,
+ "artifact": "<the path as given>",
+ "artifact_sha256": "<sha256 of the artifact's bytes>",
+ "tree": "<the -C directory, resolved>",
+ "head": "<the reviewed commit, or unresolved: ...>",
+ "findings": [{"#": 1, "file": "src/a.py", "path": "src/a.py", "line": 42, "state": "verified",
+   "via": "line", "start": 41, "end": 42, "occurrences": 1, "candidates": [],
+   "reason": "on the finding's line", "quote_key": "<64 hex>", "evidence_key": "<64 hex>"}]
+}
+```
+
+- `artifact_sha256` hashes the bytes that were read and parsed, in one read, so a poster can
+  check the document describes the artifact it loaded.
+- `head` is the provenance sidecar's `head_sha` when that is a 40- or 64-character lowercase
+  hex object id. Otherwise it is `unresolved: no provenance` or `unresolved: the provenance
+  records no head commit`. A poster compares it with the head it posts to.
+- `findings` has one entry per finding that is a JSON object. `#` is the finding's position in
+  the artifact, the `#N` of the listing; an entry that is not an object is skipped, not
+  renumbered.
+
+Each entry:
+
+| Field | Value |
+|-------|-------|
+| `#` | the finding's number |
+| `file` | the finding's `file`, or `null` when it is not a string |
+| `path` | the in-tree, `/`-separated path that was read; `null` when no file was read |
+| `line` | the finding's `line` when it is an integer, else `null` |
+| `state` | one of the six states below |
+| `via` | how a placed quote was placed: `line`, `citation` or `search`; `null` for every other state |
+| `start`, `end` | the 1-based, inclusive lines the quote covers; only for `verified` and `relocated`, else `null` |
+| `occurrences` | on how many distinct line spans the claim occurs in the file; `null` when the file was not searched for it |
+| `candidates` | for `ambiguous` only, the first 20 of those spans as `[start, end]` pairs in file order; `[]` for every other state |
+| `reason` | a short diagnostic from a fixed vocabulary, for a person to read; not a contract |
+| `quote_key` | 64 hex characters; `null` only for `no_evidence` |
+| `evidence_key` | 64 hex characters; only for `verified` and `relocated`, else `null` |
+
+The quote is the finding's `first_evidence`, or `evidence[0]` when it has none: the same quote
+tier 1 shows. The file is split on `\n` only, as a diff numbers its lines, and matched as one
+stream: its non-blank lines, whitespace collapsed, joined by single spaces. So a quote matches
+however the file indents or wraps the code, and its span is the lines the match covers. The
+claim searched through the whole file is the quote's claim, defined under the keys below. A
+citation of the finding's own file also checks the quote less that citation, and its own
+segment when the quote cites several places, but only at the lines it cites. A range
+(`f.py:20-22`) cites every line from its first to its last; one written backwards cites only its
+first.
+
+A quote citing several places, each citation carrying its own snippet of at least 12 characters
+and no text outside them, is `not_found` before any state below is tried when one of its
+snippets is not on the lines its citation names. A snippet is on those lines when a place it
+occurs in its file overlaps them, so one that starts a line before a cited range still holds; its
+text is in the file either way. A snippet of another file is checked in that file, read under
+the same rules as the finding's own, so one whose file is missing, outside the tree, not a
+regular file, or reached through a link or a `..` is not where it says. One snippet that holds
+cannot place the quote, since the comment would publish the others as code the tree holds.
+`occurrences` still counts the claim. The states, first match wins:
+
+- **`verified`**, `via` `line`: the quote occurs on lines that include the finding's `line`.
+- **`relocated`**, `via` `citation`: it occurs at a line the quote cites in the finding's file.
+- **`relocated`**, `via` `search`: it occurs exactly once in the file, somewhere else.
+- **`ambiguous`**: it occurs more than once, and none of those places covers the finding's line
+  or a line the quote cites.
+- **`not_found`**: the file does not hold it, or one snippet of a quote citing several places is
+  not where it cites.
+- **`unverifiable`**: nothing could be checked. The finding has no `file`. Or the file is
+  missing, outside the tree, not a regular file, reached through a link or a `..` (the path it
+  resolves to is not the one the finding names), or unreadable. Or the quote cites only other
+  files. Or every claim is shorter than 12 characters once whitespace is collapsed.
+- **`no_evidence`**: there is no quote, or the quote is only a citation and claims no code.
+
+A quote with no real newline that holds a literal `\n` or `\t` is searched again with those read
+as whitespace when it is not found as written. That second reading never reaches a key.
+
+#### The keys
+
+A poster writes both keys into hidden markers on the comments it posts, so a later run can find
+the thread it opened. Each is a SHA-256 hex digest of UTF-8 text whose parts are joined by NUL:
+
+- `quote_key = sha256("persona-review/quote-key/1" \0 claim)`, and `null` when the claim is
+  empty. It is the finding's identity across runs. The locators the steps below take off are
+  where a quote carries line numbers, so inserting lines above the code does not move it; the
+  limits below list the locators it keeps.
+- `evidence_key = sha256("persona-review/evidence-key/1" \0 path \0 text)`, where `path` is
+  the entry's `path` and `text` is the file's own lines `start` to `end`, each whitespace
+  collapsed, blank ones dropped, joined by `\n`. It hashes the file rather than the lens's
+  wording, so it moves only when that code changes. Two findings quoting the same lines share it.
+
+The claim is the code the quote says the file holds, with what a lens writes around the code
+taken off. A *citation* here is `path:line`, with an optional `:col`, an optional range (`-N`,
+`–N` or `—N`) and markdown decoration (`**f.py:12**`, `(f.py:12)`, `` `f.py`:12 ``), whose path
+is the finding's own file, that file's basename, or looks like a path: it contains `/` or `\`,
+or ends in a file extension, and is not a URL. The finding's own file is read both as its
+`file` spells it and with `\` read as `/` and empty, `.` and `..` segments dropped, each with or
+without a leading `./`, so `./app/[id]/page.tsx` and `app/[id]/page.tsx` cite the same file
+whichever side spells it which way.
+
+1. Strip the quote's surrounding whitespace.
+2. Split the quote on `\n`. A line that begins, after whitespace, with a citation loses that
+   citation, then one `(verbatim)` right after it (in any case), then at most one separator —
+   `:`, `--`, `—`, `–`, or `-` followed by whitespace — then its surrounding whitespace. If what
+   is left of that line is exactly one backtick span, its contents replace it. A line that does
+   not begin with a citation is untouched.
+3. Only when no line lost a citation: a citation ending the quote comes off together with the
+   separator before it, and with a `(verbatim)` between the two. A parenthesized one comes off
+   with or without a separator. A bare one with no separator stays, since it may be what the
+   line says (`# see docs/setup.md:40`).
+4. If what is left is exactly one backtick span, take its contents.
+5. Collapse every run of whitespace to one space.
+
+A citation inside a line, ` / ` or `...` between snippets, and prose after the code are left
+in, because each may be what the line says, and a claim must never be edited into text the lens
+did not write.
+
+**The keys are frozen.** A marker on a posted comment outlives any release, so these
+definitions — and everything they call, including the citation pattern `--verify-quotes`
+shares — are never edited. A different definition ships as a new key beside the old one, its
+domain string ending in `/2` rather than `/1`, and costs one re-post of every open comment. The
+document's own shape is versioned by `anchors_version`, which is `1`.
+
+#### Limits
+
+- **`#L12`, `L12`, `line 12` and fenced code blocks** are not read as locators. They stay in the
+  claim, which the file then does not hold, so such a quote is usually `not_found`.
+- **Quotes joined by `; `** (`f.py:3: a(); f.py:9: b()`) are not split, because code contains
+  `; `. Only the first citation comes off, so the claim keeps the others and `quote_key` moves
+  when lines are inserted above. The citations of the finding's own file are still checked at
+  the lines they name, so when the code is where they cite it the entry is placed and its
+  `evidence_key` is stable.
+- **Lines joined by a literal `\n`** (a backslash and an `n`, not a newline:
+  `f.py:108: a\nf.py:109: b`) are one line to the claim. Only the first locator comes off, so
+  the claim keeps the others and `quote_key` moves when lines are inserted above. The locators
+  left in also keep the claim from matching the file, so such a quote is usually `not_found`.
+- **A Windows backslash citation** (`src\f.py:12`) comes off the claim, so its key is stable, but
+  it names no file under the tree. When the quote cites nothing else, it cites only other files
+  and is `unverifiable`.
+- **A bracketed path wrapped in quote marks** (`'app/[id]/page.tsx:12'`) is read as a citation
+  of `id]/page.tsx`. It stays in the claim and does not name the finding's file.
+- **A citation in the middle of a line** is never taken off, since it may be what the line says.
+  A quote that holds one keeps that line number in its claim.
+- **A code token shaped like a citation** (`obj.attr:10`, `buf[self.pos:10]`) is read as a
+  citation of another file, because `.attr` looks like a file extension. When the quote has no
+  citation of the finding's file, it cites only other files and is `unverifiable`. In a quote
+  citing several places, the token splits the snippet it sits in, and a true quote can be
+  `not_found`.
+- **An absolute path inside the tree** is read like a `..`: the path it resolves to is not the
+  one it spells. A snippet of another file cited by one is not where it says, so the quote is
+  `not_found`, and a `file` given as one is `unverifiable`. A citation of the finding's own file
+  by an absolute path still names that file.
+- **`-C` has to be the tree the review ran in.** `head` comes from the review's provenance and is
+  not checked against `-C`, so lines located in another checkout are reported under the reviewed
+  commit.
+- **A dirty worktree's lines are reported under the reviewed commit.** The quote is located in
+  the working tree, and `head` is the `HEAD` the review recorded, which holds none of the
+  uncommitted changes.
+- **On a case-insensitive filesystem**, the macOS default, a `file` spelled in another case than
+  the tree's (`SRC/F.py` for `src/f.py`) is read, and `path` and `evidence_key` carry that
+  spelling, which git does not have. A case-sensitive filesystem reports it `unverifiable`.
+- **A literal `\n` in the code comes first.** A quote with no real newline that holds a literal
+  `\n` is placed on a line holding that literal text when one exists, such as a string, and read
+  with the `\n` as whitespace only when none does.
+- **Snippets the reader cannot cut out.** A quote written as `` `a` / `b` ``, as
+  `` `a` followed by `b` `` or as a backtick span followed by `.` is not matched even when it is
+  true, and the entry is `not_found`. In a quote citing several places, one snippet written that
+  way is enough. The rule errs toward leaving a finding unplaced rather than publishing a snippet
+  the tree may not hold.
+- **`--anchors` output written into a run directory must not overlap a new review there.** A
+  review of the same persona and provider starting in that directory clears
+  `<persona>-<provider>-anchors.json`, including one a redirect is still writing, and `--anchors`
+  then exits `0` with its file gone.
 
 ## Validating a findings batch
 
@@ -278,7 +475,7 @@ variable. Two rules are worth knowing because they refuse things you might expec
 - **A watchdog cannot be switched off.** `0` is rejected, not treated as "no timeout". An unwatched
   run is a full-effort model run that nothing will stop and nothing will read. Set a large value if
   you want a long one.
-- **An unrecognised `CE_PERSONA_*` name is an error.** `CE_PERSONA_IDEL_SECS=30` would otherwise be
+- **An unrecognized `CE_PERSONA_*` name is an error.** `CE_PERSONA_IDEL_SECS=30` would otherwise be
   ignored in silence while the real idle timeout stayed at its default — a misconfiguration that
   looks exactly like a working one.
 
@@ -320,6 +517,25 @@ only comparable if they ran the same brief — and `base_ref=HEAD~1` names a dif
 day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
+
+## Changes in 0.3.4
+
+One addition, and a fix to `--verify-quotes` that changes what the merge helper receives. Every
+other command, flag and exit status is unchanged.
+
+- **`ce-persona-findings <artifact> --anchors -C <dir>`** prints one JSON document saying, for
+  each finding, where its quote is in the reviewed tree, with the two keys a poster marks its
+  comments with. See [`--anchors`](#--anchors-where-each-findings-quote-is). A run now also
+  clears a stale `<persona>-<provider>-anchors.json`.
+- **`--verify-quotes` parses range citations.** `f.py:30-60`, with a hyphen, en dash or em dash,
+  now reads as a citation of line 30. The `-60` used to stay in the compared text, so a true
+  quote cited that way was dropped. More true quotes now survive, and the merge helper sees
+  them.
+  - Where a quote citing several locations is cut into per-location segments shifts with this,
+    and so does the text of some drop reasons.
+  - Code shaped like `t:30-60` is now read as a range citation too.
+- **US spelling in two messages.** The `--help` text and the error for an unknown
+  `CE_PERSONA_*` name now say `unrecognized`.
 
 ## Changes in 0.3.3
 
@@ -390,7 +606,7 @@ are unchanged; the exit statuses are not:
 - Both review commands now enforce timeouts. A wedged provider previously hung forever and took the
   calling agent with it; `CE_PERSONA_IDLE_SECS` and `CE_PERSONA_HARD_SECS` bound that.
 - **`CE_PERSONA_*` values are validated strictly.** A timeout of `0`, a non-finite or negative
-  number, and an unrecognised `CE_PERSONA_*` name all exit `2`. Previously `0` disabled the watchdog
+  number, and an unrecognized `CE_PERSONA_*` name all exit `2`. Previously `0` disabled the watchdog
   and a misspelled name was ignored in silence.
 - **Concurrent runs of the same persona and provider in one run directory are refused** with `2`
   rather than overwriting each other. See Concurrency above.
@@ -420,13 +636,13 @@ both and tested against only one.
 Type checking is `basedpyright` in **strict** mode, with no baseline and no rule suppressions. The
 JSON boundary is typed (`validate.JSONValue`) rather than silenced. The `types` check ends with a
 negative control that injects `return x + None` into the library and fails if the checker accepts
-it — because this check once passed while analysing exactly one file and none of the code that
+it — because this check once passed while analyzing exactly one file and none of the code that
 ships.
 
 `python3 -m persona_review.flags` probes the installed `grok` for CLI drift. It needs a real
 authenticated binary, so no flake check runs it.
 
-## Licence
+## License
 
 Apache-2.0. Persona briefs and the findings schema are read at run time from the
 compound-engineering plugin, which is MIT — see `NOTICE`.

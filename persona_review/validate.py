@@ -60,6 +60,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -232,7 +233,7 @@ def check_schema_supported(spec: JSONObject, label: str = "schema") -> None:
 
 
 def _type_names(label: str, spec: JSONObject) -> list[str]:
-    """The declared type(s), normalised to a list of known names.
+    """The declared type(s), normalized to a list of known names.
 
     JSON Schema lets `type` be a LIST, and the plugin schema uses that form:
     `"suggested_fix": {"type": ["string", "null"]}`. Reading only the `str` case skips that
@@ -492,7 +493,7 @@ class RunStats:
     `tool_calls` is every call, local or not, recorded so the refusal can say what the run
     did instead. Both are ints and never None, because "the adapter could not tell" is not
     an answer this package is entitled to give. A stream carrying nothing this module
-    recognises counts zero and the run is refused; a stream that cannot be READ is an
+    recognizes counts zero and the run is refused; a stream that cannot be READ is an
     environment error rather than a quiet zero, because the two have different causes and
     only one of them is about the model. The rest are provenance — best effort, and None
     where a provider publishes no comparable number.
@@ -530,7 +531,7 @@ class Evidence:
 # codex side needs the drift detection below.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
-# defence in depth rather than a fix for an observed shape: grok returns tool RESULTS in
+# defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
 # `user` events as `tool_result` blocks, which the block-type test already excludes. If a
 # future build ever echoed a `tool_use` block back, this stops it being counted twice.
 # Verified against grok 1.0.13: one real review carried 99 `tool_use` blocks over 31 turns.
@@ -737,7 +738,7 @@ def _plural(count: int, noun: str) -> str:
 
 
 def describe_run(stats: RunStats) -> str:
-    """The counts behind a refusal, in one clause. A refusal nobody can check is a rumour."""
+    """The counts behind a refusal, in one clause. A refusal nobody can check is a rumor."""
     parts: list[str] = []
     if stats.turns is not None:
         parts.append(_plural(stats.turns, "turn"))
@@ -818,6 +819,38 @@ def write_provenance(
 PROVENANCE_SUFFIX = "-provenance.json"
 
 
+def _provenance(artifact: Path) -> JSONObject | None:
+    """The record beside this artifact, or None when there is no readable object there."""
+    sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
+    try:
+        record = loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+# A git object id, SHA-1 or SHA-256, as `rev-parse` prints one.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def reviewed_head(artifact: Path) -> str:
+    """The commit the run behind this artifact reviewed, or an `unresolved:` reason.
+
+    Read from the provenance record rather than asked of git, because what is checked out
+    now need not be what the model saw. A caller placing findings on a pull request
+    compares this with the head it posts against, so anything but an object id -- a
+    missing record, or a tree that was not a git repository -- reads as unresolved rather
+    than as a head that happens to differ.
+    """
+    record = _provenance(artifact)
+    if record is None:
+        return "unresolved: no provenance"
+    head = record.get("head_sha")
+    if not isinstance(head, str) or _OBJECT_ID.fullmatch(head) is None:
+        return "unresolved: the provenance records no head commit"
+    return head
+
+
 def refused_run(artifact: Path) -> RunStats | None:
     """The run behind this artifact, IF its provenance records no local tool calls.
 
@@ -838,12 +871,8 @@ def refused_run(artifact: Path) -> RunStats | None:
     before `local_tool_calls` existed. Otherwise zero `local_tool_calls` refuses. A count
     that is present but not a whole non-negative number is not a reading of zero.
     """
-    sidecar = artifact.with_name(artifact.stem + PROVENANCE_SUFFIX)
-    try:
-        record = loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    stats = record.get("run_stats") if isinstance(record, dict) else None
+    record = _provenance(artifact)
+    stats = record.get("run_stats") if record is not None else None
     if not isinstance(stats, dict):
         return None
     # Both counts are checked as whole numbers before either is believed: a zero local

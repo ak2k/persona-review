@@ -137,7 +137,7 @@ def normalise_persona(name: str) -> str:
 
 
 def resolve_persona(assets: Path, name: str) -> tuple[str, Path]:
-    """The normalised persona name and the brief it names, which must exist and be capable."""
+    """The normalized persona name and the brief it names, which must exist and be capable."""
     persona = normalise_persona(name)
     brief = assets / "personas" / f"{persona}.md"
     if not brief.is_file():

@@ -11,7 +11,7 @@ PATH are the runners.
 **Every case runs for BOTH providers.** That is not thoroughness for its own sake: when the
 two runners were separate scripts, guards were repeatedly added to both and tested against
 only one, so deleting the second copy left the suite green. One code path plus a
-parameterised suite makes that impossible rather than merely unlikely.
+parameterized suite makes that impossible rather than merely unlikely.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ TYPE_INVALID = json.dumps(
     }
 )
 
-# A stub runner. It records the argv it was called with, honours codex's `-o`, and does
+# A stub runner. It records the argv it was called with, honors codex's `-o`, and does
 # whatever the spec file tells it — including going silent, so the watchdogs can be tested.
 #
 # This interpreter, not `env python3`, for the reason the shims below carry the same
@@ -508,7 +508,7 @@ class Harness:
     def findings(self, *args: str) -> subprocess.CompletedProcess[str]:
         """The retrieval command, as installed. On Harness rather than on its own test class
         because the vacuous-run tests need it too: the refusal is only closed if BOTH the
-        review command and the reader of its artifact honour it."""
+        review command and the reader of its artifact honor it."""
         cmd = self.findings_cmd
         argv = [str(cmd), *args] if isinstance(cmd, Path) else [*cmd, *args]
         return subprocess.run(argv, capture_output=True, text=True, env=self.env(), check=False)
@@ -787,7 +787,7 @@ class TestVacuousRuns(Harness):
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_refusal_names_the_evidence_and_keeps_the_artifacts(self, provider: str):
-        # A refusal a caller cannot audit is a rumour. The counts go on stderr and the dud
+        # A refusal a caller cannot audit is a rumor. The counts go on stderr and the dud
         # itself stays on disk, because it is the only record of what was refused.
         proc = self.review_dud(provider, self.EMPTY)
         assert proc.returncode == 6
@@ -840,7 +840,7 @@ class TestVacuousRuns(Harness):
         # THE LAUNDERING ROUTE. exit 6 keeps the artifact as evidence, and an artifact on
         # disk is exactly what `ce-persona-findings` renders — so a caller that ignored the
         # status got the same dud back as an ordinary listing at exit 0, one command later,
-        # through this package's own reader. Both ends have to honour the refusal.
+        # through this package's own reader. Both ends have to honor the refusal.
         assert self.review_dud(provider, ANSWER).returncode == 6
         proc = self.findings(str(self.artifact(provider)))
         assert proc.returncode == 6, proc.stdout + proc.stderr
@@ -864,6 +864,18 @@ class TestVacuousRuns(Harness):
         proc = self.findings(str(self.artifact(provider)), "--return")
         assert proc.returncode == 6, proc.stdout
         assert proc.stdout.strip() == "", proc.stdout
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_reader_refuses_anchors_too(self, provider: str):
+        # A poster places and keys comments from this document without a person reading it,
+        # so a refused run reaching it would be posted as a review that happened.
+        assert self.review_dud(provider, ANSWER).returncode == 6
+        tree = self.work / "reviewed"
+        tree.mkdir()
+        proc = self.findings(str(self.artifact(provider)), "--anchors", "-C", str(tree))
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        assert proc.stdout == "", proc.stdout
+        assert "no local tool calls" in proc.stderr, proc.stderr
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reader_still_renders_a_review_that_happened(self, provider: str):
@@ -987,7 +999,7 @@ class TestVocabularyDriftIsNotBlamedOnTheModel(Harness):
     def test_a_genuine_dud_is_still_the_model_s_doing(self):
         # THE CONTROL that keeps exit 6 alive: a real vacuous run emits agent_message and
         # nothing else, and those are kinds the wrapper knows and skips on purpose. If they
-        # counted as unrecognised, every dud would report drift and the refusal would be dead.
+        # counted as unrecognized, every dud would report drift and the refusal would be dead.
         self.set_spec(stdout=codex_stream(), last=ANSWER)
         proc = self.review("codex", "adversarial-reviewer")
         assert proc.returncode == 6, proc.stdout + proc.stderr
@@ -1420,6 +1432,17 @@ class TestArtifactLifecycle(Harness):
         assert proc.returncode == 78
         self.assert_run_dir_clean(provider)
 
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_refusal_before_dispatch_clears_a_stale_anchors_file(self, provider: str):
+        # The caller writes it beside the artifact, so no run ever creates it; left behind, a
+        # poster would place the previous run's quotes beside a run that produced none.
+        self._seed(provider)
+        stale = self.run_dir / f"adversarial-reviewer-{provider}-anchors.json"
+        stale.write_text("{}", encoding="utf-8")
+        proc = self.review(provider, "adversarial-reviewer", CE_PERSONA_MAX_PROMPT_TOKENS="1")
+        assert proc.returncode == 78
+        self.assert_run_dir_clean(provider)
+
 
 class TestWatchdogs(Harness):
     @pytest.mark.parametrize("provider", PROVIDERS)
@@ -1587,6 +1610,88 @@ class TestFindingsCommand(Harness):
         proc = self.findings(str(self.artifact("grok")), "--json")
         assert proc.returncode == 0, proc.stderr
         assert json.loads(proc.stdout)["findings"][0]["severity"] == "P1"
+
+
+class TestAnchorsCommand(Harness):
+    """`--anchors`, through the installed command: the document a poster places comments from."""
+
+    def tree(self, text: str = "    return bill(account)\n") -> Path:
+        tree = self.work / "reviewed"
+        tree.mkdir(exist_ok=True)
+        (tree / "f.py").write_text(text, encoding="utf-8")
+        return tree
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_anchors_prints_one_document_that_hashes_the_artifact_it_read(self, provider: str):
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer").returncode == 0
+        artifact = self.artifact(provider)
+        proc = self.findings(str(artifact), "--anchors", "-C", str(self.tree()))
+        assert proc.returncode == 0, proc.stderr
+        # One document: `json.loads` refuses anything after it but whitespace.
+        doc = json.loads(proc.stdout)
+        assert doc["artifact_sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+        assert doc["artifact"] == str(artifact)
+        [row] = doc["findings"]
+        assert (row["#"], row["state"], row["via"], row["start"]) == (1, "verified", "line", 1)
+        assert proc.stderr.splitlines() == [
+            "ce-persona-findings: anchors: 1 findings (1 verified, 0 relocated, 0 ambiguous,"
+            " 0 not found, 0 unverifiable, 0 no evidence)"
+        ]
+
+    def test_anchors_refuses_every_mode_it_cannot_serve(self):
+        self.good_answer("grok")
+        assert self.review("grok", "adversarial-reviewer").returncode == 0
+        artifact, tree = str(self.artifact("grok")), str(self.tree())
+        for args in (
+            (artifact, "--anchors", "--json", "-C", tree),
+            (artifact, "--anchors", "--show", "1", "-C", tree),
+            (artifact, "--anchors", "--return", "-C", tree),
+            (artifact, "--anchors"),
+        ):
+            proc = self.findings(*args)
+            assert proc.returncode == 2, (args, proc.stdout, proc.stderr)
+            assert proc.stdout == "", args
+
+    def test_anchors_on_a_verdicts_artifact_is_a_usage_error(self):
+        verdicts = self.work / "validator-grok.json"
+        verdicts.write_text(VERDICTS, encoding="utf-8")
+        proc = self.findings(str(verdicts), "--anchors", "-C", str(self.tree()))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert proc.stdout == ""
+        assert "a verdict has no quote to locate" in proc.stderr, proc.stderr
+
+    def test_anchors_without_provenance_reports_the_head_unresolved(self):
+        # The head is the one field a poster checks against the commit it posts to, and an
+        # artifact nobody can tie to a commit must not be read as one reviewed at any head.
+        artifact = self.work / "correctness.json"
+        artifact.write_text(ANSWER, encoding="utf-8")
+        proc = self.findings(str(artifact), "--anchors", "-C", str(self.tree()))
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["head"] == "unresolved: no provenance"
+
+    def test_anchors_piped_into_a_reader_that_stops_early_still_exits_zero(self):
+        big = self.work / "big.json"
+        rows = [{**FINDING, "title": f"finding {n}"} for n in range(5000)]
+        big.write_text(json.dumps({"findings": rows}), encoding="utf-8")
+        cmd = self.findings_cmd
+        argv = [str(cmd)] if isinstance(cmd, Path) else list(cmd)
+        quoted = shlex.join([*argv, str(big), "--anchors", "-C", str(self.tree())])
+        # The command's own status, not the pipeline's, which is `head`'s.
+        script = f"{{ {quoted}; echo EXIT=$? >&2; }} | head -c 100"
+        proc = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            env=self.env(),
+            cwd=self.work,
+            timeout=120,
+            check=False,
+        )
+        assert "EXIT=0" in proc.stderr, proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert len(proc.stdout) <= 100, len(proc.stdout)
+        assert "anchors: 5000 findings (5000 verified" in proc.stderr, proc.stderr
 
 
 class TestValidatorMode(Harness):

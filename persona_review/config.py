@@ -20,7 +20,7 @@ TWO INVARIANTS THE TYPES CARRY, RATHER THAN THE CALLERS
 
 AND ONE STOLEN FROM pydantic-settings
 
-`extra="forbid"`: an unrecognised `CE_PERSONA_*` name is an error, not a shrug. Setting
+`extra="forbid"`: an unrecognized `CE_PERSONA_*` name is an error, not a shrug. Setting
 `CE_PERSONA_IDEL_SECS=30` used to leave the real idle timeout at its 600s default and say
 nothing — a silent misconfiguration, in a package whose whole argument is that silence is
 the failure mode. This package has no pydantic dependency (see AGENTS.md), so it is eleven
@@ -126,7 +126,7 @@ class Settings:
         if unknown:
             near = ", ".join(sorted(KNOWN_VARS))
             raise UsageError(
-                f"unrecognised setting(s): {', '.join(unknown)}. "
+                f"unrecognized setting(s): {', '.join(unknown)}. "
                 f"This package reads only {near}. A misspelled variable is silently ignored "
                 "otherwise, leaving the setting it was meant to change at its default."
             )

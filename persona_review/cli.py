@@ -95,7 +95,7 @@ environment
 
   Both timeouts must be greater than zero: there is no way to switch a watchdog
   off, because an unwatched run is a full-effort model run that nothing will stop
-  and nothing will read. An unrecognised CE_PERSONA_* name is an error, not a
+  and nothing will read. An unrecognized CE_PERSONA_* name is an error, not a
   shrug -- a misspelled one would otherwise leave the real setting at its default.
 """
 
@@ -195,6 +195,9 @@ ARTIFACT_SUFFIXES = (
     "-last.json",
     "-events.jsonl",
     "-prompt.md",
+    # Written by a caller, not by the run, but derived from this run's findings: left behind,
+    # it places and keys the previous run's quotes beside this run's artifact.
+    "-anchors.json",
     # The failure path reads this one back, so a survivor from an earlier run is the stale
     # artifact most likely to be believed.
     "-stderr.log",
@@ -379,7 +382,7 @@ def _review_locked(
         raise errors.EnvError(f"missing findings schema at {schema_file}")
     resolved, brief = assets.resolve_persona(asset_dir, args.persona)
     if resolved != persona:
-        # The lock and the clear were taken against the NORMALISED name, before any
+        # The lock and the clear were taken against the NORMALIZED name, before any
         # filesystem access; the artifacts are written under the RESOLVED one. Both call
         # `normalise_persona`, so they agree — but if they ever stopped agreeing, this run
         # would write to paths it does not hold the lock on, and a concurrent run would
