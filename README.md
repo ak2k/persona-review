@@ -87,7 +87,8 @@ genuinely nothing in it.
 `completed`. Through grok, a call counts when it is a tool that reads the tree (a command, a
 search, a file read, a directory listing, or a background command's output) and its
 `tool_result` has `is_error` false and reports no non-zero or null exit code and no command
-still running; a todo, a task kill or a file edit never counts. A run that attempted local calls
+still running, or, for a poll of several background commands, reports at least one that exited
+0; a todo, a task kill or a file edit never counts. A run that attempted local calls
 and had none succeed exits `3`, not `6`: the model tried, and a provider that cannot start a
 command fails every call the same way on every run. That is a run that happened too —
 codex-cli 0.156.1 could not start five commands, each completed `failed` with exit code 1, and
@@ -530,7 +531,8 @@ in `tool_calls` only, because none of them proves the tree was read. Through gro
 is a call to one of `run_terminal_command`, `grep`, `read_file`, `list_dir` or
 `get_command_or_subagent_output` (`--disable-web-search` removes its web tools), and it succeeded
 when its `tool_result` has `is_error` false and reports no non-zero or null exit code and no
-command still running. `todo_write`, `kill_command_or_subagent`, `search_replace` and `write`
+command still running; a poll of several background commands succeeded when at least one of
+them exited 0. `todo_write`, `kill_command_or_subagent`, `search_replace` and `write`
 count in `tool_calls` only. A grok stream with no local attempt that calls a tool name this build
 does not know exits `3` naming it, as codex kind drift does. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
 and no successes exit `3` — so they are recorded rather than only acted on: a refusal you cannot
@@ -559,7 +561,8 @@ none succeed exits `3` instead of `0`. Every other command, flag and exit status
   completes with `exit_code` 0, and a file change or patch when it completes with status
   `completed`. Through grok a call counts when it is one of the tools that read the tree and its
   `tool_result` has `is_error` false and reports no non-zero or null exit code and no command
-  still running; a call with no result, or a todo, task kill or file edit, does not count. A
+  still running, or, for a poll of several background commands, at least one that exited 0; a
+  call with no result, or a todo, task kill or file edit, does not count. A
   codex run whose commands all failed to start used to exit `0` with empty findings.
 - **grok tool-name drift is detected.** A grok stream with no local attempt that calls a tool
   this build does not know exits `3` naming it. Before, any grok call counted, whatever it was.

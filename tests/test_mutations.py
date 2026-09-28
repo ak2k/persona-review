@@ -441,6 +441,14 @@ MUTATIONS: list[Mutation] = [
         "    return [content]",
     ),
     Mutation(
+        # The outer object of a batch poll carries no status or exit code, so reading only
+        # it counted a poll of commands that all failed as a successful read.
+        "a grok batch poll is judged by its outer object alone",
+        "persona_review/validate.py",
+        r"    if reports and GROK_BATCH_REPORT in reports\[0\]:",
+        "    if False:",
+    ),
+    Mutation(
         "a grok result for a call this run never made counts",
         "persona_review/validate.py",
         r"                if ident not in pending:\n                    continue\n",

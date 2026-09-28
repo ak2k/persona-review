@@ -555,7 +555,8 @@ class Evidence:
 # `failed` status nor a non-zero exit code separates a command that never started from one
 # that ran and found nothing, since both read the same; only exit code 0 says a command ran.
 # So a codex command counts on `exit_code` 0 and a grok call on a `tool_result` reporting no
-# error, no non-zero exit code and no command still running.
+# error, no non-zero exit code and no command still running — or, for a poll of several
+# background commands, at least one that exited 0.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
 # defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
@@ -587,6 +588,10 @@ GROK_QUIET_TOOLS = frozenset({"kill_command_or_subagent", "search_replace", "tod
 # outcome arrives later as a `TaskOutput` with the command's own `status` and `exit_code`
 # one level down, under this key.
 GROK_NESTED_REPORT = "Result"
+
+# A poll of several background commands at once has no status or exit code of its own: each
+# command's report is in a list under this key's `results`.
+GROK_BATCH_REPORT = "MultiResult"
 
 # codex's `--json` stream is items rather than messages: one `item.started` and one
 # `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
@@ -687,10 +692,21 @@ def _grok_succeeded(block: JSONObject) -> bool:
     "running" before anything came back. A report carrying an `exit_code` must carry 0, and
     null is a command that has not finished. A result with no exit code at all, a file read,
     rests on `is_error`.
+
+    A batch poll worked when any command in it exited 0: that one inspected something, and a
+    sibling still running or failed does not undo it. Any other batch shape fails closed.
     """
     if block.get("is_error") is not False:
         return False
-    for report in _grok_reports(block):
+    reports = _grok_reports(block)
+    if reports and GROK_BATCH_REPORT in reports[0]:
+        batch = reports[0][GROK_BATCH_REPORT]
+        results = batch.get("results") if isinstance(batch, dict) else None
+        return isinstance(results, list) and any(
+            isinstance(child, dict) and _whole_number(child.get("exit_code")) == 0
+            for child in results
+        )
+    for report in reports:
         if report.get("status") == "running":
             return False
         if "exit_code" in report and _whole_number(report["exit_code"]) != 0:

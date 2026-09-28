@@ -265,6 +265,37 @@ def task_output(status: str, exit_code: int | None, output: str) -> dict[str, An
     }
 
 
+def task_outputs(*children: tuple[str, int | None]) -> dict[str, Any]:
+    """A poll of several background commands at once: each one's report in a list under
+    `MultiResult`. Keys and value types as a real grok-4.7 session recorded them."""
+    results = [
+        {
+            "task_id": f"call-{n}",
+            "command": "uv run --no-project python probe.py",
+            "status": status,
+            "exit_code": exit_code,
+            "started": "2026-09-26T19:49:03Z",
+            "ended": None if status == "running" else "2026-09-26T19:49:44Z",
+            "duration_secs": 40.780223,
+            "output": "",
+            "output_file": f"/work/.grok/sessions/s/terminal/call-{n}.log",
+            "truncated": False,
+            "truncation_hint": "[truncated - use read_file on output_file for full content]",
+            "raw_output_bytes": 0,
+        }
+        for n, (status, exit_code) in enumerate(children, 1)
+    ]
+    done = sum(status == "completed" for status, _ in children)
+    return {
+        "type": "TaskOutput",
+        "MultiResult": {
+            "mode": "wait_all",
+            "results": results,
+            "summary": f"{done}/{len(children)} tasks completed (wait_all)",
+        },
+    }
+
+
 # Event fixtures in each provider's own vocabulary, at module scope because both the counter's
 # tests and the gate's need them. Shapes copied from real runs: grok 1.0.13 and grok-4.7, and
 # codex-cli 0.150.1, 0.152.1 and 0.156.1.
@@ -1030,6 +1061,39 @@ class TestACallCountsOnlyIfItSucceeded:
         assert (stats.tool_calls, stats.local_tool_attempts) == (1, 1)
         assert stats.local_tool_calls == succeeded
 
+    @pytest.mark.parametrize(
+        ("report", "succeeded"),
+        [
+            (task_outputs(("completed", 0), ("completed", 0)), 1),
+            (task_outputs(("completed", 0), ("running", None)), 1),
+            (task_outputs(("failed", 1), ("running", None)), 0),
+            (task_outputs(("failed", 1), ("completed", 2)), 0),
+            (task_outputs(), 0),
+            ({"type": "TaskOutput", "MultiResult": {"mode": "wait_all"}}, 0),
+            ({"type": "TaskOutput", "MultiResult": {"results": {"exit_code": 0}}}, 0),
+            ({"type": "TaskOutput", "MultiResult": {"results": [{"exit_code": "0"}]}}, 0),
+            ({"type": "TaskOutput", "MultiResult": [{"exit_code": 0}]}, 0),
+        ],
+        ids=[
+            "all-exited-0",
+            "one-exited-0-one-running",
+            "failed-and-running",
+            "all-failed",
+            "no-results",
+            "results-missing",
+            "results-not-a-list",
+            "exit-code-not-a-number",
+            "batch-not-an-object",
+        ],
+    )
+    def test_a_batch_poll_counts_only_when_one_of_its_commands_exited_0(
+        self, report: dict[str, Any], succeeded: int
+    ):
+        # No status or exit code on the outer object: reading only that counted a poll of
+        # commands that all failed as a successful read.
+        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
     def test_a_bookkeeping_call_beside_failed_commands_is_not_inspection(self):
         # The bypass reproduced on the poster's stopgap: every command failed, and one Todo
         # result, which carries no exit code, read as "1 succeeded".
@@ -1333,6 +1397,22 @@ class TestTheGateRefusesARunThatInspectedNothing:
             code, _, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(started))
         assert code == 3, message
         assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
+
+    def test_a_run_whose_only_inspecting_call_polled_failed_commands_exits_3(self):
+        poll = task_outputs(("failed", 1), ("running", None))
+        stream = "\n".join(
+            [
+                grok_tool_call("get_command_or_subagent_output", poll),
+                grok_result(structured_output=artifact()),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(
+                Path(tmp), stream, stream + "\n", "grok-events", "grok-messages"
+            )
+        assert code == 3, message
+        assert out == ""
+        assert "(1 local, 0 succeeded)" in message, message
 
     @pytest.mark.parametrize(
         ("mode", "evidence_mode", "stream"),
