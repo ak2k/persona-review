@@ -572,6 +572,9 @@ none succeed exits `3` instead of `0`. Every other command, flag and exit status
   by the rule they were written under, so one whose failed calls were counted still renders.
 - **Codex vocabulary drift is keyed on local attempts.** A stream of recognized commands that all
   failed, beside an unrecognized kind, exits `3` as failed calls rather than as drift.
+- **grok's stream is split at newlines only.** JSON carries U+2028, U+2029 and U+0085 raw inside
+  a string, and a line holding one used to be cut in two and dropped: an answer holding one
+  exited `1`, and a successful call whose result held one did not count.
 
 ## Changes in 0.3.4
 

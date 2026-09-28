@@ -117,6 +117,13 @@ def objects(lines: Iterable[str]) -> Iterator[JSONObject]:
             yield event
 
 
+def ndjson_lines(text: str) -> list[str]:
+    """A stream's records. NDJSON ends one at "\\n" and nowhere else: `str.splitlines` also
+    breaks at U+2028, U+2029 and U+0085, which JSON carries raw inside a string, and a record
+    cut there parses as neither half."""
+    return text.split("\n")
+
+
 def file_objects(events_file: Path) -> Iterator[JSONObject]:
     """The same, streamed from a file a line at a time.
 
@@ -429,7 +436,7 @@ def from_grok_events(text: str, key: str = "findings") -> Artifact:
     well-formed `{"findings": []}`, which is indistinguishable from a clean review by
     looking at the payload alone.
     """
-    results = [event for event in objects(text.splitlines()) if event.get("type") == "result"]
+    results = [event for event in objects(ndjson_lines(text)) if event.get("type") == "result"]
     if not results:
         fail("no `result` event in grok's output stream")
     if len(results) > 1:
@@ -1198,7 +1205,7 @@ def gate(
     # it costs one read of a ~1.4 MB file rather than two.
     stats = run_stats(
         evidence.mode,
-        objects(text.splitlines())
+        objects(ndjson_lines(text))
         if evidence.events_file == answer_file
         else file_objects(evidence.events_file),
         evidence.duration_s,

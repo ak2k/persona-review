@@ -192,6 +192,32 @@ MUTATIONS: list[Mutation] = [
         "    if False:",
     ),
     Mutation(
+        # U+2028, U+2029 and U+0085 ride raw inside JSON strings; a record cut at one parses
+        # as neither half, and a successful read became a call that never finished.
+        "an NDJSON stream is split at every Unicode line break",
+        "persona_review/validate.py",
+        r'    return text\.split\("\\n"\)$',
+        "    return text.splitlines()",
+    ),
+    Mutation(
+        "the grok answer is read from lines split at every Unicode line break",
+        "persona_review/validate.py",
+        r"objects\(ndjson_lines\(text\)\) if event",
+        "objects(text.splitlines()) if event",
+    ),
+    Mutation(
+        "the gate counts grok from lines split at every Unicode line break",
+        "persona_review/validate.py",
+        r"        objects\(ndjson_lines\(text\)\)\n        if evidence",
+        "        objects(text.splitlines())\n        if evidence",
+    ),
+    Mutation(
+        "the codex stream file is split at every Unicode line break",
+        "persona_review/validate.py",
+        r"        yield from objects\(handle\)$",
+        "        yield from objects(handle.read().splitlines())",
+    ),
+    Mutation(
         "grok is_error accepted when absent",
         "persona_review/validate.py",
         r'    if result\.get\("is_error"\) is not False:',

@@ -1425,6 +1425,114 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert record["run_stats"]["tool_calls"] == 1
 
 
+# Characters JSON carries raw inside a string and `str.splitlines` also breaks a line at.
+# Escaped here, never literal, so the source says which character it means.
+LINE_BREAKS_INSIDE_JSON = pytest.mark.parametrize(
+    "separator", ["\u2028", "\u2029", "\x85"], ids=["U+2028", "U+2029", "U+0085"]
+)
+
+
+def raw_json(event: dict[str, Any]) -> str:
+    """One event as grok writes it: non-ASCII characters raw rather than escaped."""
+    return json.dumps(event, ensure_ascii=False)
+
+
+class TestAStreamIsSplitAtNewlinesOnly:
+    """An NDJSON record ends at "\\n" and nowhere else.
+
+    `str.splitlines` also breaks at U+2028, U+2029 and U+0085. A successful read of a file
+    holding one broke into two halves that do not parse, and the run was refused as one whose
+    calls never finished; an answer holding one lost its `result` event.
+    """
+
+    def _gate(self, stream: str) -> tuple[int, str, dict[str, Any]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "events.jsonl").write_text(stream, encoding="utf-8")
+            (root / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = validate.gate(
+                        answer_file=root / "events.jsonl",
+                        schema_path=root / "schema.json",
+                        mode="grok-events",
+                        findings_out=root / "out.json",
+                        provenance_out=root / "out-provenance.json",
+                        prov_pairs=[],
+                        prov_files={},
+                        evidence=validate.Evidence(
+                            events_file=root / "events.jsonl",
+                            mode="grok-messages",
+                            duration_s=1.0,
+                        ),
+                        label="ce-persona",
+                    )
+                except errors.AppError as exc:
+                    return exc.exit_code, str(exc), {}
+            record = json.loads((root / "out-provenance.json").read_text(encoding="utf-8"))
+        return code, err.getvalue(), record["run_stats"]
+
+    @LINE_BREAKS_INSIDE_JSON
+    def test_a_successful_read_of_a_file_holding_a_line_break_is_counted(self, separator: str):
+        report = json.loads(json.dumps(READ_FILE))
+        report["FileContent"]["content"] = f"1→x = 1  # a{separator}b\n"
+        block = {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_file",
+            "content": raw_json(report),
+            "is_error": False,
+        }
+        result = raw_json({"type": "user", "message": {"role": "user", "content": [block]}})
+        assert separator in result, "the character must be raw in the line, as grok writes it"
+        stream = "\n".join(
+            [grok_tool_call("read_file", None), result, grok_result(structured_output=artifact())]
+        )
+        code, message, stats = self._gate(stream + "\n")
+        assert code == 0, message
+        assert (stats["local_tool_attempts"], stats["local_tool_calls"]) == (1, 1)
+
+    @LINE_BREAKS_INSIDE_JSON
+    def test_an_answer_holding_a_line_break_is_read(self, separator: str):
+        title = f"a{separator}b"
+        answer = raw_json(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "stop_reason": "end_turn",
+                "structured_output": artifact(finding(title=title)),
+            }
+        )
+        assert separator in answer
+        found = validate.from_grok_events(grok_tool_call() + "\n" + answer + "\n")
+        assert findings_of(found)[0]["title"] == title
+
+    @LINE_BREAKS_INSIDE_JSON
+    def test_a_codex_stream_read_from_its_file_splits_at_newlines_too(self, separator: str):
+        # codex's stream is read a line at a time from the file, which already splits at
+        # newlines only; this holds it there.
+        done = raw_json(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": "cat f.py",
+                    "aggregated_output": f"a{separator}b\n",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        assert separator in done
+        with tempfile.TemporaryDirectory() as tmp:
+            events = Path(tmp) / "events.jsonl"
+            events.write_text(codex_stream(done), encoding="utf-8")
+            stats = validate.run_stats("codex-items", validate.file_objects(events), None)
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+
 class TestARefusalSurvivesBeingHandedOn:
     """`validate.refused_run`: the reader's half of the vacuous-run refusal.
 
