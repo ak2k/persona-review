@@ -229,7 +229,7 @@ BACKGROUND_STARTED = {
 
 # A bookkeeping result (u55 gate-b2 grok events line 3): the plan the model wrote itself. It
 # has no exit code and no error, so it passes every result rule and inspected nothing.
-TODO_UPDATED = {
+TODO_UPDATED: dict[str, Any] = {
     "type": "Todo",
     "TodosUpdated": {
         "summary_for_prompt": "1 todo",
