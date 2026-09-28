@@ -221,23 +221,32 @@ sys.exit(spec.get("exit", 0))
 """
 
 
-# One tool call, in each provider's own event vocabulary. A stream WITHOUT one is a run that
-# inspected nothing, which the wrapper now refuses with exit 6 — so a fixture standing in for
-# a real review has to carry one, and the fixtures that deliberately omit it are testing the
-# refusal rather than forgetting to be realistic.
+# One tool call that succeeded, in each provider's own event vocabulary. A stream WITHOUT one
+# is a run with no successful local call, which the wrapper refuses — so a fixture standing
+# in for a real review has to carry one, and the fixtures that deliberately omit it are
+# testing the refusal rather than forgetting to be realistic.
 #
-# Both shapes are copied from real runs: grok 1.0.13 (a `tool_use` content block inside an
-# assistant message) and codex-cli 0.150.1 (`item.started`/`item.completed` around an item
-# whose `type` names a tool).
-GROK_TOOL_CALL = json.dumps(
-    {
-        "type": "assistant",
-        "message": {
-            "content": [
-                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"p": "f.py"}}
-            ]
-        },
+# Both shapes are copied from real runs: grok 1.0.13 and grok-4.7 (a `tool_use` content block
+# inside an assistant message, answered by a `tool_result` block inside a user message) and
+# codex-cli 0.150.1 and 0.152.1 (`item.started`/`item.completed` around an item whose `type`
+# names a tool, completing with the command's exit code).
+def grok_call(report: dict[str, Any], *, is_error: bool = False) -> str:
+    call = {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"p": "f.py"}}
+    result = {
+        "type": "tool_result",
+        "tool_use_id": "toolu_1",
+        "content": json.dumps(report),
+        "is_error": is_error,
     }
+    return (
+        json.dumps({"type": "assistant", "message": {"content": [call]}})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"role": "user", "content": [result]}})
+    )
+
+
+GROK_TOOL_CALL = grok_call(
+    {"type": "ReadFile", "FileContent": {"content": "1→x = 1\n", "absolute_path": "/w/f.py"}}
 )
 CODEX_TOOL_CALL = "\n".join(
     json.dumps(
@@ -247,15 +256,63 @@ CODEX_TOOL_CALL = "\n".join(
                 "id": "item_1",
                 "type": "command_execution",
                 "command": "git diff",
+                "aggregated_output": "",
+                "exit_code": exit_code,
                 "status": status,
             },
         }
     )
-    for kind, status in (("item.started", "in_progress"), ("item.completed", "completed"))
+    for kind, status, exit_code in (
+        ("item.started", "in_progress", None),
+        ("item.completed", "completed", 0),
+    )
 )
 
+# Lines from two real codex streams, the same ones `tests/test_unit.py` proves the counting
+# rule on and with the same identifiers replaced: codex-cli 0.156.1 on a runner where no
+# command could start, and a working review whose `rg` calls exited 1 and 2 beside a command
+# that exited 0.
+C156_STREAM = r"""
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll measure the diff, inspect each changed area and its surrounding code, then return the review as JSON."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"The local command runner is failing before Git starts, so I haven’t been able to read the diff. I’m checking whether another available tool can expose the repository before I return a result."}}
+{"type":"item.started","item":{"id":"item_6","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.started","item":{"id":"item_7","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resource_templates","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.started","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_7","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resource_templates","arguments":{},"result":{"content":[{"type":"text","text":"{\"resourceTemplates\":[]}"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"{\"reviewer\":\"adversarial-reviewer\",\"findings\":[],\"residual_risks\":[\"Review incomplete: the command runner failed before Git started, so I could not read git diff a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD or assess the changed code. An empty findings array does not indicate the change is safe.\"],\"testing_gaps\":[\"Could not inspect or run tests because the local command runner failed.\"]}"}}
+{"type":"turn.completed","usage":{"input_tokens":110820,"cached_input_tokens":92288,"cache_write_input_tokens":0,"output_tokens":734,"reasoning_output_tokens":175}}
+"""  # noqa: E501
+Q2_MIXED_STREAM = r"""
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000003"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"rg: persona_review/anchors.py: IO error for operation on persona_review/anchors.py: No such file or directory (os error 2)\n","exit_code":2,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 0a1b2c3..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 0a1b2c3..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"EXIT=0\n","exit_code":0,"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":4559120,"cached_input_tokens":4356224,"cache_write_input_tokens":0,"output_tokens":18866,"reasoning_output_tokens":9988}}
+"""  # noqa: E501
 
-def grok_stream(payload: str | None = None, *, tool_call: bool = False, **result: Any) -> str:
+
+def grok_stream(
+    payload: str | None = None,
+    *,
+    tool_call: bool = False,
+    call: str = GROK_TOOL_CALL,
+    **result: Any,
+) -> str:
     event: dict[str, Any] = {
         "type": "result",
         "is_error": False,
@@ -269,7 +326,7 @@ def grok_stream(payload: str | None = None, *, tool_call: bool = False, **result
     event.update(result)
     head = '{"type":"system","subtype":"init"}\n'
     if tool_call:
-        head += GROK_TOOL_CALL + "\n"
+        head += call + "\n"
     return head + json.dumps(event) + "\n"
 
 
@@ -465,9 +522,9 @@ class Harness:
     ):
         """Spec a stub that returns verdicts through this provider's own channel.
 
-        A TOOL CALL by default, for the reason `good_answer` carries one: a validator that
-        inspected nothing is refused, so a fixture without one would put every test built on
-        it against the refusal path by accident.
+        A TOOL CALL by default, for the reason `good_answer` carries one: a validator with no
+        successful local call is refused, so a fixture without one would put every test built
+        on it against the refusal path by accident.
         """
         if provider == "grok":
             self.set_spec(stdout=grok_stream(payload, tool_call=tool_call), **extra)
@@ -834,6 +891,69 @@ class TestVacuousRuns(Harness):
         assert reader.returncode == 6, reader.stdout + reader.stderr
         assert reader.stdout.strip() == "", reader.stdout
         assert "no local tool calls" in reader.stderr, reader.stderr
+
+    def review_failed(self, provider: str) -> subprocess.CompletedProcess[str]:
+        """Run a provider whose every local call failed, answering as the real one did."""
+        if provider == "grok":
+            # The real grok shape of a command that ran and exited 2, with its home-directory
+            # path shortened. No real grok stream fails every call, so this one is assembled
+            # from that shape.
+            output = "error: Failed to initialize cache at `/work/.cache/uv`\n"
+            failed = grok_call(
+                {
+                    "type": "Bash",
+                    "output": list(output.encode("utf-8")),
+                    "output_for_prompt": f"exit: 2\n{output}",
+                    "exit_code": 2,
+                    "command": "uv run pytest",
+                    "truncated": False,
+                    "signal": None,
+                    "timed_out": False,
+                }
+            )
+            self.set_spec(stdout=grok_stream(self.EMPTY, tool_call=True, call=failed))
+        else:
+            answer = json.loads(C156_STREAM.strip().splitlines()[-2])["item"]["text"]
+            self.set_spec(stdout=C156_STREAM.lstrip("\n"), last=answer)
+        return self.review(provider, "adversarial-reviewer")
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_run_whose_every_local_call_failed_exits_3_at_both_ends(self, provider: str):
+        # codex-cli 0.156.1 could not start one command, and 0.3.4 passed its empty answer at
+        # exit 0. It tried and no call succeeded: not the model's fault, so not 6, and not
+        # clean.
+        proc = self.review_failed(provider)
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "none of whose local tool calls succeeded" in proc.stderr, proc.stderr
+        first = (
+            "error building bubblewrap command: cannot establish app-server socket mount isolation"
+            if provider == "codex"
+            else "error: Failed to initialize cache at `/work/.cache/uv`"
+        )
+        assert repr(first) in proc.stderr, proc.stderr
+        assert self.artifact(provider).is_file(), "the refused artifact must be kept as evidence"
+        stats = json.loads(self.provenance(provider).read_text(encoding="utf-8"))["run_stats"]
+        expected = (7, 5, 0) if provider == "codex" else (1, 1, 0)
+        assert (
+            stats["tool_calls"],
+            stats["local_tool_attempts"],
+            stats["local_tool_calls"],
+        ) == expected, stats
+        reader = self.findings(str(self.artifact(provider)))
+        assert reader.returncode == 6, reader.stdout + reader.stderr
+        assert reader.stdout.strip() == "", reader.stdout
+        assert "none of whose local tool calls succeeded" in reader.stderr, reader.stderr
+        assert "exit 3;" in reader.stderr, reader.stderr
+
+    def test_a_codex_run_with_one_command_that_worked_is_a_review(self):
+        # The control: `rg` exiting 1 and 2 beside a command that exited 0 is a real review.
+        self.set_spec(stdout=Q2_MIXED_STREAM.lstrip("\n"), last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "1 P1" in proc.stdout
+        stats = json.loads(self.provenance("codex").read_text(encoding="utf-8"))["run_stats"]
+        assert (stats["local_tool_attempts"], stats["local_tool_calls"]) == (3, 1), stats
 
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reader_will_not_render_the_artifact_the_review_refused(self, provider: str):

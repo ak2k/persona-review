@@ -149,31 +149,47 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   loudly and so no other test can be read as already covering it. "Found nothing" and
   "looked, then gave up" are indistinguishable without judging the transcript.
 
-  What is no longer in the hole: a run that made **zero** local tool calls. It read nothing
-  of the repository — a web search or a tool that does not say where it runs proves no
-  read of the diff — so its findings are
-  unfounded whether the array is empty or full, and it exits `6` with no summary line.
-  Exactly zero, with no configurable floor — "did this run inspect anything" has an
-  answer, "did it inspect enough" is a judgment this package is not entitled to make. The
-  fixture for the gap test therefore carries a tool call, because without one it would be
-  testing the refusal instead.
-- **The two tool-call adapters are shaped differently on purpose.** grok names a tool call
-  structurally — a `tool_use` content block — so any of them counts and there is no list to
-  go stale. codex names it by an item KIND, so that adapter carries a list, and a list can
-  fall out of date. Hence the drift check on the codex side only: a stream whose item kinds
-  are all unrecognized exits `3` naming them, never `6`. Getting that wrong would report
+  What is no longer in the hole: a run with **zero** successful local tool calls. Nothing it
+  did shows a read of the repository — a web search or a tool that does not say where it
+  runs proves no read of the diff, and neither does a command that failed, whether it never
+  started or ran and matched nothing — so its findings are unfounded whether the array is
+  empty or full, and it exits with no summary line: `6` when it attempted no local call, `3`
+  when it attempted some and every one failed. Exactly zero, with no configurable floor —
+  "did this run inspect anything" has an answer, "did it inspect enough" is a judgment this
+  package is not entitled to make. The fixture for the gap test therefore carries a tool
+  call that succeeded, because without one it would be testing the refusal instead.
+- **A run whose every local call failed exits `3`, not `6`.** It looks like the same
+  refusal told with the wrong status. It is not the model's doing: codex-cli 0.156.1 could
+  not start a single command on one runner, and `6` is the status that blames the model and
+  invites a retry, which would be wrong on every run there. The refusal quotes the first
+  failure's first line rather than naming a cause, because a command that ran and exited
+  non-zero reads the same as one that never started.
+- **Both tool-call adapters carry a list, and so both carry a drift check.** codex names a
+  call by an item KIND and grok by the tool `name` on a `tool_use` block. grok used to count
+  any `tool_use` and needed no list, but a call can succeed without reading anything: the
+  todo grok writes itself comes back with no error and no exit code, so a run whose every
+  command failed passed as inspected once it also wrote one. Only `GROK_INSPECTING_TOOLS`
+  are attempts now, and `GROK_QUIET_TOOLS` names the ones skipped on purpose. A list can fall
+  out of date, so on both sides a stream with no local attempt and a kind or tool name this
+  wrapper does not recognize exits `3` naming them, never `6`. Getting that wrong would report
   "the model never opened the diff" identically on every run after a provider upgrade — a
   permanent outage, misdiagnosed as a bad model, in the direction the README tells callers to
-  retry. `CODEX_QUIET_ITEMS` is what keeps "a kind we skip on purpose" and "a kind we have
-  never heard of" different facts, and its control test is what keeps exit `6` reachable.
+  retry. `CODEX_QUIET_ITEMS` and `GROK_QUIET_TOOLS` are what keep "a kind we skip on
+  purpose" and "a kind we have never heard of" different facts, and their control tests are
+  what keep exit `6` reachable.
 - **`ce-persona-findings` refuses an artifact whose provenance records zero local tool
   calls.** It looks like a reader reaching into a sidecar it has no business reading. It is
-  the other half of the refusal: exit `6` KEEPS the artifact as evidence, and an artifact on
-  disk is exactly what this command renders — so without the check the package laundered its
-  own verdict into an ordinary listing at exit `0`, one command later. Only a positive reading
-  of zero refuses; no sidecar, or a malformed one, renders as before. Zero `tool_calls` refuses on
-  its own, whatever `local_tool_calls` says, so no sidecar refused before that field existed
-  renders now.
+  the other half of the refusal: exits `6` and `3` KEEP the artifact as evidence, and an
+  artifact on disk is exactly what this command renders — so without the check the package
+  laundered its own verdict into an ordinary listing at exit `0`, one command later. Since
+  0.3.5 `local_tool_calls` counts successes, so a run whose every local call failed is
+  refused too; the reader exits `6` for it, having no environment status, and its banner
+  says the review exited `3`. Only a positive reading of zero refuses; no sidecar, or a
+  malformed one, renders as before. Zero `tool_calls` refuses on its own, whatever
+  `local_tool_calls` says, so no sidecar refused before that field existed renders now. A
+  0.3.3 or 0.3.4 sidecar counted failed attempts in `local_tool_calls` and is not
+  reinterpreted, so one from a run whose every call failed still renders — a known gap,
+  asserted in `test_a_0_3_4_sidecar_that_counted_failed_attempts_still_renders`.
 - **One schema ships with this package while the other is read from the plugin.**
   `findings-schema.json` is the plugin's file: this package reads it at run time, hashes it into
   provenance, and has no authority to change what a finding means. `verdicts-schema.json` is

@@ -67,10 +67,11 @@ reading them.
 
 A REFUSAL HAS TO SURVIVE BEING HANDED ON
 ----------------------------------------
-The review commands refuse a run that made no local tool calls, keep the artifact as
-evidence, and exit 6. An artifact on disk is exactly what this command renders — so without
-the check in `main`, this package laundered its own refusal: the same findings came back as
-an ordinary listing at exit 0, one command later. Every output mode is refused, `--json`,
+The review commands refuse a run with no successful local tool call, keep the artifact as
+evidence, and exit 6 (no local call attempted) or 3 (every one failed). An artifact on disk
+is exactly what this command renders — so without the check in `main`, this package
+laundered its own refusal: the same findings came back as an ordinary listing at exit 0,
+one command later. Every output mode is refused, `--json`,
 `--return` and `--anchors` included; a programmatic caller is the one most likely to act on it
 unread.
 """
@@ -108,7 +109,10 @@ USAGE = (
 # Same vocabulary as the review commands, for the same reason: a caller has to tell "I asked
 # for this wrongly" from "the artifact is not usable" without string-matching stderr. The
 # vacuous-run code is READ FROM the review commands' own class rather than restated, because
-# it is the same verdict about the same run arriving one command later.
+# it is the same verdict about the same run arriving one command later. A run whose every
+# local call failed is refused with it too, although the review command exited 3 for it:
+# this command has no environment status, and to its caller both mean the same thing, that
+# nothing in the artifact is founded.
 EXIT_OK = 0
 EXIT_DATA = 1
 EXIT_USAGE = 2
@@ -192,8 +196,9 @@ exit status
      --verify-quotes without --return or without -C, --anchors without -C, -C without
      --verify-quotes or --anchors, or a -C that is missing, is not a directory, or names
      an unknown user
-  {EXIT_VACUOUS}  the artifact's provenance records a run that made no local tool calls;
-     nothing it reported is founded, so it is refused rather than rendered"""
+  {EXIT_VACUOUS}  the artifact's provenance records a run that made no local tool calls, or
+     none that succeeded; nothing it reported is founded, so it is refused rather than
+     rendered"""
 
 Finding = JSONObject
 
@@ -1312,13 +1317,21 @@ def refusal_banner(path: str, stats: validate.RunStats) -> str:
     uses, so the two cannot come to describe the same run differently.
     """
     sidecar = Path(path).with_name(Path(path).stem + validate.PROVENANCE_SUFFIX)
+    if stats.local_tool_attempts:
+        what = "none of whose local tool calls succeeded"
+        why = "no successful local call stands behind it"
+        status = errors.EnvError.exit_code
+    else:
+        what = "that made no local tool calls"
+        why = "the model never opened the diff"
+        status = EXIT_VACUOUS
     return (
         f"ce-persona-findings: refusing to render {path}\n"
-        f"  Its provenance records a run that made no local tool calls"
+        f"  Its provenance records a run {what}"
         f" ({validate.describe_run(stats)}),"
-        f"\n  so the model never opened the diff and nothing here is founded -- an empty findings"
+        f"\n  so {why} and nothing here is founded -- an empty findings"
         f"\n  array and a page of them equally. The review command already refused this run with"
-        f"\n  exit {EXIT_VACUOUS}; rendering it would launder that refusal one command later."
+        f"\n  exit {status}; rendering it would launder that refusal one command later."
         f"\n  The record, which is safe to read: {sidecar}"
     )
 

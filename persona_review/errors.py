@@ -61,6 +61,14 @@ class EnvError(AppError):
     event vocabulary has moved out from under this build — the wrapper can no longer count
     what a run did, which is a defect in the wrapper and must not be reported as one in the
     model (see VacuousRun).
+
+    And for a run that attempted local tool calls and had every one fail. No successful call
+    stands behind its answer, so it is refused like a vacuous run and its artifacts are kept
+    the same way, but the model tried: a provider that cannot start a command fails every
+    call identically, and blaming the model with 6, the status that invites a retry, would
+    be wrong on every run. A command that ran and exited non-zero counts as failed too, so
+    the refusal gives the counts and quotes what the first failure printed rather than
+    naming a cause.
     """
 
     exit_code = 3
@@ -91,7 +99,7 @@ class RunTimeout(AppError):
 
 
 class VacuousRun(AppError):
-    """The provider answered without making a single local tool call. It inspected nothing.
+    """The provider answered without attempting a single local tool call. It inspected nothing.
 
     Not a gate failure: the answer can be perfectly schema-valid, and usually is, because
     schema-constrained decoding produces a well-formed object whether or not the model read
@@ -103,9 +111,10 @@ class VacuousRun(AppError):
     is fine, and the same command may well work next time.
 
     Reached only when the wrapper positively understood the stream and counted nothing in it.
-    A stream it could not read, or one carrying event kinds it does not recognize, is an
-    EnvError instead — "the model inspected nothing" would be a false statement told
-    identically on every run, about the one component that was working.
+    A stream it could not read, one carrying event kinds it does not recognize, or one whose
+    local calls were all attempted and all failed, is an EnvError instead — "the model
+    inspected nothing" would be a false statement told identically on every run, about the
+    one component that was working.
     """
 
     exit_code = 6
@@ -145,8 +154,10 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
         EnvError.exit_code,
         (
             "environment error: {runner}, git or the plugin assets are missing,",
-            "CE_PERSONA_RUN_DIR cannot be created, or {runner}'s event vocabulary",
-            "changed and this build can no longer count what a run did",
+            "CE_PERSONA_RUN_DIR cannot be created, {runner}'s event vocabulary",
+            "changed and this build can no longer count what a run did, or the model",
+            "attempted local tool calls and none succeeded (stderr gives the counts),",
+            "so its {answer} attest to nothing and the artifacts are kept as evidence",
         ),
     ),
     (RunnerError.exit_code, ("{runner} itself exited non-zero",)),
@@ -154,8 +165,8 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         VacuousRun.exit_code,
         (
-            "the model answered without making a single local tool call: it inspected",
-            "nothing, so its {answer} -- empty or not -- attest to nothing",
+            "the model answered without attempting a single local tool call: it",
+            "inspected nothing, so its {answer} -- empty or not -- attest to nothing",
             "(through codex, a local call is a shell command or a file change or patch;",
             "a web search, MCP call or function call is not one)",
         ),
