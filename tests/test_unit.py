@@ -158,8 +158,8 @@ STATS = validate.RunStats(
 
 
 # What a grok `tool_result` carries in its `content`, one per shape seen in real grok-4.7
-# runs (gate-P2 and gate-Q3 events): every key and value type as recorded, with local paths
-# and long payloads shortened, because the recorded ones are a home directory and another
+# runs: every key and value type as recorded, with local paths, commit ids and long payloads
+# replaced by neutral ones, because the recorded ones name a home directory and another
 # repository's code.
 def _octets(text: str) -> list[int]:
     return list(text.encode("utf-8"))
@@ -185,7 +185,7 @@ def bash_report(exit_code: int | None, output: str) -> dict[str, Any]:
         "output": _octets(output),
         "output_for_prompt": f"exit: {exit_code}\n{output}",
         "exit_code": exit_code,
-        "command": "git diff --stat 3243e36..HEAD",
+        "command": "git diff --stat 0a1b2c3..HEAD",
         "truncated": False,
         "signal": None,
         "timed_out": False,
@@ -197,11 +197,11 @@ def bash_report(exit_code: int | None, output: str) -> dict[str, Any]:
 
 
 BASH_OK = bash_report(0, " f.py | 2 +-\n 1 file changed\n")
-# gate-P2 line 39: a command that ran and exited 2, returned with `is_error` false.
+# A command that ran and exited 2, returned with `is_error` false.
 BASH_FAILED = bash_report(
     2, "error: Failed to initialize cache at `/work/.cache/uv`\n  Caused by: failed to open file\n"
 )
-# gate-Q line 15: a search that matched nothing exits 1, like `rg`.
+# A search that matched nothing exits 1, like `rg`.
 GREP_NO_MATCH = {
     "type": "GrepSearch",
     "stdout": _octets(
@@ -212,7 +212,7 @@ GREP_NO_MATCH = {
     "match_count": 0,
     "file_matches": [],
 }
-# gate-P2 lines 41 and 49: moved to the background before anything came back.
+# A command moved to the background before anything came back.
 BACKGROUND_STARTED = {
     "type": "BackgroundTaskStarted",
     "task_id": "call-1",
@@ -227,8 +227,8 @@ BACKGROUND_STARTED = {
 }
 
 
-# A bookkeeping result (u55 gate-b2 grok events line 3): the plan the model wrote itself. It
-# has no exit code and no error, so it passes every result rule and inspected nothing.
+# A bookkeeping result: the plan the model wrote itself. It has no exit code and no error,
+# so it passes every result rule and inspected nothing.
 TODO_UPDATED: dict[str, Any] = {
     "type": "Todo",
     "TodosUpdated": {
@@ -245,7 +245,7 @@ SEARCH_REPLACE = {"type": "SearchReplace", "path": "/work/repo/f.py", "replaceme
 
 
 def task_output(status: str, exit_code: int | None, output: str) -> dict[str, Any]:
-    """gate-P2 lines 43 and 51: the background command's own report, under `Result`."""
+    """The background command's own report, under `Result`."""
     return {
         "type": "TaskOutput",
         "Result": {
@@ -356,22 +356,24 @@ CODEX_ONLY_SEARCHED = codex_stream(
     codex_item("item.completed", "web_search", "ws_2"),
 )
 
-# REAL STREAMS, verbatim: every line below is copied unchanged from a kept event stream,
-# keeping a subset of its lines. They are what the counting rule is proven on.
+# REAL STREAMS: every line below is copied from a kept event stream, keeping a subset of its
+# lines, with the reviewed repository's commit ids and file names and the thread ids replaced
+# by neutral values. Every key, value type, status, exit code and the runner's error text is
+# as recorded. They are what the counting rule is proven on.
 #
-# codex-cli 0.156.1 on a runner where no command could start (events-c156.jsonl lines 1-17,
-# 19, 20): five commands complete `failed` with exit code 1 beside two MCP calls, and the
-# run answered with an empty findings array that 0.3.4 passed at exit 0.
+# codex-cli 0.156.1 on a runner where no command could start: five commands complete
+# `failed` with exit code 1 beside two MCP calls, and the run answered with an empty
+# findings array that 0.3.4 passed at exit 0.
 C156_STREAM = r"""
-{"type":"thread.started","thread_id":"01a0e48d-0e98-74a1-b56f-3b332c076aa9"}
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000001"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll measure the diff, inspect each changed area and its surrounding code, then return the review as JSON."}}
 {"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
 {"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"rg --files -g AGENTS.md -g '\"'!vendor'\"' -g '\"'!node_modules'\"'\"","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
-{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
-{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
 {"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
 {"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'git status --short'","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
 {"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"The local command runner is failing before Git starts, so I haven’t been able to read the diff. I’m checking whether another available tool can expose the repository before I return a result."}}
@@ -380,32 +382,31 @@ C156_STREAM = r"""
 {"type":"item.started","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
 {"type":"item.completed","item":{"id":"item_8","type":"command_execution","command":"/bin/bash -c pwd","aggregated_output":"error building bubblewrap command: cannot establish app-server socket mount isolation\n","exit_code":1,"status":"failed"}}
 {"type":"item.completed","item":{"id":"item_7","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resource_templates","arguments":{},"result":{"content":[{"type":"text","text":"{\"resourceTemplates\":[]}"}],"structured_content":null},"error":null,"status":"completed"}}
-{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"{\"reviewer\":\"adversarial-reviewer\",\"findings\":[],\"residual_risks\":[\"Review incomplete: the command runner failed before Git started, so I could not read git diff d15e788cf8415673695f68c78976f0d1c382da83..HEAD or assess the changed code. An empty findings array does not indicate the change is safe.\"],\"testing_gaps\":[\"Could not inspect or run tests because the local command runner failed.\"]}"}}
+{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"{\"reviewer\":\"adversarial-reviewer\",\"findings\":[],\"residual_risks\":[\"Review incomplete: the command runner failed before Git started, so I could not read git diff a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD or assess the changed code. An empty findings array does not indicate the change is safe.\"],\"testing_gaps\":[\"Could not inspect or run tests because the local command runner failed.\"]}"}}
 {"type":"turn.completed","usage":{"input_tokens":110820,"cached_input_tokens":92288,"cache_write_input_tokens":0,"output_tokens":734,"reasoning_output_tokens":175}}
 """  # noqa: E501
 
-# codex-cli 0.152.1 on the same diff, working (events-c152m.jsonl lines 1-5, 12).
+# codex-cli 0.152.1 on the same diff, working.
 C152M_STREAM = r"""
-{"type":"thread.started","thread_id":"01a0e48d-d4a5-7ba0-b96d-7344eb7abcd9"}
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000002"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll size the diff, identify whether it changes any verification mechanism, then trace the changed components and their call sites before emitting the required JSON."}}
-{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --name-status d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --stat d15e788cf8415673695f68c78976f0d1c382da83..HEAD && git diff --name-status d15e788cf8415673695f68c78976f0d1c382da83..HEAD'","aggregated_output":"485\t0\t.github/workflows/ai-review-probe.yml\n32\t0\tprobe/ledger.py\n .github/workflows/ai-review-probe.yml | 485 ++++++++++++++++++++++++++++++++++\n probe/ledger.py                       |  32 +++\n 2 files changed, 517 insertions(+)\nA\t.github/workflows/ai-review-probe.yml\nA\tprobe/ledger.py\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD && git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD && git diff --name-status a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'git diff --numstat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD && git diff --stat a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD && git diff --name-status a1b2c3d4e5f60718293a4b5c6d7e8f9012345678..HEAD'","aggregated_output":"485\t0\tsrc/service.py\n32\t0\ttests/test_service.py\n src/service.py        | 485 ++++++++++++++++++++++++++++++++++\n tests/test_service.py |  32 +++\n 2 files changed, 517 insertions(+)\nA\tsrc/service.py\nA\ttests/test_service.py\n","exit_code":0,"status":"completed"}}
 {"type":"turn.completed","usage":{"input_tokens":134325,"cached_input_tokens":107008,"cache_write_input_tokens":0,"output_tokens":3356,"reasoning_output_tokens":1128}}
 """  # noqa: E501
 
-# A working review (gate-Q2 codex events lines 1, 2, 9, 12, 141, 142, 194, 199, 217): two
-# `rg` calls that ran and exited 1 and 2, both `failed` like the commands above that never
-# started, and one command that exited 0.
+# A working review: two `rg` calls that ran and exited 1 and 2, both `failed` like the
+# commands above that never started, and one command that exited 0.
 Q2_MIXED_STREAM = r"""
-{"type":"thread.started","thread_id":"01a0df66-73cf-7611-917e-992ab2d14406"}
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000003"}
 {"type":"turn.started"}
 {"type":"item.started","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
 {"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g AGENTS.md -g '\"'!node_modules'\"' -g '\"'!vendor'\"'\"","aggregated_output":"","exit_code":1,"status":"failed"}}
 {"type":"item.started","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
 {"type":"item.completed","item":{"id":"item_71","type":"command_execution","command":"/bin/zsh -lc \"rg -n 'def locate|def anchors|def _find|def _stream|def _search|span|candidates' persona_review/anchors.py\"","aggregated_output":"rg: persona_review/anchors.py: IO error for operation on persona_review/anchors.py: No such file or directory (os error 2)\n","exit_code":2,"status":"failed"}}
-{"type":"item.started","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 3243e36..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 3243e36..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"EXIT=0\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 0a1b2c3..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_98","type":"command_execution","command":"/bin/zsh -lc 'git diff --check 0a1b2c3..HEAD > /dev/null 2>&1; echo EXIT=$?'","aggregated_output":"EXIT=0\n","exit_code":0,"status":"completed"}}
 {"type":"turn.completed","usage":{"input_tokens":4559120,"cached_input_tokens":4356224,"cache_write_input_tokens":0,"output_tokens":18866,"reasoning_output_tokens":9988}}
 """  # noqa: E501
 
