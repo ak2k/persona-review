@@ -286,6 +286,26 @@ MUTATIONS: list[Mutation] = [
         "        if False:",
     ),
     Mutation(
+        # False for a search that ran and matched nothing, which fails the rule too.
+        "the exit-3 refusal claims nothing of the repository was read",
+        "persona_review/validate.py",
+        r'"not start and a call that ran and exited non-zero both count as failed, so no "\n'
+        r'                "successful local call stands behind anything the run reported; the '
+        r'evidence "\n                f"is \{provenance_out\}\."',
+        '"not start and a call that ran and exited non-zero both count as failed, and "\n'
+        '                "either way nothing of the repository was read, so nothing the run '
+        'reported is "\n                f"founded; the evidence is {provenance_out}."',
+    ),
+    Mutation(
+        "the exit-3 help row claims the run read nothing",
+        "persona_review/errors.py",
+        r'            "attempted local tool calls and none succeeded \(stderr gives the '
+        r'counts\),",\n            "so its \{answer\} attest to nothing and the artifacts are '
+        r'kept as evidence",',
+        '            "attempted local tool calls and none succeeded: it read nothing, so its",\n'
+        '            "{answer} attest to nothing, and the artifacts are kept as evidence",',
+    ),
+    Mutation(
         "the exit-3 refusal quotes nothing a codex call printed",
         "persona_review/validate.py",
         r'                    failure = _first_line\(item\.get\("aggregated_output"\)\)',
@@ -595,6 +615,12 @@ MUTATIONS: list[Mutation] = [
         "persona_review/findings.py",
         r"    if stats\.local_tool_attempts:",
         "    if False:",
+    ),
+    Mutation(
+        "the reader's exit-3 banner claims nothing of the repository was read",
+        "persona_review/findings.py",
+        r'        why = "no successful local call stands behind it"',
+        '        why = "nothing of the repository was read"',
     ),
     Mutation(
         "a zero local count beside a malformed total is read as a refusal",

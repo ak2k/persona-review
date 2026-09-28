@@ -37,11 +37,12 @@ ONE QUESTION ABOUT THE ANSWER, ONE ABOUT THE RUN
 ------------------------------------------------
 The schema rules judge what the model SAID. `run_stats` counts what it DID, from the event
 stream the wrapper already keeps, and `gate` refuses a run with zero successful local tool
-calls: a reviewer that never read a file cannot certify anything, and its findings are
-unfounded whether the array is empty or full. A web search, or a tool that does not say
-where it runs, is a call but not a local one; a local call that failed read nothing. A run
-that attempted no local call exits 6, and one whose every attempt failed exits 3, because
-only the first is the model's doing. Exactly zero is the threshold, with no configurable
+calls: a reviewer not shown to have read a file cannot certify anything, and its findings
+are unfounded whether the array is empty or full. A web search, or a tool that does not say
+where it runs, is a call but not a local one; a local call that failed shows no read either,
+since one that never started and one that ran and matched nothing look alike. A run that
+attempted no local call exits 6, and one whose every attempt failed exits 3, because only
+the first is the model's doing. Exactly zero is the threshold, with no configurable
 floor — "did this run inspect anything" has an answer, while "did it inspect enough" is a
 judgment this package is not entitled to make.
 
@@ -1055,8 +1056,8 @@ def refused_run(artifact: Path) -> RunStats | None:
     The reading counterpart to `write_provenance`, here so one module owns the sidecar's
     shape from both ends rather than two agreeing by memory.
 
-    This exists because a refusal has to survive being handed on. `gate` refuses a run that
-    read nothing — exit 6 when it attempted no local call, exit 3 when every one failed — and
+    This exists because a refusal has to survive being handed on. `gate` refuses a run with no
+    successful local call — exit 6 when it attempted none, exit 3 when every one failed — and
     keeps the artifact as evidence, and an artifact on disk is exactly what the retrieval
     command renders, cheerfully and at exit 0. The refusal was laundered by this package's
     own reader, so the reader has to be able to see it too.
@@ -1208,12 +1209,13 @@ def gate(
     findings_out.write_text(json.dumps(found, indent=1), encoding="utf-8")
     write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)
 
-    # A reviewer with ZERO successful local tool calls never read the diff, so it has no
-    # verdict to summarize: empty findings and a page of them are equally unfounded. A web
-    # search or an MCP call read something, but was not shown to read the repository, and a
-    # command that failed read nothing. Decided here, ahead of the summary the rest of this
-    # function builds — a gating caller reads only the status, and a line saying "0 findings"
-    # beside a status saying "refused" is the exact ambiguity being closed.
+    # A reviewer with ZERO successful local tool calls has shown no read of the diff, so it
+    # has no verdict to summarize: empty findings and a page of them are equally unfounded. A
+    # web search or an MCP call read something, but was not shown to read the repository, and
+    # a command that failed shows nothing either way, since one that never started and one
+    # that ran and matched nothing look alike. Decided here, ahead of the summary the rest of
+    # this function builds — a gating caller reads only the status, and a line saying "0
+    # findings" beside a status saying "refused" is the exact ambiguity being closed.
     #
     # Deliberately no retry here. Whether to spend another full-effort model run is the
     # calling agent's decision and its budget; this command's job is to refuse to certify,
@@ -1232,9 +1234,9 @@ def gate(
             raise errors.EnvError(
                 f"refusing to report {count} {noun} from a run none of whose local tool calls "
                 f"succeeded ({describe_run(stats)}); {_first_failure(stats)}. A call that could "
-                "not start and a call that ran and exited non-zero both count as failed, and "
-                "either way nothing of the repository was read, so nothing the run reported is "
-                f"founded; the evidence is {provenance_out}."
+                "not start and a call that ran and exited non-zero both count as failed, so no "
+                "successful local call stands behind anything the run reported; the evidence "
+                f"is {provenance_out}."
             )
         raise errors.VacuousRun(
             f"refusing to report {count} {noun} from a run that made no local tool calls "

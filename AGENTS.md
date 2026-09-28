@@ -149,15 +149,15 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   loudly and so no other test can be read as already covering it. "Found nothing" and
   "looked, then gave up" are indistinguishable without judging the transcript.
 
-  What is no longer in the hole: a run with **zero** successful local tool calls. It read
-  nothing of the repository — a web search or a tool that does not say where it runs proves
-  no read of the diff, and neither does a command that failed — so its findings are
-  unfounded whether the array is empty or full, and it exits with no summary line: `6` when
-  it attempted no local call, `3` when it attempted some and every one failed. Exactly zero,
-  with no configurable floor — "did this run inspect anything" has an answer, "did it
-  inspect enough" is a judgment this package is not entitled to make. The fixture for the
-  gap test therefore carries a tool call that succeeded, because without one it would be
-  testing the refusal instead.
+  What is no longer in the hole: a run with **zero** successful local tool calls. Nothing it
+  did shows a read of the repository — a web search or a tool that does not say where it
+  runs proves no read of the diff, and neither does a command that failed, whether it never
+  started or ran and matched nothing — so its findings are unfounded whether the array is
+  empty or full, and it exits with no summary line: `6` when it attempted no local call, `3`
+  when it attempted some and every one failed. Exactly zero, with no configurable floor —
+  "did this run inspect anything" has an answer, "did it inspect enough" is a judgment this
+  package is not entitled to make. The fixture for the gap test therefore carries a tool
+  call that succeeded, because without one it would be testing the refusal instead.
 - **A run whose every local call failed exits `3`, not `6`.** It looks like the same
   refusal told with the wrong status. It is not the model's doing: codex-cli 0.156.1 could
   not start a single command on one runner, and `6` is the status that blames the model and

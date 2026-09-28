@@ -58,7 +58,7 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `0` | schema-valid findings (an empty findings array is valid) |
 | `1` | the answer was not schema-valid findings — the gate refused |
 | `2` | usage error: bad arguments, unknown or markdown-only persona, bad `-C`, unresolvable `-b`, malformed `CE_PERSONA_*` value |
-| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, the runner's event vocabulary changed and this build can no longer count what a run did, or the model attempted local tool calls and none succeeded — it read nothing, and the artifacts are kept as evidence |
+| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, the runner's event vocabulary changed and this build can no longer count what a run did, or the model attempted local tool calls and none succeeded — stderr gives the counts and the first failure's output, and the artifacts are kept as evidence |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
 | `6` | the model answered without attempting a single local tool call — it inspected nothing. Through codex a local call is a `command_execution`, `local_shell_call`, `file_change` or `patch_apply` item; a web search, MCP call or function call is not one |

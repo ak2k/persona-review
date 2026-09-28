@@ -1319,7 +1319,7 @@ def refusal_banner(path: str, stats: validate.RunStats) -> str:
     sidecar = Path(path).with_name(Path(path).stem + validate.PROVENANCE_SUFFIX)
     if stats.local_tool_attempts:
         what = "none of whose local tool calls succeeded"
-        why = "nothing of the repository was read"
+        why = "no successful local call stands behind it"
         status = errors.EnvError.exit_code
     else:
         what = "that made no local tool calls"

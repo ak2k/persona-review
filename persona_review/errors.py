@@ -62,12 +62,13 @@ class EnvError(AppError):
     what a run did, which is a defect in the wrapper and must not be reported as one in the
     model (see VacuousRun).
 
-    And for a run that attempted local tool calls and had every one fail. It read nothing,
-    so it is refused like a vacuous run and its artifacts are kept the same way, but the
-    model tried: a provider that cannot start a command fails every call identically, and
-    blaming the model with 6, the status that invites a retry, would be wrong on every run.
-    A command that ran and exited non-zero counts as failed too, so the refusal quotes what
-    the first failure printed rather than naming a cause.
+    And for a run that attempted local tool calls and had every one fail. No successful call
+    stands behind its answer, so it is refused like a vacuous run and its artifacts are kept
+    the same way, but the model tried: a provider that cannot start a command fails every
+    call identically, and blaming the model with 6, the status that invites a retry, would
+    be wrong on every run. A command that ran and exited non-zero counts as failed too, so
+    the refusal gives the counts and quotes what the first failure printed rather than
+    naming a cause.
     """
 
     exit_code = 3
@@ -155,8 +156,8 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
             "environment error: {runner}, git or the plugin assets are missing,",
             "CE_PERSONA_RUN_DIR cannot be created, {runner}'s event vocabulary",
             "changed and this build can no longer count what a run did, or the model",
-            "attempted local tool calls and none succeeded: it read nothing, so its",
-            "{answer} attest to nothing, and the artifacts are kept as evidence",
+            "attempted local tool calls and none succeeded (stderr gives the counts),",
+            "so its {answer} attest to nothing and the artifacts are kept as evidence",
         ),
     ),
     (RunnerError.exit_code, ("{runner} itself exited non-zero",)),

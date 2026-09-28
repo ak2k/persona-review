@@ -282,7 +282,7 @@ def grok_tool_call(
 ) -> str:
     """A call and, unless `report` is None, the result that answers it.
 
-    Answered by default, because a call with no successful result read nothing and the run
+    Answered by default, because a call with no successful result does not count and the run
     behind it is refused: a fixture standing in for a real review has to carry one.
     """
     call = json.dumps(
@@ -1191,7 +1191,14 @@ class TestDriftIsNotBlamedOnTheModel:
 class TestTheGateRefusesARunThatInspectedNothing:
     """Zero tool calls is not a small number of tool calls; it is no review at all."""
 
-    def _gate(self, tmp: Path, answer: str, events: str) -> tuple[int, str, str]:
+    def _gate(
+        self,
+        tmp: Path,
+        answer: str,
+        events: str,
+        mode: str = "object",
+        evidence_mode: str = "codex-items",
+    ) -> tuple[int, str, str]:
         (tmp / "answer.txt").write_text(answer, encoding="utf-8")
         (tmp / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
         (tmp / "events.jsonl").write_text(events, encoding="utf-8")
@@ -1201,13 +1208,13 @@ class TestTheGateRefusesARunThatInspectedNothing:
                 code = validate.gate(
                     answer_file=tmp / "answer.txt",
                     schema_path=tmp / "schema.json",
-                    mode="object",
+                    mode=mode,
                     findings_out=tmp / "out.json",
                     provenance_out=tmp / "out-provenance.json",
                     prov_pairs=[],
                     prov_files={},
                     evidence=validate.Evidence(
-                        events_file=tmp / "events.jsonl", mode="codex-items", duration_s=4.5
+                        events_file=tmp / "events.jsonl", mode=evidence_mode, duration_s=4.5
                     ),
                     label="ce-persona",
                 )
@@ -1325,6 +1332,44 @@ class TestTheGateRefusesARunThatInspectedNothing:
             code, _, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(started))
         assert code == 3, message
         assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
+
+    @pytest.mark.parametrize(
+        ("mode", "evidence_mode", "stream"),
+        [
+            # `rg` that ran, searched the tree and matched nothing: exit 1, nothing printed.
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item("item.completed", "command_execution", exit_code=1, status="failed")
+                ),
+            ),
+            # grok's own search, reporting no matches the same way.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("grep", GREP_NO_MATCH)
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+            ),
+        ],
+        ids=["codex", "grok"],
+    )
+    def test_a_search_that_matched_nothing_is_not_told_as_nothing_read(
+        self, mode: str, evidence_mode: str, stream: str
+    ):
+        # The search did read the tree. It fails the rule like a command that never started,
+        # because the two cannot be told apart, so the refusal says what is known -- no local
+        # call succeeded, and how many were made -- and nothing about what was read.
+        answer = EMPTY_EXAMPLE if mode == "object" else stream
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, stream, mode, evidence_mode)
+        assert code == 3, message
+        assert out == ""
+        assert "none of whose local tool calls succeeded" in message, message
+        assert "(1 local, 0 succeeded)" in message, message
+        assert re.search(r"\bread\b", message) is None, message
 
     def test_a_stream_this_build_cannot_count_leaves_no_artifact_behind(self):
         # Drift is decided BEFORE anything is written, unlike the vacuous refusal: there is no
@@ -1542,6 +1587,9 @@ class TestARefusalSurvivesBeingHandedOn:
         assert "none of whose local tool calls succeeded" in banner, banner
         assert "(5 local, 0 succeeded)" in banner, banner
         assert "exit 3;" in banner and "exit 6" not in banner, banner
+        # A search that ran and matched nothing is refused the same way, so the banner makes
+        # no claim about what was read.
+        assert "was read" not in banner and "read nothing" not in banner, banner
 
     @pytest.mark.parametrize(
         "stats",
@@ -5175,6 +5223,13 @@ class TestTheExitTableSpeaksTheFlowsWords:
         assert "  1   the answer was not schema-valid findings" in rendered
         assert "  2   usage error: bad arguments, unknown or markdown-only persona," in rendered
         assert "nothing, so its findings -- empty or not -- attest to nothing" in rendered
+
+    def test_the_exit_3_row_claims_only_that_no_local_call_succeeded(self):
+        # A search that ran and matched nothing reaches this row too, so "it read nothing"
+        # would be false for it.
+        row = " ".join(dict(errors.EXIT_TABLE)[errors.EnvError.exit_code])
+        assert "none succeeded" in row, row
+        assert re.search(r"\bread\b", row) is None, row
 
     def test_the_validate_rendering_swaps_the_nouns_and_nothing_else(self):
         rendered = errors.render_exit_table("grok", errors.VALIDATE_WORDS)

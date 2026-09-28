@@ -222,9 +222,9 @@ sys.exit(spec.get("exit", 0))
 
 
 # One tool call that succeeded, in each provider's own event vocabulary. A stream WITHOUT one
-# is a run that inspected nothing, which the wrapper refuses — so a fixture standing in for a
-# real review has to carry one, and the fixtures that deliberately omit it are testing the
-# refusal rather than forgetting to be realistic.
+# is a run with no successful local call, which the wrapper refuses — so a fixture standing
+# in for a real review has to carry one, and the fixtures that deliberately omit it are
+# testing the refusal rather than forgetting to be realistic.
 #
 # Both shapes are copied from real runs: grok 1.0.13 and grok-4.7 (a `tool_use` content block
 # inside an assistant message, answered by a `tool_result` block inside a user message) and
@@ -523,9 +523,9 @@ class Harness:
     ):
         """Spec a stub that returns verdicts through this provider's own channel.
 
-        A TOOL CALL by default, for the reason `good_answer` carries one: a validator that
-        inspected nothing is refused, so a fixture without one would put every test built on
-        it against the refusal path by accident.
+        A TOOL CALL by default, for the reason `good_answer` carries one: a validator with no
+        successful local call is refused, so a fixture without one would put every test built
+        on it against the refusal path by accident.
         """
         if provider == "grok":
             self.set_spec(stdout=grok_stream(payload, tool_call=tool_call), **extra)
@@ -921,7 +921,8 @@ class TestVacuousRuns(Harness):
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_a_run_whose_every_local_call_failed_exits_3_at_both_ends(self, provider: str):
         # codex-cli 0.156.1 could not start one command, and 0.3.4 passed its empty answer at
-        # exit 0. It tried and read nothing: not the model's fault, so not 6, and not clean.
+        # exit 0. It tried and no call succeeded: not the model's fault, so not 6, and not
+        # clean.
         proc = self.review_failed(provider)
         assert proc.returncode == 3, proc.stdout + proc.stderr
         assert proc.stdout.strip() == "", proc.stdout
