@@ -43,7 +43,7 @@
           # the login they already have rather than an API key this package would need.
           persona-review = python.pkgs.buildPythonApplication {
             pname = "persona-review";
-            version = "0.3.5";
+            version = "0.3.6";
             pyproject = true;
             src = ./.;
 
