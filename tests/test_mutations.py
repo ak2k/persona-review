@@ -274,13 +274,7 @@ MUTATIONS: list[Mutation] = [
         # The c156 incident: every command failed, all five counted, exit 0 on nothing read.
         "a codex command counts whatever its exit code",
         "persona_review/validate.py",
-        r'        return _whole_number\(item\.get\("exit_code"\)\) == 0',
-        "        return True",
-    ),
-    Mutation(
-        "a codex file change counts whatever its status",
-        "persona_review/validate.py",
-        r'    return item\.get\("status"\) == "completed"',
+        r'    return _whole_number\(item\.get\("exit_code"\)\) == 0',
         "    return True",
     ),
     Mutation(
@@ -361,28 +355,42 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "web_search is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "web_search",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "web_search",\n    }\n)',
     ),
     Mutation(
         # An MCP server may be remote; a run whose only calls went to one has not been shown
         # to have read the tree, and counting it local passes it silently.
         "mcp_tool_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "mcp_tool_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "mcp_tool_call",\n    }\n)',
     ),
     Mutation(
         "function_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "function_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "function_call",\n    }\n)',
     ),
     Mutation(
         "custom_tool_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "custom_tool_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "custom_tool_call",\n    }\n)',
+    ),
+    Mutation(
+        # A write changes the tree without showing it was read; a run that only wrote
+        # attempted no read and is the model's doing.
+        "a codex file change is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "file_change",\n    }\n)',
+    ),
+    Mutation(
+        "a codex patch is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "patch_apply",\n    }\n)',
     ),
     Mutation(
         # The id-less arm carries the local tally too; without it an id-less local call
@@ -532,7 +540,7 @@ MUTATIONS: list[Mutation] = [
         # tree-reading kind, and every run then exits 6: the outage the check exists to stop.
         "the drift recovery stops naming the local-kind list",
         "persona_review/validate.py",
-        r'            "A kind that reads or edits the working tree also goes in "\n'
+        r'            "A kind that reads the working tree also goes in "\n'
         r'            "validate\.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this '
         r'error "\n'
         r'            "and every run then exits 6\."\n',

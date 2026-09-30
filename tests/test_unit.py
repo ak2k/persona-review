@@ -349,18 +349,22 @@ def grok_result(**over: Any) -> str:
     return json.dumps(event)
 
 
+# Tool kinds that change the working tree. A write does not show the tree was read.
+WRITE_KINDS = ["file_change", "patch_apply"]
+
+
 def codex_item(kind: str, item_type: str, ident: str | None = "item_1", **fields: Any) -> str:
-    """One codex item event. A completed local item SUCCEEDS unless `fields` say otherwise,
+    """One codex item event. A completed command SUCCEEDS unless `fields` say otherwise,
     because every completed command in a real stream carries an exit code: 0 when it worked.
+    A completed write carries status "completed", as a real one does.
     """
     item: dict[str, Any] = {"type": item_type}
     if ident is not None:
         item["id"] = ident
-    if kind == "item.completed" and item_type in validate.CODEX_LOCAL_TOOL_ITEMS:
-        if item_type in validate.CODEX_COMMAND_ITEMS:
-            item.update(aggregated_output="", exit_code=0, status="completed")
-        else:
-            item.update(status="completed")
+    if kind == "item.completed" and item_type in validate.CODEX_COMMAND_ITEMS:
+        item.update(aggregated_output="", exit_code=0, status="completed")
+    elif kind == "item.completed" and item_type in WRITE_KINDS:
+        item.update(status="completed")
     item.update(fields)
     return json.dumps({"type": kind, "item": item})
 
@@ -884,16 +888,16 @@ class TestRunEvidence:
             stats = self._codex(codex_item("item.completed", kind, ident))
             assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), ident
 
-    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS + WRITE_KINDS)
     def test_a_kind_that_does_not_prove_the_tree_was_read_is_a_call_but_not_local(self, kind: str):
         stats = self._codex(codex_item("item.completed", kind, "item_1"))
         assert (stats.tool_calls, stats.local_tool_calls) == (1, 0)
 
-    def test_the_local_kinds_are_the_ones_that_act_on_the_working_directory(self):
+    def test_the_local_kinds_are_the_ones_that_read_the_working_directory(self):
         local = validate.CODEX_LOCAL_TOOL_ITEMS
-        assert local == {"command_execution", "file_change", "local_shell_call", "patch_apply"}
+        assert local == {"command_execution", "local_shell_call"}
         not_local = validate.CODEX_TOOL_ITEMS - local
-        assert not_local == set(NOT_LOCAL_KINDS)
+        assert not_local == set(NOT_LOCAL_KINDS) | set(WRITE_KINDS)
 
     def test_grok_counts_every_inspecting_call_as_local(self):
         # The argv disables grok's web tools, so no inspecting call left is one known to leave
@@ -1019,16 +1023,18 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._codex(codex_stream(codex_item("item.completed", kind, exit_code=0)))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
-    @pytest.mark.parametrize(
-        "kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS - validate.CODEX_COMMAND_ITEMS)
-    )
-    @pytest.mark.parametrize("status", ["failed", "declined", "in_progress", None])
-    def test_a_file_change_counts_only_when_completed(self, kind: str, status: str | None):
-        stats = self._codex(codex_stream(codex_item("item.completed", kind, status=status)))
-        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_a_completed_write_is_a_tool_call_and_never_a_local_one(self, kind: str):
+        # Grok's edits are skipped for the same reason: changing the tree shows no read of it.
+        stats = self._codex(
+            codex_stream(codex_item("item.started", kind), codex_item("item.completed", kind))
+        )
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (1, 0, 0)
 
-    def test_the_command_kinds_are_local_kinds(self):
-        assert validate.CODEX_COMMAND_ITEMS < validate.CODEX_LOCAL_TOOL_ITEMS
+    def test_every_local_kind_succeeds_by_exit_code(self):
+        # A local kind is judged by its exit code alone, so one that carries none would never
+        # succeed: adding such a kind means giving it a rule in `_codex_succeeded` first.
+        assert validate.CODEX_COMMAND_ITEMS == validate.CODEX_LOCAL_TOOL_ITEMS
 
     def test_a_call_reported_complete_twice_succeeds_once(self):
         # So the succeeded count never exceeds the attempts it is a part of.
@@ -1295,6 +1301,18 @@ class TestDriftIsNotBlamedOnTheModel:
             )
         assert "shell_call_v2" in str(caught.value)
 
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_a_completed_write_beside_a_renamed_kind_is_still_drift(self, kind: str):
+        # A write is no local attempt, so it cannot vouch for the vocabulary either.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(
+                codex_stream(
+                    codex_item("item.completed", kind, "item_1"),
+                    codex_item("item.completed", "shell_call_v2", "item_2"),
+                )
+            )
+        assert "shell_call_v2" in str(caught.value) and "drift" in str(caught.value)
+
     def test_a_recognised_kind_alongside_them_is_still_a_review(self):
         # The control that keeps the check from firing on every mixed stream: one kind we do
         # understand is evidence the vocabulary still overlaps ours, so this is not drift.
@@ -1395,7 +1413,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert record["run_stats"]["tool_calls"] == 2
         assert record["run_stats"]["local_tool_calls"] == 0
 
-    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS + WRITE_KINDS)
     def test_a_run_whose_only_calls_are_not_local_is_refused(self, kind: str):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, message = self._gate(
@@ -1466,6 +1484,23 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert out == ""
         assert "none of whose local tool calls succeeded" in message, message
         assert "drift" not in message, message
+
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_failed_commands_beside_a_completed_write_exit_3(self, kind: str):
+        # The write is the one call that completed, and it read nothing.
+        failed = codex_item(
+            "item.completed",
+            "command_execution",
+            exit_code=1,
+            status="failed",
+            aggregated_output="rg: f.py: No such file or directory (os error 2)\n",
+        )
+        wrote = codex_item("item.completed", kind, "item_2")
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(failed, wrote))
+        assert code == 3, message
+        assert out == ""
+        assert "2 tool calls (1 local, 0 succeeded)" in message, message
 
     def test_a_run_whose_local_calls_never_finished_says_so(self):
         started = codex_item("item.started", "command_execution", exit_code=None)

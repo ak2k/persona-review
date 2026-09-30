@@ -616,27 +616,27 @@ CODEX_TOOL_ITEMS = frozenset(
     }
 )
 
-# The kinds that act on the working directory by what they are, which is what the refusal
+# The kinds that can read the working directory by what they are, which is what the refusal
 # turns on. Listed rather than derived from `CODEX_TOOL_ITEMS`, so a kind added there is not
 # local until someone decides it is.
 #
 # `web_search` reads the internet. `function_call`, `custom_tool_call` and `mcp_tool_call`
-# name a tool without saying where it runs, so one of them may be a remote server's. None
-# of them proves the tree was read, so they count in `tool_calls` and not here. A codex
-# build that does read the tree through one of them is then refused visibly, with exit 6,
-# rather than an MCP-only run being passed silently.
+# name a tool without saying where it runs, so one of them may be a remote server's.
+# `file_change` and `patch_apply` write to the tree, and a write shows no read of it, as
+# grok's edits do not. None of them proves the tree was read, so they count in `tool_calls`
+# and not here. A codex build that does read the tree through one of them is then refused
+# visibly, with exit 6, rather than an MCP-only or edit-only run being passed silently.
 CODEX_LOCAL_TOOL_ITEMS = frozenset(
     {
         "command_execution",
-        "file_change",
         "local_shell_call",
-        "patch_apply",
     }
 )
 
-# The local kinds that succeed by exit code. Every other local kind succeeds by its status,
-# because a file change has no exit code to read. Verified against codex-cli 0.152.1 and
-# 0.156.1: every completed `command_execution` carries an integer `exit_code`.
+# The local kinds that succeed by exit code, which is every one: `_codex_succeeded` reads
+# nothing else, so a local kind that carries no exit code needs its own rule there first.
+# Verified against codex-cli 0.152.1 and 0.156.1: every completed `command_execution` carries
+# an integer `exit_code`.
 CODEX_COMMAND_ITEMS = frozenset({"command_execution", "local_shell_call"})
 
 # Kinds this wrapper knows about and deliberately does not count: the model talking to
@@ -815,11 +815,9 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     )
 
 
-def _codex_succeeded(item_kind: str, item: JSONObject) -> bool:
+def _codex_succeeded(item: JSONObject) -> bool:
     """Whether a local item's `item.completed` reports that it ran and worked."""
-    if item_kind in CODEX_COMMAND_ITEMS:
-        return _whole_number(item.get("exit_code")) == 0
-    return item.get("status") == "completed"
+    return _whole_number(item.get("exit_code")) == 0
 
 
 def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
@@ -875,7 +873,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             # `status` "in_progress", whatever the call goes on to do.
             if not is_local or kind != "item.completed":
                 continue
-            if not _codex_succeeded(item_kind, item):
+            if not _codex_succeeded(item):
                 if failure is None:
                     failure = _first_line(item.get("aggregated_output"))
             elif not isinstance(ident, str):
@@ -910,7 +908,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             f"does not recognize: {', '.join(sorted(unknown))}. That is provider CLI drift, "
             "not model behavior, and no run through codex can be believed until each kind "
             "is added to validate.CODEX_TOOL_ITEMS. "
-            "A kind that reads or edits the working tree also goes in "
+            "A kind that reads the working tree also goes in "
             "validate.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this error "
             "and every run then exits 6."
         )

@@ -955,6 +955,70 @@ class TestVacuousRuns(Harness):
         stats = json.loads(self.provenance("codex").read_text(encoding="utf-8"))["run_stats"]
         assert (stats["local_tool_attempts"], stats["local_tool_calls"]) == (3, 1), stats
 
+    def _codex_calls(self, *items: dict[str, Any]) -> str:
+        """codex's stream with these items completing after the turn starts."""
+        turn = json.dumps({"type": "turn.started"}) + "\n"
+        calls = "".join(json.dumps({"type": "item.completed", "item": i}) + "\n" for i in items)
+        return codex_stream().replace(turn, turn + calls, 1)
+
+    # A completed file change, in codex's own shape.
+    WROTE = {
+        "id": "item_2",
+        "type": "file_change",
+        "changes": [{"path": "/w/f.py", "kind": "update"}],
+        "status": "completed",
+    }
+
+    def test_a_codex_run_that_only_wrote_attempted_no_local_call(self):
+        # An edit changes the tree without showing it was read.
+        self.set_spec(stdout=self._codex_calls(self.WROTE), last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 6, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "1 tool call (0 local)" in proc.stderr, proc.stderr
+
+    def test_a_codex_run_whose_commands_failed_beside_a_write_exits_3(self):
+        failed = {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "rg -n bill f.py",
+            "aggregated_output": "rg: f.py: No such file or directory (os error 2)\n",
+            "exit_code": 2,
+            "status": "failed",
+        }
+        self.set_spec(stdout=self._codex_calls(failed, self.WROTE), last=ANSWER)
+        proc = self.review("codex", "adversarial-reviewer")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "2 tool calls (1 local, 0 succeeded)" in proc.stderr, proc.stderr
+
+    def test_a_grok_run_whose_only_result_holds_no_object_exits_3(self):
+        # `is_error` false beside content that reports nothing to judge: attempted, and no
+        # success shown.
+        call: dict[str, Any] = {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "run_terminal_command",
+            "input": {},
+        }
+        result = {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "command not found",
+            "is_error": False,
+        }
+        answered = (
+            json.dumps({"type": "assistant", "message": {"content": [call]}})
+            + "\n"
+            + json.dumps({"type": "user", "message": {"role": "user", "content": [result]}})
+        )
+        self.set_spec(stdout=grok_stream(ANSWER, tool_call=True, call=answered))
+        proc = self.review("grok", "adversarial-reviewer")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", proc.stdout
+        assert "1 tool call (1 local, 0 succeeded)" in proc.stderr, proc.stderr
+        assert "'command not found'" in proc.stderr, proc.stderr
+
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_the_reader_will_not_render_the_artifact_the_review_refused(self, provider: str):
         # THE LAUNDERING ROUTE. exit 6 keeps the artifact as evidence, and an artifact on
