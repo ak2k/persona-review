@@ -497,10 +497,13 @@ def from_grok_events(text: str, key: str = "findings") -> Artifact:
 class RunStats:
     """What a run DID, as opposed to what it said.
 
-    `local_tool_calls` is the field that gates: the calls that acted on the machine the
-    review ran on, which is where the repository is, AND succeeded. A run whose only calls
-    were web searches read the internet and not the diff, and a command that could not start
-    read nothing at all, so neither has certified anything. `local_tool_attempts` is every
+    `local_tool_calls` is the field that gates: the calls that can read the machine the
+    review ran on, which is where the repository is, AND that the stream shows succeeded. A
+    run whose only calls were web searches read the internet and not the diff, one whose only
+    calls were edits wrote to the tree without reading it, and a command that could not start
+    read nothing at all, so none of them has certified anything. A call counts only when its
+    id pairs it with its outcome unambiguously: an id two calls share, or one reported both
+    succeeding and failing, counts for none of them. `local_tool_attempts` is every
     local call, succeeded or not, and it is what tells the two refusals apart: none attempted
     is the model's doing, every one failing is not. `tool_calls` is every call, local or
     not, recorded so the refusal can say what the run did instead. All three are ints when
