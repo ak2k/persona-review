@@ -165,6 +165,10 @@ def _octets(text: str) -> list[int]:
     return list(text.encode("utf-8"))
 
 
+def _without(report: dict[str, Any], key: str) -> dict[str, Any]:
+    return {k: v for k, v in report.items() if k != key}
+
+
 READ_FILE = {
     "type": "ReadFile",
     "FileContent": {
@@ -1073,6 +1077,10 @@ class TestACallCountsOnlyIfItSucceeded:
             ({"type": "TaskOutput", "MultiResult": {"results": {"exit_code": 0}}}, 0),
             ({"type": "TaskOutput", "MultiResult": {"results": [{"exit_code": "0"}]}}, 0),
             ({"type": "TaskOutput", "MultiResult": [{"exit_code": 0}]}, 0),
+            (task_outputs(("failed", 0)), 0),
+            (task_outputs(("failed", 0), ("completed", 0)), 1),
+            ({"type": "TaskOutput", "MultiResult": {"results": [{"exit_code": 0}]}}, 1),
+            ({"type": "TaskOutput", "MultiResult": {"results": [{"status": "completed"}]}}, 0),
         ],
         ids=[
             "all-exited-0",
@@ -1084,14 +1092,82 @@ class TestACallCountsOnlyIfItSucceeded:
             "results-not-a-list",
             "exit-code-not-a-number",
             "batch-not-an-object",
+            "exited-0-but-failed",
+            "exited-0-but-failed-beside-one-completed",
+            "exited-0-without-a-status",
+            "completed-without-an-exit-code",
         ],
     )
-    def test_a_batch_poll_counts_only_when_one_of_its_commands_exited_0(
+    def test_a_batch_poll_counts_only_when_one_of_its_commands_completed_with_exit_0(
         self, report: dict[str, Any], succeeded: int
     ):
         # No status or exit code on the outer object: reading only that counted a poll of
-        # commands that all failed as a successful read.
+        # commands that all failed as a successful read. A child needs both halves, an
+        # `exit_code` of 0 and no status other than "completed".
         stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "command not found",
+            json.dumps([{"type": "text", "text": "x"}]),
+            "",
+            json.dumps("oops"),
+            [{"type": "text", "text": "x"}],
+        ],
+        ids=["plain-string", "json-array", "empty-string", "json-string", "raw-list"],
+    )
+    def test_a_grok_result_counts_only_when_its_content_is_a_json_object(self, content: Any):
+        # `is_error` false beside content that reports nothing: no object, so no status and
+        # no exit code to read. An empty list of reports used to pass every rule on it.
+        call = grok_tool_call("run_terminal_command", None)
+        block: dict[str, Any] = {"type": "tool_result", "tool_use_id": "toolu_run_terminal_command"}
+        block.update(content=content, is_error=False)
+        answer = json.dumps({"type": "user", "message": {"role": "user", "content": [block]}})
+        stats = self._grok(call, answer)
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        # The control: the same call, answered with an object reporting exit code 0.
+        stats = self._grok(grok_tool_call("run_terminal_command", BASH_OK))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            # A status, and no exit code to fail on: at the top, and in a background
+            # command's own report.
+            ("run_terminal_command", {**_without(BASH_OK, "exit_code"), "status": "failed"}, 0),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput", "Result": {"task_id": "call-1", "status": "failed"}},
+                0,
+            ),
+            # A status grok has never reported is not taken for success.
+            ("run_terminal_command", {**BASH_OK, "status": "succeeded"}, 0),
+            ("read_file", {**READ_FILE, "status": None}, 0),
+            # The two a report may carry and still count.
+            ("run_terminal_command", {**BASH_OK, "status": "completed"}, 1),
+            ("read_file", READ_FILE, 1),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput", "Result": {"task_id": "call-1", "status": "completed"}},
+                1,
+            ),
+        ],
+        ids=[
+            "failed-no-exit-code",
+            "nested-failed-no-exit-code",
+            "unknown-status",
+            "null-status",
+            "completed",
+            "no-status",
+            "nested-completed-no-exit-code",
+        ],
+    )
+    def test_a_grok_report_counts_only_with_no_status_or_status_completed(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        stats = self._grok(grok_tool_call(name, report))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     def test_a_bookkeeping_call_beside_failed_commands_is_not_inspection(self):
@@ -2716,6 +2792,154 @@ class TestGateIsFailClosed:
         except validate.GateError:
             return
         assert "boolean" in names, f"True passed a field typed {names}"
+
+
+# The keys a grok report is judged by. Payloads never carry them, so only an arm below or a
+# spoiler decides them. `MultiResult` is among them: a batch poll counts when any one child
+# worked, a different rule, held by its own table in `TestACallCountsOnlyIfItSucceeded`.
+_GROK_JUDGED_KEYS = frozenset({"status", "exit_code", "Result", "MultiResult", "type"})
+_grok_payload: st.SearchStrategy[dict[str, Any]] = st.dictionaries(
+    st.text(max_size=8).filter(lambda key: key not in _GROK_JUDGED_KEYS), json_values, max_size=3
+)
+_grok_task_report: st.SearchStrategy[dict[str, Any]] = st.fixed_dictionaries(
+    {"status": st.just("completed"), "exit_code": st.just(0), "output": json_values}
+)
+
+# What an inspecting grok call returns when it worked, one arm per shape real grok-4.7
+# streams carry: a file read, a directory listing, a search and a command that exited 0, and
+# a background command's own report completing with 0.
+grok_successes: st.SearchStrategy[tuple[str, dict[str, Any]]] = st.one_of(
+    st.tuples(
+        st.just("read_file"),
+        st.fixed_dictionaries({"type": st.just("ReadFile"), "FileContent": _grok_payload}),
+    ),
+    st.tuples(
+        st.just("list_dir"),
+        st.fixed_dictionaries({"type": st.just("ListDir"), "Content": json_values}),
+    ),
+    st.tuples(
+        st.just("grep"),
+        st.fixed_dictionaries(
+            {"type": st.just("GrepSearch"), "exit_code": st.just(0), "stdout": json_values}
+        ),
+    ),
+    st.tuples(
+        st.just("run_terminal_command"),
+        st.fixed_dictionaries(
+            {"type": st.just("Bash"), "exit_code": st.just(0), "output": json_values}
+        ),
+    ),
+    st.tuples(
+        st.just("get_command_or_subagent_output"),
+        st.fixed_dictionaries({"type": st.just("TaskOutput"), "Result": _grok_task_report}),
+    ),
+)
+
+
+def _holds_no_object(text: str) -> bool:
+    try:
+        return not isinstance(json.loads(text), dict)
+    except ValueError:
+        return True
+
+
+# A result block without an `is_error` key at all.
+_ABSENT = object()
+
+# Each way a result fails to report success, built directly rather than asked of the code
+# under test: content holding no JSON object, a status other than "completed", an exit code
+# other than the integer 0, and an `is_error` other than false.
+grok_spoilers: st.SearchStrategy[tuple[str, str, Any]] = st.one_of(
+    st.tuples(
+        st.just("content"),
+        st.just("top"),
+        st.one_of(
+            json_values.filter(lambda value: not isinstance(value, dict)).map(json.dumps),
+            st.text(max_size=24).filter(_holds_no_object),
+            json_values.filter(lambda value: not isinstance(value, (dict, str))),
+        ),
+    ),
+    st.tuples(
+        st.just("status"),
+        st.sampled_from(["top", "nested"]),
+        st.one_of(
+            st.text(max_size=12).filter(lambda status: status != "completed"),
+            st.sampled_from(["failed", "running", "succeeded", "Completed", None, 0, True, []]),
+        ),
+    ),
+    st.tuples(
+        st.just("exit_code"),
+        st.sampled_from(["top", "nested"]),
+        st.one_of(
+            st.integers().filter(lambda code: code != 0),
+            st.sampled_from([None, False, True, 0.0, "0", [0]]),
+        ),
+    ),
+    st.tuples(
+        st.just("is_error"), st.just("top"), st.sampled_from([True, None, 0, "false", _ABSENT])
+    ),
+)
+
+
+class TestAGrokResultCountsOnlyWhenItReportsSuccess:
+    """The success rule over generated results rather than the few shapes named above.
+
+    Both directions, because either alone is satisfied by a rule that is wrong the other way:
+    every real success shape counts, and every one of them stops counting when any single
+    rule is broken in it.
+    """
+
+    def _answered(self, name: str, content: Any, is_error: Any = False) -> validate.RunStats:
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": f"toolu_{name}",
+            "content": content,
+        }
+        if is_error is not _ABSENT:
+            block["is_error"] = is_error
+        lines = [
+            grok_tool_call(name, None),
+            json.dumps({"type": "user", "message": {"role": "user", "content": [block]}}),
+        ]
+        return validate.run_stats("grok-messages", validate.objects(lines), None)
+
+    @PROPERTY
+    @given(success=grok_successes, extra=_grok_payload, completed=st.booleans())
+    def test_every_real_success_shape_counts(
+        self, success: tuple[str, dict[str, Any]], extra: dict[str, Any], completed: bool
+    ):
+        name, report = success
+        report = {**extra, **report}
+        if completed:
+            report["status"] = "completed"
+        stats = self._answered(name, json.dumps(report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), report
+
+    @PROPERTY
+    @given(success=grok_successes, extra=_grok_payload, spoiler=grok_spoilers)
+    def test_a_success_with_any_one_rule_broken_does_not_count(
+        self,
+        success: tuple[str, dict[str, Any]],
+        extra: dict[str, Any],
+        spoiler: tuple[str, str, Any],
+    ):
+        name, report = success
+        report = {**extra, **report}
+        rule, where, value = spoiler
+        nested = report.get("Result")
+        nested_report = cast(dict[str, Any], nested) if isinstance(nested, dict) else None
+        target = nested_report if where == "nested" and nested_report is not None else report
+        content: Any = json.dumps(report)
+        is_error: Any = False
+        if rule == "content":
+            content = value
+        elif rule == "is_error":
+            is_error = value
+        else:
+            target[rule] = value
+            content = json.dumps(report)
+        stats = self._answered(name, content, is_error)
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0), (spoiler, content)
 
 
 version_names = st.text(alphabet="0123456789.-abz²", min_size=1, max_size=8)

@@ -554,9 +554,9 @@ class Evidence:
 # A call SUCCEEDED only when the provider reports that it ran and worked. Neither a
 # `failed` status nor a non-zero exit code separates a command that never started from one
 # that ran and found nothing, since both read the same; only exit code 0 says a command ran.
-# So a codex command counts on `exit_code` 0 and a grok call on a `tool_result` reporting no
-# error, no non-zero exit code and no command still running — or, for a poll of several
-# background commands, at least one that exited 0.
+# So a codex command counts on `exit_code` 0, and a grok call on a `tool_result` reporting no
+# error whose content is a JSON object carrying no status but "completed" and no exit code but
+# 0 — or, for a poll of several background commands, at least one that completed with 0.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
 # defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
@@ -592,6 +592,9 @@ GROK_NESTED_REPORT = "Result"
 # A poll of several background commands at once has no status or exit code of its own: each
 # command's report is in a list under this key's `results`.
 GROK_BATCH_REPORT = "MultiResult"
+
+# The one `status` a report may carry and still count; a report may also carry none.
+GROK_COMPLETED = "completed"
 
 # codex's `--json` stream is items rather than messages: one `item.started` and one
 # `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
@@ -684,34 +687,46 @@ def _grok_reports(block: JSONObject) -> list[JSONObject]:
     return [content, nested] if isinstance(nested, dict) else [content]
 
 
+def _grok_report_ok(report: JSONObject) -> bool:
+    """Whether one report says its call finished and, if it names an exit code, exited 0.
+
+    The status is an allowlist: grok reports "running" for a command it moved to the
+    background and "failed" for one that did not work, and a status it has never sent is not
+    taken for success. A null exit code is a command that has not finished.
+    """
+    if report.get("status", GROK_COMPLETED) != GROK_COMPLETED:
+        return False
+    return "exit_code" not in report or _whole_number(report["exit_code"]) == 0
+
+
 def _grok_succeeded(block: JSONObject) -> bool:
     """Whether a `tool_result` reports a call that ran and worked.
 
     `is_error` false alone is not that: grok returns a command that exited 2 with `is_error`
-    false and the exit code in the content, and a command moved to the background as
-    "running" before anything came back. A report carrying an `exit_code` must carry 0, and
-    null is a command that has not finished. A result with no exit code at all, a file read,
-    rests on `is_error`.
+    false and the exit code in the content. The content must hold a JSON object, because
+    content that is not one reports nothing to judge, and every report in it must pass
+    `_grok_report_ok`. A result with no status and no exit code, a file read, rests on
+    `is_error`.
 
-    A batch poll worked when any command in it exited 0: that one inspected something, and a
-    sibling still running or failed does not undo it. Any other batch shape fails closed.
+    A batch poll worked when any command in it completed with exit code 0: that one inspected
+    something, and a sibling still running or failed does not undo it. Any other batch shape
+    fails closed.
     """
     if block.get("is_error") is not False:
         return False
     reports = _grok_reports(block)
-    if reports and GROK_BATCH_REPORT in reports[0]:
+    if not reports:
+        return False
+    if GROK_BATCH_REPORT in reports[0]:
         batch = reports[0][GROK_BATCH_REPORT]
         results = batch.get("results") if isinstance(batch, dict) else None
         return isinstance(results, list) and any(
-            isinstance(child, dict) and _whole_number(child.get("exit_code")) == 0
+            isinstance(child, dict)
+            and _whole_number(child.get("exit_code")) == 0
+            and _grok_report_ok(child)
             for child in results
         )
-    for report in reports:
-        if report.get("status") == "running":
-            return False
-        if "exit_code" in report and _whole_number(report["exit_code"]) != 0:
-            return False
-    return True
+    return all(_grok_report_ok(report) for report in reports)
 
 
 def _grok_output(block: JSONObject) -> str:

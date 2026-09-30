@@ -424,14 +424,42 @@ MUTATIONS: list[Mutation] = [
         # grok returns a command that exited 2 with `is_error` false.
         "a grok command counts whatever its exit code",
         "persona_review/validate.py",
-        r'        if "exit_code" in report and _whole_number\(report\["exit_code"\]\) != 0:',
-        "        if False:",
+        r'    return "exit_code" not in report or _whole_number\(report\["exit_code"\]\) == 0',
+        "    return True",
     ),
     Mutation(
-        "a grok command still running counts",
+        # A command moved to the background reports "running" before anything came back.
+        "a grok report's status is not read",
         "persona_review/validate.py",
-        r'        if report\.get\("status"\) == "running":',
-        "        if False:",
+        r'    if report\.get\("status", GROK_COMPLETED\) != GROK_COMPLETED:',
+        "    if False:",
+    ),
+    Mutation(
+        # The denylist it replaced: "failed" with no exit code beside it counted.
+        "the grok status allowlist is a denylist of running again",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", GROK_COMPLETED\) != GROK_COMPLETED:',
+        '    if report.get("status") == "running":',
+    ),
+    Mutation(
+        # Content that is not a JSON object reports nothing, and an empty list of reports
+        # passed every rule on it.
+        "grok content that is not a JSON object counts",
+        "persona_review/validate.py",
+        r"    if not reports:\n        return False",
+        "    if not reports:\n        return True",
+    ),
+    Mutation(
+        "a batch poll's command that exited 0 counts whatever its status",
+        "persona_review/validate.py",
+        r"            and _grok_report_ok\(child\)\n",
+        "",
+    ),
+    Mutation(
+        "a batch poll's command counts without an exit code",
+        "persona_review/validate.py",
+        r'            and _whole_number\(child\.get\("exit_code"\)\) == 0\n',
+        "",
     ),
     Mutation(
         # A background command's own status and exit code arrive one level down.
@@ -445,7 +473,7 @@ MUTATIONS: list[Mutation] = [
         # it counted a poll of commands that all failed as a successful read.
         "a grok batch poll is judged by its outer object alone",
         "persona_review/validate.py",
-        r"    if reports and GROK_BATCH_REPORT in reports\[0\]:",
+        r"    if GROK_BATCH_REPORT in reports\[0\]:",
         "    if False:",
     ),
     Mutation(
