@@ -5341,7 +5341,8 @@ class TestTheValidatorBatch:
         assert "element 3 repeats #1" in str(caught.value)
         assert caught.value.exit_code == 2
 
-    @settings(max_examples=60)
+    # PROPERTY's settings: its lack of a deadline matters under a loaded build sandbox.
+    @settings(PROPERTY, max_examples=60)
     @given(numbers=st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=6))
     def test_a_batch_is_accepted_exactly_when_its_numbers_are_a_set(self, numbers: list[int]):
         # The property, over MULTISETS: uniqueness is the whole contract, because the
