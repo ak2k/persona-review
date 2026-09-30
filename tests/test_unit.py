@@ -1042,6 +1042,41 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._codex(codex_stream(done, done))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
+    def test_a_codex_id_carried_by_two_kinds_pairs_with_neither(self):
+        # A command's start and a write's completion are two calls, and neither is shown to
+        # have worked.
+        wrote = self._codex(
+            codex_stream(
+                codex_item("item.started", "command_execution", "i"),
+                codex_item("item.completed", "file_change", "i"),
+            )
+        )
+        assert (wrote.tool_calls, wrote.local_tool_attempts, wrote.local_tool_calls) == (2, 1, 0)
+        ran = self._codex(
+            codex_stream(
+                codex_item("item.started", "local_shell_call", "i"),
+                codex_item("item.completed", "command_execution", "i"),
+            )
+        )
+        assert (ran.tool_calls, ran.local_tool_attempts, ran.local_tool_calls) == (2, 2, 0)
+        searched = self._codex(
+            codex_stream(
+                codex_item("item.completed", "web_search", "i"),
+                codex_item("item.completed", "command_execution", "i"),
+            )
+        )
+        assert (searched.tool_calls, searched.local_tool_calls) == (2, 0)
+
+    @pytest.mark.parametrize("failed_first", [True, False])
+    def test_a_codex_id_completed_both_ways_counts_for_neither(self, failed_first: bool):
+        failed = codex_item(
+            "item.completed", "command_execution", "i", exit_code=1, status="failed"
+        )
+        worked = codex_item("item.completed", "command_execution", "i")
+        order = (failed, worked) if failed_first else (worked, failed)
+        stats = self._codex(codex_stream(*order))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
     def test_a_long_first_line_is_cut(self):
         long = codex_item(
             "item.completed", "command_execution", exit_code=1, aggregated_output="x" * 500
@@ -1236,6 +1271,44 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._grok(grok_tool_call("read_file"), twice, grok_result())
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
+    @staticmethod
+    def _called(ident: str, name: str) -> str:
+        use: dict[str, Any] = {"type": "tool_use", "id": ident, "name": name, "input": {}}
+        return json.dumps({"type": "assistant", "message": {"content": [use]}})
+
+    def test_a_grok_id_two_calls_share_pairs_a_result_with_neither(self):
+        # A todo reusing a command's id would otherwise lend the command its result.
+        shared = self._grok(
+            self._called("a", "run_terminal_command"),
+            self._called("a", "todo_write"),
+            grok_tool_result("a", TODO_UPDATED),
+        )
+        assert (shared.tool_calls, shared.local_tool_attempts, shared.local_tool_calls) == (2, 1, 0)
+        both = self._grok(
+            self._called("a", "read_file"), self._called("a", "read_file"), grok_tool_result("a")
+        )
+        assert (both.local_tool_attempts, both.local_tool_calls) == (2, 0)
+        # Reuse after the result is reuse too: the stream never says which call it answered.
+        later = self._grok(
+            self._called("a", "read_file"), grok_tool_result("a"), self._called("a", "todo_write")
+        )
+        assert later.local_tool_calls == 0
+        alone = self._grok(self._called("a", "read_file"), grok_tool_result("a"))
+        assert alone.local_tool_calls == 1
+
+    @pytest.mark.parametrize("first_is_error", [False, True])
+    def test_a_grok_id_answered_both_ways_counts_for_neither(self, first_is_error: bool):
+        stats = self._grok(
+            self._called("a", "read_file"),
+            grok_tool_result("a", is_error=first_is_error),
+            grok_tool_result("a", is_error=not first_is_error),
+        )
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
+    def test_a_grok_result_before_its_call_answers_nothing(self):
+        stats = self._grok(grok_tool_result("a"), self._called("a", "read_file"))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
     def test_a_failed_grok_call_quotes_the_first_line_it_printed(self):
         stats = self._grok(grok_tool_call("run_terminal_command", BASH_FAILED))
         assert stats.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
@@ -1243,6 +1316,12 @@ class TestACallCountsOnlyIfItSucceeded:
             grok_tool_call("read_file", "\nError: permission denied\nmore", is_error=True)
         )
         assert refused.first_failure == "Error: permission denied"
+        # A failed todo is not a failed local call, so it is not the one quoted.
+        after_todo = self._grok(
+            grok_tool_call("todo_write", "todo store unavailable", is_error=True),
+            grok_tool_call("run_terminal_command", BASH_FAILED),
+        )
+        assert after_todo.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
 
     def test_the_run_description_names_the_attempts_beside_none_succeeded(self):
         # "(0 local)" alone would describe a run that never tried.

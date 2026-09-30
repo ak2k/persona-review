@@ -746,10 +746,10 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     local = 0
     failure: str | None = None
     unknown: set[str] = set()
-    # The inspecting calls made and not yet answered. A result counts once, for such a call
-    # this run made: a second result for the same id, one for an id never called, or one
-    # answering a bookkeeping call, is evidence of nothing.
-    pending: set[str] = set()
+    # Every call's id with the tool each call under it named, and the outcome of each result
+    # answering it once called. A result for an id not yet called is evidence of nothing.
+    called: dict[str, list[str]] = {}
+    answered: dict[str, list[bool]] = {}
     turns: int | None = None
     output_tokens: int | None = None
     for event in events:
@@ -763,25 +763,26 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
                     calls += 1
                     name = block.get("name")
                     tool = name if isinstance(name, str) else ""
+                    ident = block.get("id")
+                    if isinstance(ident, str):
+                        called.setdefault(ident, []).append(tool)
                     if tool not in GROK_INSPECTING_TOOLS:
                         if tool not in GROK_QUIET_TOOLS:
                             unknown.add(tool or "<unnamed>")
                         continue
                     attempts += 1
-                    ident = block.get("id")
-                    if isinstance(ident, str):
-                        pending.add(ident)
         elif kind == "user":
             for block in blocks:
                 ident = block.get("tool_use_id")
                 if block.get("type") != GROK_RESULT_BLOCK or not isinstance(ident, str):
                     continue
-                if ident not in pending:
+                if ident not in called:
                     continue
-                pending.discard(ident)
-                if _grok_succeeded(block):
-                    local += 1
-                elif failure is None:
+                succeeded = _grok_succeeded(block)
+                answered.setdefault(ident, []).append(succeeded)
+                if succeeded or failure is not None:
+                    continue
+                if any(tool in GROK_INSPECTING_TOOLS for tool in called[ident]):
                     failure = _first_line(_grok_output(block))
         elif kind == "result":
             # LAST wins, where the extractor refuses a stream carrying more than one. The
@@ -792,6 +793,12 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
+    for ident, outcomes in answered.items():
+        # ONE call under the id, an inspecting one, and every result a success. An id two
+        # calls share, or one answered both ways, does not say which call worked.
+        tools = called[ident]
+        if len(tools) == 1 and tools[0] in GROK_INSPECTING_TOOLS and all(outcomes):
+            local += 1
     if attempts == 0 and unknown:
         # The codex drift check's reason, for a list of names instead of kinds: a renamed
         # inspecting tool would otherwise make every run exit 6, blaming the model. An MCP
@@ -821,8 +828,11 @@ def _codex_succeeded(item: JSONObject) -> bool:
 
 
 def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
-    seen: set[str] = set()
-    worked: set[str] = set()
+    # One call is the item id and kind its two events share.
+    seen: set[tuple[str, str]] = set()
+    # Per id, the kinds of call made under it and the outcome of each local completion.
+    kinds: dict[str, set[str]] = {}
+    completed: dict[str, list[bool]] = {}
     unknown: set[str] = set()
     total = 0
     calls = 0
@@ -858,10 +868,11 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             ident = item.get("id")
             is_local = item_kind in CODEX_LOCAL_TOOL_ITEMS
             if isinstance(ident, str):
-                # Deduped on the item's own id, so a call the run started and never finished
-                # is still an attempt.
-                if ident not in seen:
-                    seen.add(ident)
+                # Deduped on the item's own id and kind, so a call the run started and never
+                # finished is still an attempt, and a completion of another kind is another call.
+                kinds.setdefault(ident, set()).add(item_kind)
+                if (ident, item_kind) not in seen:
+                    seen.add((ident, item_kind))
                     calls += 1
                     attempts += is_local
             elif kind == "item.completed":
@@ -873,14 +884,18 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             # `status` "in_progress", whatever the call goes on to do.
             if not is_local or kind != "item.completed":
                 continue
-            if not _codex_succeeded(item):
-                if failure is None:
-                    failure = _first_line(item.get("aggregated_output"))
-            elif not isinstance(ident, str):
+            succeeded = _codex_succeeded(item)
+            if not succeeded and failure is None:
+                failure = _first_line(item.get("aggregated_output"))
+            if isinstance(ident, str):
+                completed.setdefault(ident, []).append(succeeded)
+            elif succeeded:
                 local += 1
-            elif ident not in worked:
-                worked.add(ident)
-                local += 1
+    for ident, outcomes in completed.items():
+        # One kind of call under the id, and every completion a success. An id two kinds
+        # share, or one completed both ways, does not say which call worked.
+        if len(kinds[ident]) == 1 and all(outcomes):
+            local += 1
 
     if total == 0:
         # `codex exec --json` opens every run with `thread.started` and `turn.started`, so a

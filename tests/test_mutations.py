@@ -288,14 +288,34 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a codex call reported complete twice succeeds twice",
         "persona_review/validate.py",
-        r"            elif ident not in worked:",
-        "            elif True:",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):\n            local \+= 1",
+        "        if len(kinds[ident]) == 1 and all(outcomes):\n            local += len(outcomes)",
+    ),
+    Mutation(
+        # A command's start and a write's completion under one id read as one command that
+        # completed.
+        "a codex id two kinds share pairs anyway",
+        "persona_review/validate.py",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):",
+        "        if all(outcomes):",
+    ),
+    Mutation(
+        "a codex id completed both ways counts",
+        "persona_review/validate.py",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):",
+        "        if len(kinds[ident]) == 1 and any(outcomes):",
+    ),
+    Mutation(
+        "a codex call pairs its events on the id alone",
+        "persona_review/validate.py",
+        r"                if \(ident, item_kind\) not in seen:",
+        "                if ident not in {seen_id for seen_id, _ in seen}:",
     ),
     Mutation(
         "an id-less codex call that worked is never counted as succeeded",
         "persona_review/validate.py",
-        r"            elif not isinstance\(ident, str\):\n                local \+= 1",
-        "            elif not isinstance(ident, str):\n                pass",
+        r"            elif succeeded:\n                local \+= 1",
+        "            elif succeeded:\n                pass",
     ),
     Mutation(
         # Not 6: the model tried. Reverting this blames it with the status that invites a
@@ -328,14 +348,14 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "the exit-3 refusal quotes nothing a codex call printed",
         "persona_review/validate.py",
-        r'                    failure = _first_line\(item\.get\("aggregated_output"\)\)',
-        '                    failure = ""',
+        r'                failure = _first_line\(item\.get\("aggregated_output"\)\)',
+        '                failure = ""',
     ),
     Mutation(
         "the exit-3 refusal quotes the last codex failure, not the first",
         "persona_review/validate.py",
-        r"                if failure is None:",
-        "                if True:",
+        r"            if not succeeded and failure is None:",
+        "            if not succeeded:",
     ),
     Mutation(
         "the exit-3 refusal quotes a failed call's output uncut",
@@ -405,8 +425,8 @@ MUTATIONS: list[Mutation] = [
         # none as local would refuse every grok run, which is the refusal made meaningless.
         "grok calls that worked are not counted as local",
         "persona_review/validate.py",
-        r"                if _grok_succeeded\(block\):\n                    local \+= 1",
-        "                if _grok_succeeded(block):\n                    pass",
+        r"and all\(outcomes\):\n            local \+= 1\n    if attempts == 0",
+        "and all(outcomes):\n            pass\n    if attempts == 0",
     ),
     Mutation(
         "grok calls are not counted as local attempts",
@@ -487,20 +507,45 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a grok result for a call this run never made counts",
         "persona_review/validate.py",
-        r"                if ident not in pending:\n                    continue\n",
+        r"                if ident not in called:\n                    continue\n",
         "",
     ),
     Mutation(
         "a grok call answered twice succeeds twice",
         "persona_review/validate.py",
-        r"                pending\.discard\(ident\)\n",
-        "",
+        r"and all\(outcomes\):\n            local \+= 1\n    if attempts == 0",
+        "and all(outcomes):\n            local += len(outcomes)\n    if attempts == 0",
+    ),
+    Mutation(
+        # A todo reusing a command's id lent the command the todo's result.
+        "a grok id two calls share pairs anyway",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools\[0\] in GROK_INSPECTING_TOOLS",
+        "        if tools[0] in GROK_INSPECTING_TOOLS",
+    ),
+    Mutation(
+        "a grok result answering a bookkeeping call counts",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools\[0\] in GROK_INSPECTING_TOOLS and ",
+        "        if len(tools) == 1 and ",
+    ),
+    Mutation(
+        "a grok id answered both ways counts",
+        "persona_review/validate.py",
+        r"in GROK_INSPECTING_TOOLS and all\(outcomes\):",
+        "in GROK_INSPECTING_TOOLS and any(outcomes):",
     ),
     Mutation(
         "the exit-3 refusal quotes nothing a grok call printed",
         "persona_review/validate.py",
         r"                    failure = _first_line\(_grok_output\(block\)\)",
         '                    failure = ""',
+    ),
+    Mutation(
+        "the exit-3 refusal quotes a failed grok bookkeeping call",
+        "persona_review/validate.py",
+        r"                if any\(tool in GROK_INSPECTING_TOOLS for tool in called\[ident\]\):",
+        "                if True:",
     ),
     Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call
@@ -516,7 +561,7 @@ MUTATIONS: list[Mutation] = [
         # the real answer is small, which is the case this whole guard is about.
         "codex tool calls are counted twice, once per event",
         "persona_review/validate.py",
-        r"                if ident not in seen:",
+        r"                if \(ident, item_kind\) not in seen:",
         "                if True:",
     ),
     Mutation(
