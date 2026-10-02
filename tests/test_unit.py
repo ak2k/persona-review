@@ -1029,6 +1029,21 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._codex(codex_stream(codex_item("item.completed", kind, exit_code=0)))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
+    @pytest.mark.parametrize("status", ["failed", "declined", "in_progress", "Completed", None, 0])
+    def test_a_command_that_exited_0_counts_only_with_no_status_or_status_completed(
+        self, status: Any
+    ):
+        refused = codex_item("item.completed", "command_execution", status=status)
+        stats = self._codex(codex_stream(refused))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        # The two that count, as for a grok report: "completed", and no status at all.
+        worked = codex_item("item.completed", "command_execution", status="completed")
+        bare = json.loads(worked)
+        del bare["item"]["status"]
+        for done in (worked, json.dumps(bare)):
+            stats = self._codex(codex_stream(done))
+            assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), done
+
     @pytest.mark.parametrize("kind", WRITE_KINDS)
     def test_a_completed_write_is_a_tool_call_and_never_a_local_one(self, kind: str):
         # Grok's edits are skipped for the same reason: changing the tree shows no read of it.
@@ -1723,6 +1738,49 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
 
     @pytest.mark.parametrize(
+        ("mode", "evidence_mode", "stream", "said"),
+        [
+            # A status grok has never sent, on a file read, whose report is the file.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("read_file", {**READ_FILE, "status": "succeeded"})
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                'the first to fail reported status "succeeded" and printed nothing',
+            ),
+            # A command that exited 0 under a status other than completed.
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item(
+                        "item.completed",
+                        "command_execution",
+                        status="declined",
+                        aggregated_output="f.py\n",
+                    )
+                ),
+                "the first to fail reported status \"declined\" and printed 'f.py'",
+            ),
+        ],
+        ids=["grok-unknown-status", "codex-exit-0-not-completed"],
+    )
+    def test_a_refused_status_is_named_rather_than_the_report_it_came_in(
+        self, mode: str, evidence_mode: str, stream: str, said: str
+    ):
+        # Drift renaming a status refuses every run, and the refusal has to say which status.
+        answer = EMPTY_EXAMPLE if mode == "object" else stream
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, stream, mode, evidence_mode)
+        assert code == 3, message
+        assert out == ""
+        assert said in message, message
+        assert "[project]" not in message, "the file read is not the reason, and not quoted"
+        assert "\n" not in message, "stderr carries one line"
+
+    @pytest.mark.parametrize(
         ("mode", "evidence_mode", "stream", "failed"),
         [
             (
@@ -1748,7 +1806,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
                         aggregated_output="boom\n",
                     ),
                 ),
-                "'boom'",
+                "the first to fail reported status \"failed\" and printed 'boom'",
             ),
             (
                 "grok-events",
@@ -1783,7 +1841,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
             "or also reported a failure"
         ) in message, message
         if failed is not None:
-            assert f"the first to fail printed {failed}, and a success under id 'i'" in message
+            assert f"{failed}, and a success under id 'i'" in message, message
         assert "\n" not in message, "stderr carries one line"
 
     def test_a_run_whose_only_inspecting_call_polled_failed_commands_exits_3(self):

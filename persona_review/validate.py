@@ -517,10 +517,11 @@ class RunStats:
 
     `local_tool_attempts` is None where it was never recorded: a sidecar written before
     0.3.5, whose `local_tool_calls` counted attempts rather than successes. `first_failure`
-    is the first line the first failed local call printed, and `ambiguous_id` the first id
-    whose reported success did not count because the id was ambiguous, both for the refusal
-    to quote. Neither is written to provenance, because the event stream kept beside the
-    sidecar holds all of it.
+    is the first line the first failed local call printed, `first_status` the status it
+    reported, as JSON text, when the success rule refuses that status, and `ambiguous_id`
+    the first id whose reported success did not count because the id was ambiguous, all for
+    the refusal to quote. None is written to provenance, because the event stream kept
+    beside the sidecar holds all of it.
     """
 
     tool_calls: int
@@ -531,6 +532,7 @@ class RunStats:
     local_tool_attempts: int | None = None
     first_failure: str | None = None
     ambiguous_id: str | None = None
+    first_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -560,9 +562,10 @@ class Evidence:
 # A call SUCCEEDED only when the provider reports that it ran and worked. Neither a
 # `failed` status nor a non-zero exit code separates a command that never started from one
 # that ran and found nothing, since both read the same; only exit code 0 says a command ran.
-# So a codex command counts on `exit_code` 0, and a grok call on a `tool_result` reporting no
-# error whose content is a JSON object carrying no status but "completed" and no exit code but
-# 0 — or, for a poll of several background commands, at least one that completed with 0.
+# So a codex command counts on `exit_code` 0 beside no status but "completed", and a grok
+# call on a `tool_result` reporting no error whose content is a JSON object in which no
+# report names an error or carries a status but "completed" or an exit code but 0 — and, for
+# a poll of several background commands, at least one of them completed with 0.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
 # defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
@@ -646,10 +649,14 @@ CODEX_LOCAL_TOOL_ITEMS = frozenset(
 )
 
 # The local kinds that succeed by exit code, which is every one: `_codex_succeeded` reads
-# nothing else, so a local kind that carries no exit code needs its own rule there first.
-# Verified against codex-cli 0.152.1 and 0.156.1: every completed `command_execution` carries
-# an integer `exit_code`.
+# only that and the status, so a local kind that carries no exit code needs its own rule
+# there first. Verified against codex-cli 0.152.1 and 0.156.1: every completed
+# `command_execution` carries an integer `exit_code`.
 CODEX_COMMAND_ITEMS = frozenset({"command_execution", "local_shell_call"})
+
+# The one `status` a completed command may carry and still count, as for grok; it may also
+# carry none. An exit code of 0 beside any other status is not taken for success.
+CODEX_COMPLETED = "completed"
 
 # Kinds this wrapper knows about and deliberately does not count: the model talking to
 # itself, and the plan it writes for itself. Named explicitly so that "a kind we chose to
@@ -679,9 +686,19 @@ def _text(value: JSONValue) -> str:
     return ""
 
 
-def _first_line(value: JSONValue) -> str:
-    line = next((line.strip() for line in _text(value).splitlines() if line.strip()), "")
+def _cut(line: str) -> str:
     return line if len(line) <= FAILURE_LINE_CHARS else line[:FAILURE_LINE_CHARS] + "..."
+
+
+def _first_line(value: JSONValue) -> str:
+    return _cut(next((line.strip() for line in _text(value).splitlines() if line.strip()), ""))
+
+
+def _refused_status(report: JSONObject, allowed: str) -> str | None:
+    """A report's status as JSON text, which keeps it one line, when it is not `allowed`."""
+    if report.get("status", allowed) == allowed:
+        return None
+    return _cut(json.dumps(report["status"]))
 
 
 def _grok_reports(block: JSONObject) -> list[JSONObject]:
@@ -753,13 +770,28 @@ def _grok_succeeded(block: JSONObject) -> bool:
     return all(_grok_batch_ok(batch) for batch in batches)
 
 
+def _grok_status(block: JSONObject) -> str | None:
+    """The first status in a result's reports that the success rule refuses."""
+    for report in _grok_reports(block):
+        status = _refused_status(report, GROK_COMPLETED)
+        if status is not None:
+            return status
+    return None
+
+
 def _grok_output(block: JSONObject) -> str:
-    """What a failed call printed, for the refusal to quote."""
+    """What a failed call printed, for the refusal to quote.
+
+    The content as it came stands in when no report printed anything, unless a report names
+    a refused status: that status is the reason, and a file read's content is the file.
+    """
     for report in _grok_reports(block):
         for key in ("output", "stderr", "stdout"):
             text = _text(report.get(key))
             if text.strip():
                 return text
+    if _grok_status(block) is not None:
+        return ""
     content = block.get("content")
     return content if isinstance(content, str) else ""
 
@@ -769,6 +801,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     attempts = 0
     local = 0
     failure: str | None = None
+    failure_status: str | None = None
     ambiguous: str | None = None
     unknown: set[str] = set()
     # Every call's id with the tool each call under it named, and the outcome of each result
@@ -809,6 +842,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
                     continue
                 if any(tool in GROK_INSPECTING_TOOLS for tool in called[ident]):
                     failure = _first_line(_grok_output(block))
+                    failure_status = _grok_status(block)
         elif kind == "result":
             # LAST wins, where the extractor refuses a stream carrying more than one. The
             # laxity is unreachable rather than a disagreement: `gate` extracts and validates
@@ -848,11 +882,14 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
         local_tool_attempts=attempts,
         first_failure=failure,
         ambiguous_id=ambiguous,
+        first_status=failure_status,
     )
 
 
 def _codex_succeeded(item: JSONObject) -> bool:
     """Whether a local item's `item.completed` reports that it ran and worked."""
+    if item.get("status", CODEX_COMPLETED) != CODEX_COMPLETED:
+        return False
     return _whole_number(item.get("exit_code")) == 0
 
 
@@ -868,6 +905,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
     attempts = 0
     local = 0
     failure: str | None = None
+    failure_status: str | None = None
     ambiguous: str | None = None
     # codex's own turn accounting, which counts one per `exec` turn rather than one per
     # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
@@ -917,6 +955,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             succeeded = _codex_succeeded(item)
             if not succeeded and failure is None:
                 failure = _first_line(item.get("aggregated_output"))
+                failure_status = _refused_status(item, CODEX_COMPLETED)
             if isinstance(ident, str):
                 completed.setdefault(ident, []).append(succeeded)
             elif succeeded:
@@ -968,6 +1007,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
         local_tool_attempts=attempts,
         first_failure=failure,
         ambiguous_id=ambiguous,
+        first_status=failure_status,
     )
 
 
@@ -1031,15 +1071,18 @@ def describe_run(stats: RunStats) -> str:
 def _first_failure(stats: RunStats) -> str:
     """What the first failed local call printed, quoted as data: it is the provider's text.
 
-    A success an ambiguous id kept from counting is named by that id, because a run whose
-    only success it was would otherwise read as one whose calls never finished.
+    A status the success rule refused is named before it, since after a provider renames a
+    status that is the only reason every run fails. A success an ambiguous id kept from
+    counting is named by that id, because a run whose only success it was would otherwise
+    read as one whose calls never finished.
     """
     if stats.first_failure is None:
         said = ""
-    elif not stats.first_failure:
-        said = "the first to fail printed nothing"
     else:
-        said = f"the first to fail printed {stats.first_failure!r}"
+        printed = f"printed {stats.first_failure!r}" if stats.first_failure else "printed nothing"
+        if stats.first_status is not None:
+            printed = f"reported status {stats.first_status} and {printed}"
+        said = f"the first to fail {printed}"
     if stats.ambiguous_id is None:
         return said or "none of them finished"
     unpaired = (

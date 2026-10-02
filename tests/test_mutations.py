@@ -624,6 +624,39 @@ MUTATIONS: list[Mutation] = [
         "    if True:",
     ),
     Mutation(
+        # `exit_code` 0 beside a status that says the command did not complete.
+        "a codex command that exited 0 counts whatever its status",
+        "persona_review/validate.py",
+        r'    if item\.get\("status", CODEX_COMPLETED\) != CODEX_COMPLETED:',
+        "    if False:",
+    ),
+    Mutation(
+        # A renamed status refuses every run, and the refusal would not say which status.
+        "the exit-3 refusal does not name the status a grok call reported",
+        "persona_review/validate.py",
+        r"                    failure_status = _grok_status\(block\)",
+        "                    failure_status = None",
+    ),
+    Mutation(
+        "the exit-3 refusal does not name the status a codex call reported",
+        "persona_review/validate.py",
+        r"                failure_status = _refused_status\(item, CODEX_COMPLETED\)",
+        "                failure_status = None",
+    ),
+    Mutation(
+        "the exit-3 refusal drops the status it was given",
+        "persona_review/validate.py",
+        r"        if stats\.first_status is not None:",
+        "        if False:",
+    ),
+    Mutation(
+        # For a file read the serialized report is the file, which says nothing of why.
+        "the exit-3 refusal quotes the report a refused grok status came in",
+        "persona_review/validate.py",
+        r'    if _grok_status\(block\) is not None:\n        return ""',
+        '    if False:\n        return ""',
+    ),
+    Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call
         # certifies a codex run that only ever thought and answered.
         "every codex item counts as a tool call, not just the tool ones",
