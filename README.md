@@ -587,8 +587,9 @@ Every command and flag is unchanged.
   different tools share, a codex id that two item kinds share, or an id reported both
   succeeding and failing, counts for none of them, and the exit-`3` refusal names the id. Such
   a run used to count the success, except through grok when the failure was reported first,
-  which counted nothing then either. Identical repeated reports, and one grok tool called twice
-  under one id, still count once.
+  which counted nothing then either. Identical repeated reports, and a grok call echoed under
+  its own id, still count once. One grok tool called twice under one id, each call answered,
+  now counts once; it used to count twice.
 - **More grok results that do not report success no longer count.** A report carrying an
   `error` key or the type `Error`, a background command's report that is not an object, a batch
   poll whose own report or a sibling report failed, a batch poll inside a background
