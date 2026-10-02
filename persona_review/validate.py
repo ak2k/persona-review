@@ -590,7 +590,7 @@ GROK_INSPECTING_TOOLS = frozenset(
 
 # The inspecting tools that report an exit code: a command, a search, and a background
 # command's output. Only exit code 0 says one ran, so a result of theirs with none, or with the
-# field renamed, does not count, as through codex. Verified against 430 local grok-4.7
+# field renamed, does not count, as through codex. Verified against 473 local grok event
 # streams, where every counted result of these three carried an integer `exit_code`.
 GROK_COMMAND_TOOLS = frozenset({"get_command_or_subagent_output", "grep", "run_terminal_command"})
 
