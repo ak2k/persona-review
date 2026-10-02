@@ -58,7 +58,7 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `0` | schema-valid findings (an empty findings array is valid) |
 | `1` | the answer was not schema-valid findings — the gate refused |
 | `2` | usage error: bad arguments, unknown or markdown-only persona, bad `-C`, unresolvable `-b`, malformed `CE_PERSONA_*` value |
-| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, the runner's event vocabulary changed and this build can no longer count what a run did, or the model attempted local tool calls and none succeeded — stderr gives the counts and the first failure's output, and the artifacts are kept as evidence |
+| `3` | environment error: the runner, `git` or the plugin assets are missing, `CE_PERSONA_RUN_DIR` cannot be created, the runner's event vocabulary changed and this build can no longer count what a run did, or the model attempted local tool calls and none succeeded — stderr gives the counts, the first failure's status and output, and the id of any success an ambiguous id kept from counting, and the artifacts are kept as evidence |
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
 | `6` | the model answered without attempting a single local tool call — it inspected nothing. Through codex a local call is a `command_execution` or `local_shell_call` item; a file change, patch, web search, MCP call or function call is not one |
@@ -83,16 +83,20 @@ unrecognized kinds instead; `6` is reached only when the stream was understood a
 genuinely nothing in it.
 
 **A local call counts only if the stream shows it succeeded.** Through codex, a command counts
-when its `item.completed` carries `exit_code` 0; a file change or patch is not a local call,
-because a write shows no read of the tree. Through grok, a call counts when it is a tool that
-reads the tree (a command, a search, a file read, a directory listing, or a background
-command's output) and its `tool_result` has `is_error` false and content that is a JSON object
-in which every report, including a background command's own, carries no `status` other than
-`completed` and no exit code other than 0. A status grok has never sent is refused rather than
-taken for success. For a poll of several background commands, at least one of them must
-report exit code 0 and no status other than `completed`. A todo, a task kill or a file edit
-never counts. A call also counts only when its id pairs it with its result unambiguously: an
-id that two calls share, or one reported both succeeding and failing, counts for none of them.
+when its `item.completed` carries `exit_code` 0 and no `status` other than `completed`; a file
+change or patch is not a local call, because a write shows no read of the tree. Through grok,
+a call counts when it is a tool that reads the tree (a command, a search, a file read, a
+directory listing, or a background command's output) and its `tool_result` has `is_error`
+false and content that is a JSON object in which every report, including a background
+command's own, carries no `status` other than `completed`, no exit code other than 0, no
+`error` key and not the type `Error`; a background command's report that is not an object
+fails the call. A status either provider has never sent is refused rather than taken for
+success. For a poll of several background commands, wherever it sits, at least one of them
+must report exit code 0 and no status other than `completed`, and every report around it must
+pass as well. A todo, a task kill or a file edit never counts. A call also counts only when its
+id pairs it with its result unambiguously: an id that two different tools or item kinds share,
+or one reported both succeeding and failing, counts for none of them, while one tool called
+twice under an id counts once.
 A run that attempted local calls
 and had none succeed exits `3`, not `6`: the model tried, and a provider that cannot start a
 command fails every call the same way on every run. That is a run that happened too —
@@ -532,16 +536,17 @@ and a `run_stats` object counting what the run *did* — `tool_calls`, `local_to
 run made; `local_tool_attempts` is the ones that act on the working directory, and
 `local_tool_calls` the ones among them that succeeded. Through codex the local calls are the
 `command_execution` and `local_shell_call` items, and one succeeded when it completed with
-`exit_code` 0. `file_change`, `patch_apply`, `web_search`, `mcp_tool_call`, `function_call`
+`exit_code` 0 and no status but `completed`. `file_change`, `patch_apply`, `web_search`, `mcp_tool_call`, `function_call`
 and `custom_tool_call` count in `tool_calls` only, because none of them proves the tree was
 read. Through grok a local attempt is a call to one of `run_terminal_command`, `grep`,
 `read_file`, `list_dir` or `get_command_or_subagent_output` (`--disable-web-search` removes
 its web tools), and it succeeded when its `tool_result` has `is_error` false and a JSON object
-as content, and every report in it carries no status but `completed` and no exit code but 0;
-a poll of several background commands succeeded when at least one of them completed with exit
-code 0. `todo_write`, `kill_command_or_subagent`, `search_replace` and `write` count in
+as content, and every report in it carries no status but `completed`, no exit code but 0, no
+`error` key and not the type `Error`; a poll of several background commands succeeded when at
+least one of them completed with exit code 0 and the reports around it pass. `todo_write`,
+`kill_command_or_subagent`, `search_replace` and `write` count in
 `tool_calls` only. On both sides a call succeeded only when its id pairs it unambiguously: a
-grok id that two `tool_use` blocks share, or a codex id that two item kinds share, or either
+grok id that `tool_use` blocks naming two different tools share, or a codex id that two item kinds share, or either
 one reported both succeeding and failing, adds nothing to `local_tool_calls`. A grok stream with no local attempt that calls a tool name this build
 does not know exits `3` naming it, as codex kind drift does. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
 and no successes exit `3` — so they are recorded rather than only acted on: a refusal you cannot
@@ -576,10 +581,22 @@ Every command and flag is unchanged.
   object, and a `failed` status with no exit code beside it, used to count. A status grok has
   never sent is refused. A command in a batch poll counts only with exit code 0 and no status
   but `completed`.
-- **A call's id has to pair it unambiguously.** A grok id that two `tool_use` blocks share, a
-  codex id that two item kinds share, or an id reported both succeeding and failing, counts for
-  none of them. Such a run used to count the success. Identical repeated reports still count
-  once.
+- **A call's id has to pair it unambiguously.** A grok id that `tool_use` blocks naming two
+  different tools share, a codex id that two item kinds share, or an id reported both
+  succeeding and failing, counts for none of them, and the exit-`3` refusal names the id. Such
+  a run used to count the success, except through grok when the failure was reported first,
+  which counted nothing then either. Identical repeated reports, and one grok tool called twice
+  under one id, still count once.
+- **More grok results that do not report success no longer count.** A report carrying an
+  `error` key or the type `Error`, a background command's report that is not an object, a batch
+  poll whose own report or a sibling report failed, and a batch poll inside a background
+  command's report with no command that exited 0 all used to count.
+- **A codex command that exited 0 must also report no status but `completed`.** One that
+  reported any other status beside exit code 0 used to count; one that reports no status still
+  counts.
+- **The exit-`3` refusal names the status.** When the first failed call reported a status
+  other than `completed`, the refusal names it before that call's output. A grok report whose
+  status is the reason is not quoted in place of output: for a file read, that is the file.
 - `run_stats` keeps its fields and meanings. Older sidecars are read as before.
 
 ## Changes in 0.3.6
