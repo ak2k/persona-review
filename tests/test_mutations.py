@@ -632,6 +632,13 @@ MUTATIONS: list[Mutation] = [
         "        elif False:",
     ),
     Mutation(
+        # Every command failing then reads as a success set aside under the first id.
+        "a codex id with no success is named as an ambiguous id",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif ambiguous is None:",
+    ),
+    Mutation(
         "the exit-3 refusal does not name the ambiguous id it was given",
         "persona_review/validate.py",
         r"    if stats\.ambiguous_id is None:",

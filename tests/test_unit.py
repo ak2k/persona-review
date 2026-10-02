@@ -1735,6 +1735,8 @@ class TestTheGateRefusesARunThatInspectedNothing:
         # non-zero lands here too.
         assert "never opened the diff" not in message
         assert "sandbox" not in message
+        # Every command failed, so no id carries a success to name.
+        assert "a success under id" not in message, message
         assert "\n" not in message, "stderr carries one line"
         stats = record["run_stats"]
         assert (stats["tool_calls"], stats["local_tool_attempts"], stats["local_tool_calls"]) == (
