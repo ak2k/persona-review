@@ -502,11 +502,12 @@ class RunStats:
     run whose only calls were web searches read the internet and not the diff, one whose only
     calls were edits wrote to the tree without reading it, and a command that could not start
     read nothing at all, so none of them has certified anything. A call counts only when its
-    id pairs it with its outcome unambiguously: an id two calls share, or one reported both
-    succeeding and failing, counts for none of them. `local_tool_attempts` is every
-    local call, succeeded or not, and it is what tells the two refusals apart: none attempted
-    is the model's doing, every one failing is not. `tool_calls` is every call, local or
-    not, recorded so the refusal can say what the run did instead. All three are ints when
+    id pairs it with its outcome unambiguously: an id two different tools or item kinds
+    share, or one reported both succeeding and failing, counts for none of them.
+    `local_tool_attempts` is every local call, succeeded or not, and it is what tells the
+    two refusals apart: none attempted is the model's doing, every one failing is not.
+    `tool_calls` is every call, local or not, recorded so the refusal can say what the run
+    did instead. All three are ints when
     counted from a stream, because "the adapter could not tell" is not an answer this package
     is entitled to give. A stream carrying nothing this module recognizes counts zero and the
     run is refused; a stream that cannot be READ is an environment error rather than a quiet
@@ -797,10 +798,11 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
     for ident, outcomes in answered.items():
-        # ONE call under the id, an inspecting one, and every result a success. An id two
-        # calls share, or one answered both ways, does not say which call worked.
-        tools = called[ident]
-        if len(tools) == 1 and tools[0] in GROK_INSPECTING_TOOLS and all(outcomes):
+        # ONE tool under the id, an inspecting one, and every result a success. An id two
+        # tools share, or one answered both ways, does not say which call worked; one tool
+        # named under it twice, as an echo would, leaves no doubt.
+        tools = set(called[ident])
+        if len(tools) == 1 and tools <= GROK_INSPECTING_TOOLS and all(outcomes):
             local += 1
     if attempts == 0 and unknown:
         # The codex drift check's reason, for a list of names instead of kinds: a renamed

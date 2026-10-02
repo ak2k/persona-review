@@ -520,20 +520,28 @@ MUTATIONS: list[Mutation] = [
         # A todo reusing a command's id lent the command the todo's result.
         "a grok id two calls share pairs anyway",
         "persona_review/validate.py",
-        r"        if len\(tools\) == 1 and tools\[0\] in GROK_INSPECTING_TOOLS",
-        "        if tools[0] in GROK_INSPECTING_TOOLS",
+        r"        if len\(tools\) == 1 and tools <= GROK_INSPECTING_TOOLS and ",
+        "        if tools & GROK_INSPECTING_TOOLS and ",
     ),
     Mutation(
         "a grok result answering a bookkeeping call counts",
         "persona_review/validate.py",
-        r"        if len\(tools\) == 1 and tools\[0\] in GROK_INSPECTING_TOOLS and ",
+        r"        if len\(tools\) == 1 and tools <= GROK_INSPECTING_TOOLS and ",
         "        if len(tools) == 1 and ",
+    ),
+    Mutation(
+        # An echoed `tool_use` names one tool twice; judged as two calls, a real read of the
+        # tree is refused.
+        "a grok id one tool is named under twice is judged as two calls",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools <= ",
+        "        if len(called[ident]) == 1 and tools <= ",
     ),
     Mutation(
         "a grok id answered both ways counts",
         "persona_review/validate.py",
-        r"in GROK_INSPECTING_TOOLS and all\(outcomes\):",
-        "in GROK_INSPECTING_TOOLS and any(outcomes):",
+        r"<= GROK_INSPECTING_TOOLS and all\(outcomes\):",
+        "<= GROK_INSPECTING_TOOLS and any(outcomes):",
     ),
     Mutation(
         "the exit-3 refusal quotes nothing a grok call printed",

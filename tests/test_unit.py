@@ -1276,7 +1276,7 @@ class TestACallCountsOnlyIfItSucceeded:
         use: dict[str, Any] = {"type": "tool_use", "id": ident, "name": name, "input": {}}
         return json.dumps({"type": "assistant", "message": {"content": [use]}})
 
-    def test_a_grok_id_two_calls_share_pairs_a_result_with_neither(self):
+    def test_a_grok_id_two_tools_share_pairs_a_result_with_neither(self):
         # A todo reusing a command's id would otherwise lend the command its result.
         shared = self._grok(
             self._called("a", "run_terminal_command"),
@@ -1284,8 +1284,9 @@ class TestACallCountsOnlyIfItSucceeded:
             grok_tool_result("a", TODO_UPDATED),
         )
         assert (shared.tool_calls, shared.local_tool_attempts, shared.local_tool_calls) == (2, 1, 0)
+        # Two inspecting tools: the result is one of theirs, and nothing says which.
         both = self._grok(
-            self._called("a", "read_file"), self._called("a", "read_file"), grok_tool_result("a")
+            self._called("a", "read_file"), self._called("a", "grep"), grok_tool_result("a")
         )
         assert (both.local_tool_attempts, both.local_tool_calls) == (2, 0)
         # Reuse after the result is reuse too: the stream never says which call it answered.
@@ -1295,6 +1296,21 @@ class TestACallCountsOnlyIfItSucceeded:
         assert later.local_tool_calls == 0
         alone = self._grok(self._called("a", "read_file"), grok_tool_result("a"))
         assert alone.local_tool_calls == 1
+
+    def test_a_grok_id_one_tool_is_named_under_twice_counts_once(self):
+        # Every call under the id is the same tool, so whichever one the result answers, that
+        # tool worked: an echoed `tool_use` block, or the id reused for the same tool.
+        echoed = self._grok(
+            self._called("a", "read_file"), self._called("a", "read_file"), grok_tool_result("a")
+        )
+        assert (echoed.local_tool_attempts, echoed.local_tool_calls) == (2, 1)
+        reused = self._grok(
+            self._called("a", "run_terminal_command"),
+            grok_tool_result("a", BASH_OK),
+            self._called("a", "run_terminal_command"),
+            grok_tool_result("a", BASH_OK),
+        )
+        assert (reused.local_tool_attempts, reused.local_tool_calls) == (2, 1)
 
     @pytest.mark.parametrize("first_is_error", [False, True])
     def test_a_grok_id_answered_both_ways_counts_for_neither(self, first_is_error: bool):
