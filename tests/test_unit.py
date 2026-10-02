@@ -1161,7 +1161,7 @@ class TestACallCountsOnlyIfItSucceeded:
     )
     def test_a_grok_result_counts_only_when_its_content_is_a_json_object(self, content: Any):
         # `is_error` false beside content that reports nothing: no object, so no status and
-        # no exit code to read. An empty list of reports used to pass every rule on it.
+        # no exit code to read, and an empty list of reports would pass every rule on it.
         call = grok_tool_call("run_terminal_command", None)
         block: dict[str, Any] = {"type": "tool_result", "tool_use_id": "toolu_run_terminal_command"}
         block.update(content=content, is_error=False)
