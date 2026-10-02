@@ -517,9 +517,10 @@ class RunStats:
 
     `local_tool_attempts` is None where it was never recorded: a sidecar written before
     0.3.5, whose `local_tool_calls` counted attempts rather than successes. `first_failure`
-    is the first line the first failed local call printed, for the refusal to quote; it is
-    not written to provenance, because the event stream kept beside the sidecar holds all of
-    it.
+    is the first line the first failed local call printed, and `ambiguous_id` the first id
+    whose reported success did not count because the id was ambiguous, both for the refusal
+    to quote. Neither is written to provenance, because the event stream kept beside the
+    sidecar holds all of it.
     """
 
     tool_calls: int
@@ -529,6 +530,7 @@ class RunStats:
     duration_s: float | None
     local_tool_attempts: int | None = None
     first_failure: str | None = None
+    ambiguous_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -749,6 +751,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     attempts = 0
     local = 0
     failure: str | None = None
+    ambiguous: str | None = None
     unknown: set[str] = set()
     # Every call's id with the tool each call under it named, and the outcome of each result
     # answering it once called. A result for an id not yet called is evidence of nothing.
@@ -804,6 +807,8 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
         tools = set(called[ident])
         if len(tools) == 1 and tools <= GROK_INSPECTING_TOOLS and all(outcomes):
             local += 1
+        elif tools & GROK_INSPECTING_TOOLS and any(outcomes) and ambiguous is None:
+            ambiguous = ident
     if attempts == 0 and unknown:
         # The codex drift check's reason, for a list of names instead of kinds: a renamed
         # inspecting tool would otherwise make every run exit 6, blaming the model. An MCP
@@ -824,6 +829,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
         duration_s=None,
         local_tool_attempts=attempts,
         first_failure=failure,
+        ambiguous_id=ambiguous,
     )
 
 
@@ -844,6 +850,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
     attempts = 0
     local = 0
     failure: str | None = None
+    ambiguous: str | None = None
     # codex's own turn accounting, which counts one per `exec` turn rather than one per
     # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
     # it is the number codex publishes, not because the two mean the same thing.
@@ -901,6 +908,8 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
         # share, or one completed both ways, does not say which call worked.
         if len(kinds[ident]) == 1 and all(outcomes):
             local += 1
+        elif any(outcomes) and ambiguous is None:
+            ambiguous = ident
 
     if total == 0:
         # `codex exec --json` opens every run with `thread.started` and `turn.started`, so a
@@ -940,6 +949,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
         duration_s=None,
         local_tool_attempts=attempts,
         first_failure=failure,
+        ambiguous_id=ambiguous,
     )
 
 
@@ -1001,12 +1011,24 @@ def describe_run(stats: RunStats) -> str:
 
 
 def _first_failure(stats: RunStats) -> str:
-    """What the first failed local call printed, quoted as data: it is the provider's text."""
+    """What the first failed local call printed, quoted as data: it is the provider's text.
+
+    A success an ambiguous id kept from counting is named by that id, because a run whose
+    only success it was would otherwise read as one whose calls never finished.
+    """
     if stats.first_failure is None:
-        return "none of them finished"
-    if not stats.first_failure:
-        return "the first to fail printed nothing"
-    return f"the first to fail printed {stats.first_failure!r}"
+        said = ""
+    elif not stats.first_failure:
+        said = "the first to fail printed nothing"
+    else:
+        said = f"the first to fail printed {stats.first_failure!r}"
+    if stats.ambiguous_id is None:
+        return said or "none of them finished"
+    unpaired = (
+        f"a success under id {stats.ambiguous_id!r} does not count, because that id names "
+        "more than one call or also reported a failure"
+    )
+    return f"{said}, and {unpaired}" if said else unpaired
 
 
 def _sha256(filename: str) -> str:

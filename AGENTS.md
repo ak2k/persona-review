@@ -154,7 +154,8 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   runs proves no read of the diff, and neither does a command that failed, whether it never
   started or ran and matched nothing — so its findings are unfounded whether the array is
   empty or full, and it exits with no summary line: `6` when it attempted no local call, `3`
-  when it attempted some and every one failed. Exactly zero, with no configurable floor —
+  when it attempted some and every one failed or succeeded only under an ambiguous id.
+  Exactly zero, with no configurable floor —
   "did this run inspect anything" has an answer, "did it inspect enough" is a judgment this
   package is not entitled to make. The fixture for the gap test therefore carries a tool
   call that succeeded, because without one it would be testing the refusal instead.

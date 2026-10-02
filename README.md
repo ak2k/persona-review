@@ -98,7 +98,8 @@ and had none succeed exits `3`, not `6`: the model tried, and a provider that ca
 command fails every call the same way on every run. That is a run that happened too —
 codex-cli 0.156.1 could not start five commands, each completed `failed` with exit code 1, and
 0.3.4 passed its empty findings at exit `0`. The one stderr line gives the counts and the first
-line the first failed call printed; it does not name a cause, because a command that ran and
+line the first failed call printed, and names the id of any success that did not count because
+its id was ambiguous; it does not name a cause, because a command that ran and
 exited non-zero, like `rg` finding nothing, reads the same as one that never started. The
 artifacts are kept as evidence, as for `6`.
 

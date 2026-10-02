@@ -425,8 +425,8 @@ MUTATIONS: list[Mutation] = [
         # none as local would refuse every grok run, which is the refusal made meaningless.
         "grok calls that worked are not counted as local",
         "persona_review/validate.py",
-        r"and all\(outcomes\):\n            local \+= 1\n    if attempts == 0",
-        "and all(outcomes):\n            pass\n    if attempts == 0",
+        r"and all\(outcomes\):\n            local \+= 1\n        elif tools & ",
+        "and all(outcomes):\n            pass\n        elif tools & ",
     ),
     Mutation(
         "grok calls are not counted as local attempts",
@@ -513,8 +513,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a grok call answered twice succeeds twice",
         "persona_review/validate.py",
-        r"and all\(outcomes\):\n            local \+= 1\n    if attempts == 0",
-        "and all(outcomes):\n            local += len(outcomes)\n    if attempts == 0",
+        r"and all\(outcomes\):\n            local \+= 1\n        elif tools & ",
+        "and all(outcomes):\n            local += len(outcomes)\n        elif tools & ",
     ),
     Mutation(
         # A todo reusing a command's id lent the command the todo's result.
@@ -560,6 +560,33 @@ MUTATIONS: list[Mutation] = [
         "persona_review/validate.py",
         r"                if succeeded or failure is not None:",
         "                if succeeded:",
+    ),
+    Mutation(
+        # A run whose only success came under an ambiguous id then reads "none of them
+        # finished", about a call that finished and reported success.
+        "the exit-3 refusal is silent on a grok success an ambiguous id set aside",
+        "persona_review/validate.py",
+        r"        elif tools & GROK_INSPECTING_TOOLS and any\(outcomes\) and ambiguous is None:",
+        "        elif False:",
+    ),
+    Mutation(
+        # A todo's success is not a local call's, so its id is no local call's either.
+        "a grok bookkeeping call's success is named as an ambiguous id",
+        "persona_review/validate.py",
+        r"        elif tools & GROK_INSPECTING_TOOLS and any\(outcomes\)",
+        "        elif any(outcomes)",
+    ),
+    Mutation(
+        "the exit-3 refusal is silent on a codex success an ambiguous id set aside",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif False:",
+    ),
+    Mutation(
+        "the exit-3 refusal does not name the ambiguous id it was given",
+        "persona_review/validate.py",
+        r"    if stats\.ambiguous_id is None:",
+        "    if True:",
     ),
     Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call

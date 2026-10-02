@@ -312,6 +312,12 @@ def grok_tool_result(
     return json.dumps({"type": "user", "message": {"role": "user", "content": [block]}})
 
 
+def grok_tool_use(ident: str, name: str) -> str:
+    """A call alone, under the id given, so a test can reuse one id or answer it later."""
+    use: dict[str, Any] = {"type": "tool_use", "id": ident, "name": name, "input": {}}
+    return json.dumps({"type": "assistant", "message": {"content": [use]}})
+
+
 def grok_tool_call(
     name: str = "read_file", report: dict[str, Any] | str | None = READ_FILE, **result: Any
 ) -> str:
@@ -1220,6 +1226,8 @@ class TestACallCountsOnlyIfItSucceeded:
             grok_result(),
         )
         assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 1, 0)
+        # The todo's id is its own, so the refusal has no ambiguous id to name.
+        assert stats.ambiguous_id is None
 
     @pytest.mark.parametrize(
         ("name", "report"),
@@ -1271,43 +1279,38 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._grok(grok_tool_call("read_file"), twice, grok_result())
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
-    @staticmethod
-    def _called(ident: str, name: str) -> str:
-        use: dict[str, Any] = {"type": "tool_use", "id": ident, "name": name, "input": {}}
-        return json.dumps({"type": "assistant", "message": {"content": [use]}})
-
     def test_a_grok_id_two_tools_share_pairs_a_result_with_neither(self):
         # A todo reusing a command's id would otherwise lend the command its result.
         shared = self._grok(
-            self._called("a", "run_terminal_command"),
-            self._called("a", "todo_write"),
+            grok_tool_use("a", "run_terminal_command"),
+            grok_tool_use("a", "todo_write"),
             grok_tool_result("a", TODO_UPDATED),
         )
         assert (shared.tool_calls, shared.local_tool_attempts, shared.local_tool_calls) == (2, 1, 0)
         # Two inspecting tools: the result is one of theirs, and nothing says which.
         both = self._grok(
-            self._called("a", "read_file"), self._called("a", "grep"), grok_tool_result("a")
+            grok_tool_use("a", "read_file"), grok_tool_use("a", "grep"), grok_tool_result("a")
         )
         assert (both.local_tool_attempts, both.local_tool_calls) == (2, 0)
         # Reuse after the result is reuse too: the stream never says which call it answered.
         later = self._grok(
-            self._called("a", "read_file"), grok_tool_result("a"), self._called("a", "todo_write")
+            grok_tool_use("a", "read_file"), grok_tool_result("a"), grok_tool_use("a", "todo_write")
         )
         assert later.local_tool_calls == 0
-        alone = self._grok(self._called("a", "read_file"), grok_tool_result("a"))
+        alone = self._grok(grok_tool_use("a", "read_file"), grok_tool_result("a"))
         assert alone.local_tool_calls == 1
 
     def test_a_grok_id_one_tool_is_named_under_twice_counts_once(self):
         # Every call under the id is the same tool, so whichever one the result answers, that
         # tool worked: an echoed `tool_use` block, or the id reused for the same tool.
         echoed = self._grok(
-            self._called("a", "read_file"), self._called("a", "read_file"), grok_tool_result("a")
+            grok_tool_use("a", "read_file"), grok_tool_use("a", "read_file"), grok_tool_result("a")
         )
         assert (echoed.local_tool_attempts, echoed.local_tool_calls) == (2, 1)
         reused = self._grok(
-            self._called("a", "run_terminal_command"),
+            grok_tool_use("a", "run_terminal_command"),
             grok_tool_result("a", BASH_OK),
-            self._called("a", "run_terminal_command"),
+            grok_tool_use("a", "run_terminal_command"),
             grok_tool_result("a", BASH_OK),
         )
         assert (reused.local_tool_attempts, reused.local_tool_calls) == (2, 1)
@@ -1315,14 +1318,14 @@ class TestACallCountsOnlyIfItSucceeded:
     @pytest.mark.parametrize("first_is_error", [False, True])
     def test_a_grok_id_answered_both_ways_counts_for_neither(self, first_is_error: bool):
         stats = self._grok(
-            self._called("a", "read_file"),
+            grok_tool_use("a", "read_file"),
             grok_tool_result("a", is_error=first_is_error),
             grok_tool_result("a", is_error=not first_is_error),
         )
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
 
     def test_a_grok_result_before_its_call_answers_nothing(self):
-        stats = self._grok(grok_tool_result("a"), self._called("a", "read_file"))
+        stats = self._grok(grok_tool_result("a"), grok_tool_use("a", "read_file"))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
 
     def test_a_failed_grok_call_quotes_the_first_line_it_printed(self):
@@ -1342,9 +1345,9 @@ class TestACallCountsOnlyIfItSucceeded:
     def test_the_first_failed_grok_call_is_the_one_quoted(self):
         # Each failure prints a different first line, so quoting a later one shows here.
         stats = self._grok(
-            self._called("a", "run_terminal_command"),
+            grok_tool_use("a", "run_terminal_command"),
             grok_tool_result("a", bash_report(2, "first failure line\n")),
-            self._called("b", "run_terminal_command"),
+            grok_tool_use("b", "run_terminal_command"),
             grok_tool_result("b", bash_report(1, "second failure line\n")),
         )
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (2, 0)
@@ -1614,6 +1617,70 @@ class TestTheGateRefusesARunThatInspectedNothing:
             code, _, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(started))
         assert code == 3, message
         assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
+
+    @pytest.mark.parametrize(
+        ("mode", "evidence_mode", "stream", "failed"),
+        [
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item("item.completed", "web_search", "i"),
+                    codex_item("item.completed", "command_execution", "i"),
+                ),
+                None,
+            ),
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item("item.completed", "command_execution", "i"),
+                    codex_item(
+                        "item.completed",
+                        "command_execution",
+                        "i",
+                        exit_code=1,
+                        status="failed",
+                        aggregated_output="boom\n",
+                    ),
+                ),
+                "'boom'",
+            ),
+            (
+                "grok-events",
+                "grok-messages",
+                "\n".join(
+                    [
+                        grok_tool_use("i", "read_file"),
+                        grok_tool_use("i", "grep"),
+                        grok_tool_result("i"),
+                        grok_result(structured_output=artifact()),
+                    ]
+                )
+                + "\n",
+                None,
+            ),
+        ],
+        ids=["codex-two-kinds", "codex-both-ways", "grok-two-tools"],
+    )
+    def test_a_success_an_ambiguous_id_set_aside_is_named_by_its_id(
+        self, mode: str, evidence_mode: str, stream: str, failed: str | None
+    ):
+        # The call finished and reported success, so "none of them finished" would be false;
+        # what kept it from counting is the id.
+        answer = EMPTY_EXAMPLE if mode == "object" else stream
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, stream, mode, evidence_mode)
+        assert code == 3, message
+        assert out == ""
+        assert "none of them finished" not in message, message
+        assert (
+            "a success under id 'i' does not count, because that id names more than one call "
+            "or also reported a failure"
+        ) in message, message
+        if failed is not None:
+            assert f"the first to fail printed {failed}, and a success under id 'i'" in message
+        assert "\n" not in message, "stderr carries one line"
 
     def test_a_run_whose_only_inspecting_call_polled_failed_commands_exits_3(self):
         poll = task_outputs(("failed", 1), ("running", None))
