@@ -216,6 +216,7 @@ GREP_NO_MATCH = {
     "match_count": 0,
     "file_matches": [],
 }
+GREP_MATCHED = {**GREP_NO_MATCH, "exit_code": 0, "match_count": 1}
 # A command moved to the background before anything came back.
 BACKGROUND_STARTED = {
     "type": "BackgroundTaskStarted",
@@ -267,6 +268,9 @@ def task_output(status: str, exit_code: int | None, output: str) -> dict[str, An
             "raw_output_bytes": 0,
         },
     }
+
+
+_TASK_DONE: dict[str, Any] = task_output("completed", 0, "Python 3.14.6\n")["Result"]
 
 
 def task_outputs(*children: tuple[str, int | None]) -> dict[str, Any]:
@@ -918,7 +922,9 @@ class TestRunEvidence:
                 last_file=None,
             )
         )
-        stats = self._grok(grok_tool_call("grep"), grok_tool_call("read_file"), grok_result())
+        stats = self._grok(
+            grok_tool_call("grep", GREP_MATCHED), grok_tool_call("read_file"), grok_result()
+        )
         assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 2, 2)
 
     def test_an_id_less_call_counts_once_never_twice(self):
@@ -1123,7 +1129,9 @@ class TestACallCountsOnlyIfItSucceeded:
     def test_a_grok_call_counts_only_on_a_result_reporting_success(
         self, report: dict[str, Any], is_error: bool, succeeded: int
     ):
-        stats = self._grok(grok_tool_call("run_terminal_command", report, is_error=is_error))
+        # A file read's report answers a file read: a command's result must carry an exit code.
+        name = "read_file" if report is READ_FILE else "run_terminal_command"
+        stats = self._grok(grok_tool_call(name, report, is_error=is_error))
         assert (stats.tool_calls, stats.local_tool_attempts) == (1, 1)
         assert stats.local_tool_calls == succeeded
 
@@ -1167,6 +1175,50 @@ class TestACallCountsOnlyIfItSucceeded:
         # commands that all failed as a successful read. A child needs both halves, an
         # `exit_code` of 0 and no status other than "completed".
         stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            ("run_terminal_command", _without(BASH_OK, "exit_code"), 0),
+            ("run_terminal_command", {**_without(BASH_OK, "exit_code"), "exitCode": 0}, 0),
+            ("run_terminal_command", BASH_OK, 1),
+            ("grep", _without(GREP_NO_MATCH, "exit_code"), 0),
+            ("grep", {**_without(GREP_NO_MATCH, "exit_code"), "returncode": 0}, 0),
+            ("grep", {**GREP_NO_MATCH, "exit_code": 0}, 1),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput", "Result": _without(_TASK_DONE, "exit_code")},
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "Result": {**_without(_TASK_DONE, "exit_code"), "exitCode": 0},
+                },
+                0,
+            ),
+            ("get_command_or_subagent_output", {"type": "TaskOutput", "Result": _TASK_DONE}, 1),
+        ],
+        ids=[
+            "command-no-exit-code",
+            "command-renamed-exit-code",
+            "command-exit-0",
+            "search-no-exit-code",
+            "search-renamed-exit-code",
+            "search-exit-0",
+            "poll-no-exit-code",
+            "poll-renamed-exit-code",
+            "poll-exit-0",
+        ],
+    )
+    def test_a_command_search_or_poll_counts_only_with_exit_code_0(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        # Only exit code 0 says a command ran, so a missing or renamed exit code refuses, as it
+        # does through codex. A file read and a listing carry none and rest on `is_error`.
+        stats = self._grok(grok_tool_call(name, report))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     @pytest.mark.parametrize(
@@ -1316,7 +1368,10 @@ class TestACallCountsOnlyIfItSucceeded:
             ("read_file", READ_FILE, 1),
             (
                 "get_command_or_subagent_output",
-                {"type": "TaskOutput", "Result": {"task_id": "call-1", "status": "completed"}},
+                {
+                    "type": "TaskOutput",
+                    "Result": {"task_id": "call-1", "status": "completed", "exit_code": 0},
+                },
                 1,
             ),
         ],
@@ -1327,7 +1382,7 @@ class TestACallCountsOnlyIfItSucceeded:
             "null-status",
             "completed",
             "no-status",
-            "nested-completed-no-exit-code",
+            "nested-completed",
         ],
     )
     def test_a_grok_report_counts_only_with_no_status_or_status_completed(
@@ -1815,7 +1870,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
                     [
                         grok_tool_use("i", "read_file"),
                         grok_tool_use("i", "grep"),
-                        grok_tool_result("i"),
+                        grok_tool_result("i", GREP_MATCHED),
                         grok_result(structured_output=artifact()),
                     ]
                 )

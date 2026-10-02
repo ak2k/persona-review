@@ -90,7 +90,9 @@ directory listing, or a background command's output) and its `tool_result` has `
 false and content that is a JSON object in which every report, including a background
 command's own, carries no `status` other than `completed`, no exit code other than 0, no
 `error` key and not the type `Error`; a background command's report that is not an object
-fails the call. A status either provider has never sent is refused rather than taken for
+fails the call. A command, a search or a background command's output must also report an
+`exit_code` of 0, so a missing or renamed exit code fails it, as through codex; a file read or
+a listing reports none and rests on `is_error`. A status either provider has never sent is refused rather than taken for
 success. For a poll of several background commands, wherever it sits, at least one of them
 must report exit code 0 and no status other than `completed`, and every report around it must
 pass as well. A todo, a task kill or a file edit never counts. A call also counts only when its
@@ -589,8 +591,9 @@ Every command and flag is unchanged.
   under one id, still count once.
 - **More grok results that do not report success no longer count.** A report carrying an
   `error` key or the type `Error`, a background command's report that is not an object, a batch
-  poll whose own report or a sibling report failed, and a batch poll inside a background
-  command's report with no command that exited 0 all used to count.
+  poll whose own report or a sibling report failed, a batch poll inside a background
+  command's report with no command that exited 0, and a command, search or background
+  command's result with no `exit_code` or a renamed one all used to count.
 - **A codex command that exited 0 must also report no status but `completed`.** One that
   reported any other status beside exit code 0 used to count; one that reports no status still
   counts.

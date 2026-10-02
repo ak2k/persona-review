@@ -534,6 +534,20 @@ MUTATIONS: list[Mutation] = [
         "    if ",
     ),
     Mutation(
+        # A renamed exit-code field passed, where a renamed status was already refused.
+        "a grok command result counts without an exit code",
+        "persona_review/validate.py",
+        r'    if command and not batches and all\(_whole_number\(r\.get\("exit_code"\)\) != 0 '
+        r"for r in reports\):",
+        "    if False:",
+    ),
+    Mutation(
+        "a grok result is never judged as a command's",
+        "persona_review/validate.py",
+        r"block, bool\(GROK_COMMAND_TOOLS\.intersection\(called\[ident\]\)\)",
+        "block, False",
+    ),
+    Mutation(
         "a grok report of the error type is not read",
         "persona_review/validate.py",
         r' or report\.get\("type"\) == GROK_ERROR_TYPE:',

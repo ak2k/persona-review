@@ -588,6 +588,12 @@ GROK_INSPECTING_TOOLS = frozenset(
     {"get_command_or_subagent_output", "grep", "list_dir", "read_file", "run_terminal_command"}
 )
 
+# The inspecting tools that report an exit code: a command, a search, and a background
+# command's output. Only exit code 0 says one ran, so a result of theirs with none, or with the
+# field renamed, does not count, as through codex. Verified against 430 local grok-4.7
+# streams, where every counted result of these three carried an integer `exit_code`.
+GROK_COMMAND_TOOLS = frozenset({"get_command_or_subagent_output", "grep", "run_terminal_command"})
+
 # Known tools that read nothing: bookkeeping, and edits. Named, like `CODEX_QUIET_ITEMS`, so
 # that "a tool we skip on purpose" and "a tool we have never heard of" stay different facts —
 # a list of names can go stale, and the drift check in `_grok_stats` is what notices.
@@ -745,14 +751,14 @@ def _grok_batch_ok(batch: JSONValue) -> bool:
     )
 
 
-def _grok_succeeded(block: JSONObject) -> bool:
+def _grok_succeeded(block: JSONObject, command: bool) -> bool:
     """Whether a `tool_result` reports a call that ran and worked.
 
     `is_error` false alone is not that: grok returns a command that exited 2 with `is_error`
     false and the exit code in the content. The content must hold a JSON object, because
     content that is not one reports nothing to judge, and every report in it must pass
-    `_grok_report_ok`. A result with no status and no exit code, a file read, rests on
-    `is_error`.
+    `_grok_report_ok`. A `command` result must also carry exit code 0 in one of its reports;
+    a result with no status and no exit code, a file read, rests on `is_error`.
 
     A batch poll, whichever report carries it, worked when any command in it completed with
     exit code 0: that one inspected something, and a sibling still running or failed does
@@ -767,6 +773,8 @@ def _grok_succeeded(block: JSONObject) -> bool:
     if not all(_grok_report_ok(report) for report in reports):
         return False
     batches = [report[GROK_BATCH_REPORT] for report in reports if GROK_BATCH_REPORT in report]
+    if command and not batches and all(_whole_number(r.get("exit_code")) != 0 for r in reports):
+        return False
     return all(_grok_batch_ok(batch) for batch in batches)
 
 
@@ -836,7 +844,9 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
                     continue
                 if ident not in called:
                     continue
-                succeeded = _grok_succeeded(block)
+                succeeded = _grok_succeeded(
+                    block, bool(GROK_COMMAND_TOOLS.intersection(called[ident]))
+                )
                 answered.setdefault(ident, []).append(succeeded)
                 if succeeded or failure is not None:
                     continue
