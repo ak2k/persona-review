@@ -665,6 +665,31 @@ MUTATIONS: list[Mutation] = [
         "                failure_status = None",
     ),
     Mutation(
+        # A background command's own status is in its nested report, where drift would land.
+        "the exit-3 refusal names only a grok result's outer status",
+        "persona_review/validate.py",
+        r"    for report in _grok_reports\(block\):\n        status = _refused_status",
+        "    for report in _grok_reports(block)[:1]:\n        status = _refused_status",
+    ),
+    Mutation(
+        "the exit-3 refusal names an allowed status as refused",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", allowed\) == allowed:\n        return None',
+        '    if "status" not in report:\n        return None',
+    ),
+    Mutation(
+        "the exit-3 refusal names the last ambiguous grok id, not the first",
+        "persona_review/validate.py",
+        r"GROK_INSPECTING_TOOLS and any\(outcomes\) and ambiguous is None:",
+        "GROK_INSPECTING_TOOLS and any(outcomes):",
+    ),
+    Mutation(
+        "the exit-3 refusal names the last ambiguous codex id, not the first",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif any(outcomes):",
+    ),
+    Mutation(
         "the exit-3 refusal drops the status it was given",
         "persona_review/validate.py",
         r"        if stats\.first_status is not None:",

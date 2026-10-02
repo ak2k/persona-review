@@ -1527,6 +1527,48 @@ class TestACallCountsOnlyIfItSucceeded:
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (2, 0)
         assert stats.first_failure == "first failure line"
 
+    def test_a_status_the_rule_allows_is_never_named_as_the_reason(self):
+        # These failed on their exit code; naming "completed" would send someone to the wrong fix.
+        codex = self._codex(
+            codex_stream(
+                codex_item(
+                    "item.completed",
+                    "command_execution",
+                    exit_code=1,
+                    status="completed",
+                    aggregated_output="boom\n",
+                )
+            )
+        )
+        assert (codex.first_failure, codex.first_status) == ("boom", None)
+        polled = task_output("completed", 2, "Traceback\n")
+        grok = self._grok(grok_tool_call("get_command_or_subagent_output", polled))
+        assert (grok.first_failure, grok.first_status) == ("Traceback", None)
+
+    def test_the_first_ambiguous_id_is_the_one_named(self):
+        grok = self._grok(
+            *(
+                line
+                for ident in ("a", "b")
+                for line in (
+                    grok_tool_use(ident, "read_file"),
+                    grok_tool_use(ident, "list_dir"),
+                    grok_tool_result(ident),
+                )
+            )
+        )
+        assert (grok.local_tool_calls, grok.ambiguous_id) == (0, "a")
+        codex = self._codex(
+            codex_stream(
+                *(
+                    codex_item("item.completed", kind, ident)
+                    for ident in ("a", "b")
+                    for kind in ("web_search", "command_execution")
+                )
+            )
+        )
+        assert (codex.local_tool_calls, codex.ambiguous_id) == (0, "a")
+
     def test_the_run_description_names_the_attempts_beside_none_succeeded(self):
         # "(0 local)" alone would describe a run that never tried.
         described = validate.describe_run(self._codex(C156_STREAM))
@@ -1821,8 +1863,18 @@ class TestTheGateRefusesARunThatInspectedNothing:
                 ),
                 "the first to fail reported status \"declined\" and printed 'f.py'",
             ),
+            # A renamed status in a background command's own report, where grok's live.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("get_command_or_subagent_output", task_output("done", 0, "fine\n"))
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                "the first to fail reported status \"done\" and printed 'fine'",
+            ),
         ],
-        ids=["grok-unknown-status", "codex-exit-0-not-completed"],
+        ids=["grok-unknown-status", "codex-exit-0-not-completed", "grok-poll-unknown-status"],
     )
     def test_a_refused_status_is_named_rather_than_the_report_it_came_in(
         self, mode: str, evidence_mode: str, stream: str, said: str
