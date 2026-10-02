@@ -1323,6 +1323,17 @@ class TestACallCountsOnlyIfItSucceeded:
         )
         assert after_todo.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
 
+    def test_the_first_failed_grok_call_is_the_one_quoted(self):
+        # Each failure prints a different first line, so quoting a later one shows here.
+        stats = self._grok(
+            self._called("a", "run_terminal_command"),
+            grok_tool_result("a", bash_report(2, "first failure line\n")),
+            self._called("b", "run_terminal_command"),
+            grok_tool_result("b", bash_report(1, "second failure line\n")),
+        )
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (2, 0)
+        assert stats.first_failure == "first failure line"
+
     def test_the_run_description_names_the_attempts_beside_none_succeeded(self):
         # "(0 local)" alone would describe a run that never tried.
         described = validate.describe_run(self._codex(C156_STREAM))

@@ -548,6 +548,12 @@ MUTATIONS: list[Mutation] = [
         "                if True:",
     ),
     Mutation(
+        "the exit-3 refusal quotes the last grok failure, not the first",
+        "persona_review/validate.py",
+        r"                if succeeded or failure is not None:",
+        "                if succeeded:",
+    ),
+    Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call
         # certifies a codex run that only ever thought and answered.
         "every codex item counts as a tool call, not just the tool ones",
