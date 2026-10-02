@@ -1155,6 +1155,110 @@ class TestACallCountsOnlyIfItSucceeded:
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     @pytest.mark.parametrize(
+        ("report", "succeeded"),
+        [
+            ({**task_outputs(("completed", 0)), "status": "failed"}, 0),
+            (
+                {
+                    **task_outputs(("completed", 0)),
+                    "Result": {"task_id": "call-9", "status": "failed", "exit_code": 1},
+                },
+                0,
+            ),
+            ({**task_outputs(("completed", 0)), "status": "completed"}, 1),
+        ],
+        ids=["status-failed", "beside-a-failed-result", "status-completed"],
+    )
+    def test_a_batch_poll_counts_only_when_every_report_in_it_passes(
+        self, report: dict[str, Any], succeeded: int
+    ):
+        # A child that worked does not outvote the poll's own report, or a sibling's.
+        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        "nested",
+        ["failed", None, 0, [{"status": "completed", "exit_code": 0}]],
+        ids=["string", "null", "number", "list"],
+    )
+    def test_a_background_report_that_is_not_an_object_does_not_count(self, nested: Any):
+        # It reports nothing to judge, as content that is not an object does not.
+        report = {"type": "TaskOutput", "Result": nested}
+        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
+    @pytest.mark.parametrize(
+        ("children", "succeeded"),
+        [
+            ((("failed", 1), ("running", None)), 0),
+            ((("failed", 1), ("completed", 0)), 1),
+        ],
+        ids=["none-exited-0", "one-exited-0"],
+    )
+    def test_a_batch_poll_inside_a_background_report_is_judged_as_a_batch(
+        self, children: tuple[tuple[str, int | None], ...], succeeded: int
+    ):
+        report = {"type": "TaskOutput", "Result": task_outputs(*children)}
+        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            # As grok reports a tool that could not execute, here beside `is_error` false.
+            (
+                "run_terminal_command",
+                {"error": "tool_execution_failed", "message": "self-matching pkill/-f"},
+                0,
+            ),
+            ("read_file", {**READ_FILE, "error": None}, 0),
+            ("read_file", {"type": "Error", "message": "permission denied"}, 0),
+            (
+                "get_command_or_subagent_output",
+                task_output("completed", 0, "") | {"error": "lost"},
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "Result": {**task_output("completed", 0, "")["Result"], "type": "Error"},
+                },
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "MultiResult": {
+                        "results": [{"status": "completed", "exit_code": 0, "error": "lost"}]
+                    },
+                },
+                0,
+            ),
+            ("read_file", READ_FILE, 1),
+            ("get_command_or_subagent_output", task_output("completed", 0, ""), 1),
+        ],
+        ids=[
+            "error-key",
+            "null-error-key",
+            "error-type",
+            "error-key-beside-a-background-report",
+            "background-report-of-error-type",
+            "batch-child-with-an-error-key",
+            "control-file-read",
+            "control-background-report",
+        ],
+    )
+    def test_a_grok_report_carrying_an_error_does_not_count(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        # `is_error` false beside a report that says it is an error is not a success, and no
+        # report of a real success carries either.
+        stats = self._grok(grok_tool_call(name, report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
         "content",
         [
             "command not found",
@@ -3005,7 +3109,7 @@ class TestGateIsFailClosed:
 # The keys a grok report is judged by. Payloads never carry them, so only an arm below or a
 # spoiler decides them. `MultiResult` is among them: a batch poll counts when any one child
 # worked, a different rule, held by its own table in `TestACallCountsOnlyIfItSucceeded`.
-_GROK_JUDGED_KEYS = frozenset({"status", "exit_code", "Result", "MultiResult", "type"})
+_GROK_JUDGED_KEYS = frozenset({"status", "exit_code", "Result", "MultiResult", "type", "error"})
 _grok_payload: st.SearchStrategy[dict[str, Any]] = st.dictionaries(
     st.text(max_size=8).filter(lambda key: key not in _GROK_JUDGED_KEYS), json_values, max_size=3
 )
@@ -3056,7 +3160,8 @@ _ABSENT = object()
 
 # Each way a result fails to report success, built directly rather than asked of the code
 # under test: content holding no JSON object, a status other than "completed", an exit code
-# other than the integer 0, and an `is_error` other than false.
+# other than the integer 0, an `is_error` other than false, a report carrying an `error` key
+# or the type "Error", and a background command's report that is not an object.
 grok_spoilers: st.SearchStrategy[tuple[str, str, Any]] = st.one_of(
     st.tuples(
         st.just("content"),
@@ -3085,6 +3190,13 @@ grok_spoilers: st.SearchStrategy[tuple[str, str, Any]] = st.one_of(
     ),
     st.tuples(
         st.just("is_error"), st.just("top"), st.sampled_from([True, None, 0, "false", _ABSENT])
+    ),
+    st.tuples(st.just("error"), st.sampled_from(["top", "nested"]), json_values),
+    st.tuples(st.just("type"), st.sampled_from(["top", "nested"]), st.just("Error")),
+    st.tuples(
+        st.just("Result"),
+        st.just("top"),
+        json_values.filter(lambda value: not isinstance(value, dict)),
     ),
 )
 

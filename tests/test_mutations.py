@@ -480,29 +480,64 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a batch poll's command that exited 0 counts whatever its status",
         "persona_review/validate.py",
-        r"            and _grok_report_ok\(child\)\n",
+        r"        and _grok_report_ok\(child\)\n",
         "",
     ),
     Mutation(
         "a batch poll's command counts without an exit code",
         "persona_review/validate.py",
-        r'            and _whole_number\(child\.get\("exit_code"\)\) == 0\n',
+        r'        and _whole_number\(child\.get\("exit_code"\)\) == 0\n',
         "",
     ),
     Mutation(
         # A background command's own status and exit code arrive one level down.
         "a background command's own report is not read",
         "persona_review/validate.py",
-        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[content\]",
+        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[\]",
         "    return [content]",
+    ),
+    Mutation(
+        # Dropped, it leaves the outer object, which carries no status or exit code.
+        "a background command's report that is not an object is passed over",
+        "persona_review/validate.py",
+        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[\]",
+        "    return [content, nested] if isinstance(nested, dict) else [content]",
     ),
     Mutation(
         # The outer object of a batch poll carries no status or exit code, so reading only
         # it counted a poll of commands that all failed as a successful read.
         "a grok batch poll is judged by its outer object alone",
         "persona_review/validate.py",
-        r"    if GROK_BATCH_REPORT in reports\[0\]:",
-        "    if False:",
+        r"    return all\(_grok_batch_ok\(batch\) for batch in batches\)",
+        "    return True",
+    ),
+    Mutation(
+        # A child that exited 0 outvoted the poll's own failed status, or a failed sibling.
+        "a grok batch poll skips the rule every other report passes",
+        "persona_review/validate.py",
+        r"    if not all\(_grok_report_ok\(report\) for report in reports\):",
+        "    if GROK_BATCH_REPORT not in reports[0] and not all(\n"
+        "        _grok_report_ok(report) for report in reports\n"
+        "    ):",
+    ),
+    Mutation(
+        "a grok batch poll inside a background command's report skips the batch rule",
+        "persona_review/validate.py",
+        r"for report in reports if GROK_BATCH_REPORT in report\]",
+        "for report in reports[:1] if GROK_BATCH_REPORT in report]",
+    ),
+    Mutation(
+        # `is_error` false beside a report saying it is an error.
+        "a grok report's error key is not read",
+        "persona_review/validate.py",
+        r"    if GROK_ERROR_KEY in report or ",
+        "    if ",
+    ),
+    Mutation(
+        "a grok report of the error type is not read",
+        "persona_review/validate.py",
+        r' or report\.get\("type"\) == GROK_ERROR_TYPE:',
+        ":",
     ),
     Mutation(
         "a grok result for a call this run never made counts",

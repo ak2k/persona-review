@@ -602,6 +602,12 @@ GROK_BATCH_REPORT = "MultiResult"
 # The one `status` a report may carry and still count; a report may also carry none.
 GROK_COMPLETED = "completed"
 
+# A report that names an error, by this key or by this type, is no success whatever
+# `is_error` says. grok reports a tool that could not execute as `{"error": ...,
+# "message": ...}`; no report of a real success carries either.
+GROK_ERROR_KEY = "error"
+GROK_ERROR_TYPE = "Error"
+
 # codex's `--json` stream is items rather than messages: one `item.started` and one
 # `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
 # outside the model. Verified against codex-cli 0.150.1.
@@ -680,7 +686,8 @@ def _first_line(value: JSONValue) -> str:
 
 def _grok_reports(block: JSONObject) -> list[JSONObject]:
     """The objects a `tool_result` reports a call's outcome in: its content, and the report
-    nested in it when the call was a background command's."""
+    nested in it when the call was a background command's. None at all when either is not
+    an object, because it then reports nothing to judge."""
     content = block.get("content")
     if isinstance(content, str):
         try:
@@ -689,8 +696,10 @@ def _grok_reports(block: JSONObject) -> list[JSONObject]:
             return []
     if not isinstance(content, dict):
         return []
-    nested = content.get(GROK_NESTED_REPORT)
-    return [content, nested] if isinstance(nested, dict) else [content]
+    if GROK_NESTED_REPORT not in content:
+        return [content]
+    nested = content[GROK_NESTED_REPORT]
+    return [content, nested] if isinstance(nested, dict) else []
 
 
 def _grok_report_ok(report: JSONObject) -> bool:
@@ -698,11 +707,25 @@ def _grok_report_ok(report: JSONObject) -> bool:
 
     The status is an allowlist: grok reports "running" for a command it moved to the
     background and "failed" for one that did not work, and a status it has never sent is not
-    taken for success. A null exit code is a command that has not finished.
+    taken for success. A null exit code is a command that has not finished. A report that
+    names an error never passes.
     """
+    if GROK_ERROR_KEY in report or report.get("type") == GROK_ERROR_TYPE:
+        return False
     if report.get("status", GROK_COMPLETED) != GROK_COMPLETED:
         return False
     return "exit_code" not in report or _whole_number(report["exit_code"]) == 0
+
+
+def _grok_batch_ok(batch: JSONValue) -> bool:
+    """Whether a poll of several background commands holds one that completed with exit 0."""
+    results = batch.get("results") if isinstance(batch, dict) else None
+    return isinstance(results, list) and any(
+        isinstance(child, dict)
+        and _whole_number(child.get("exit_code")) == 0
+        and _grok_report_ok(child)
+        for child in results
+    )
 
 
 def _grok_succeeded(block: JSONObject) -> bool:
@@ -714,8 +737,9 @@ def _grok_succeeded(block: JSONObject) -> bool:
     `_grok_report_ok`. A result with no status and no exit code, a file read, rests on
     `is_error`.
 
-    A batch poll worked when any command in it completed with exit code 0: that one inspected
-    something, and a sibling still running or failed does not undo it. Any other batch shape
+    A batch poll, whichever report carries it, worked when any command in it completed with
+    exit code 0: that one inspected something, and a sibling still running or failed does
+    not undo it. The reports around the batch still have to pass, and any other batch shape
     fails closed.
     """
     if block.get("is_error") is not False:
@@ -723,16 +747,10 @@ def _grok_succeeded(block: JSONObject) -> bool:
     reports = _grok_reports(block)
     if not reports:
         return False
-    if GROK_BATCH_REPORT in reports[0]:
-        batch = reports[0][GROK_BATCH_REPORT]
-        results = batch.get("results") if isinstance(batch, dict) else None
-        return isinstance(results, list) and any(
-            isinstance(child, dict)
-            and _whole_number(child.get("exit_code")) == 0
-            and _grok_report_ok(child)
-            for child in results
-        )
-    return all(_grok_report_ok(report) for report in reports)
+    if not all(_grok_report_ok(report) for report in reports):
+        return False
+    batches = [report[GROK_BATCH_REPORT] for report in reports if GROK_BATCH_REPORT in report]
+    return all(_grok_batch_ok(batch) for batch in batches)
 
 
 def _grok_output(block: JSONObject) -> str:
