@@ -92,10 +92,10 @@ command's own, carries no `status` other than `completed`, no exit code other th
 `error` key and not the type `Error`; a background command's report that is not an object
 fails the call. A command, a search or a background command's output must also report an
 `exit_code` of 0, so a missing or renamed exit code fails it, as through codex; a file read or
-a listing reports none and rests on `is_error`. A status either provider has never sent is refused rather than taken for
-success. For a poll of several background commands, wherever it sits, at least one of them
-must report exit code 0 and no status other than `completed`, and every report around it must
-pass as well. A todo, a task kill or a file edit never counts. A call also counts only when its
+a listing reports none and rests on `is_error`. A status either provider has never sent is refused
+rather than taken for success. For a poll of several background commands, wherever it sits, at least
+one of them must report exit code 0 and no status other than `completed`, and every report around it
+must pass as well. A todo, a task kill or a file edit never counts. A call also counts only when its
 id pairs it with its result unambiguously: an id that two different tools or item kinds share,
 or one reported both succeeding and failing, counts for none of them, while one tool called
 twice under an id counts once.
@@ -538,22 +538,23 @@ and a `run_stats` object counting what the run *did* — `tool_calls`, `local_to
 run made; `local_tool_attempts` is the ones that act on the working directory, and
 `local_tool_calls` the ones among them that succeeded. Through codex the local calls are the
 `command_execution` and `local_shell_call` items, and one succeeded when it completed with
-`exit_code` 0 and no status but `completed`. `file_change`, `patch_apply`, `web_search`, `mcp_tool_call`, `function_call`
-and `custom_tool_call` count in `tool_calls` only, because none of them proves the tree was
-read. Through grok a local attempt is a call to one of `run_terminal_command`, `grep`,
-`read_file`, `list_dir` or `get_command_or_subagent_output` (`--disable-web-search` removes
-its web tools), and it succeeded when its `tool_result` has `is_error` false and a JSON object
-as content, and every report in it carries no status but `completed`, no exit code but 0, no
-`error` key and not the type `Error`; a poll of several background commands succeeded when at
-least one of them completed with exit code 0 and the reports around it pass. `todo_write`,
-`kill_command_or_subagent`, `search_replace` and `write` count in
+`exit_code` 0 and no status but `completed`. `file_change`, `patch_apply`, `web_search`,
+`mcp_tool_call`, `function_call` and `custom_tool_call` count in `tool_calls` only, because none of
+them proves the tree was read. Through grok a local attempt is a call to one of
+`run_terminal_command`, `grep`, `read_file`, `list_dir` or `get_command_or_subagent_output`
+(`--disable-web-search` removes its web tools), and it succeeded when its `tool_result` has
+`is_error` false and a JSON object as content, and every report in it carries no status but
+`completed`, no exit code but 0, no `error` key and not the type `Error`; a poll of several
+background commands succeeded when at least one of them completed with exit code 0 and the reports
+around it pass. `todo_write`, `kill_command_or_subagent`, `search_replace` and `write` count in
 `tool_calls` only. On both sides a call succeeded only when its id pairs it unambiguously: a
-grok id that `tool_use` blocks naming two different tools share, or a codex id that two item kinds share, or either
-one reported both succeeding and failing, adds nothing to `local_tool_calls`. A grok stream with no local attempt that calls a tool name this build
-does not know exits `3` naming it, as codex kind drift does. The exit status turns on the two local counts — no local attempts is exit `6`, attempts
-and no successes exit `3` — so they are recorded rather than only acted on: a refusal you cannot
-audit afterwards is one you have to take on trust. `ce-persona-findings` refuses a sidecar whose
-`local_tool_calls` is zero.
+grok id that `tool_use` blocks naming two different tools share, or a codex id that two item kinds
+share, or either one reported both succeeding and failing, adds nothing to `local_tool_calls`. A
+grok stream with no local attempt that calls a tool name this build does not know exits `3` naming
+it, as codex kind drift does. The exit status turns on the two local counts — no local attempts is
+exit `6`, attempts and no successes exit `3` — so they are recorded rather than only acted on: a
+refusal you cannot audit afterwards is one you have to take on trust. `ce-persona-findings` refuses
+a sidecar whose `local_tool_calls` is zero.
 
 Older sidecars are read by the rule they were written under. One written before 0.3.3 carries no
 `local_tool_calls` and is refused when `tool_calls` is zero. One written by 0.3.3 or 0.3.4 carries
