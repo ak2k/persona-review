@@ -1244,29 +1244,59 @@ class TestACallCountsOnlyIfItSucceeded:
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     @pytest.mark.parametrize(
-        "nested",
-        ["failed", None, 0, [{"status": "completed", "exit_code": 0}]],
-        ids=["string", "null", "number", "list"],
+        ("name", "outer", "nested"),
+        [
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, "failed"),
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, None),
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, 0),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                [{"status": "completed", "exit_code": 0}],
+            ),
+            ("read_file", READ_FILE, None),
+        ],
+        ids=["string", "null", "number", "list", "file-read-null"],
     )
-    def test_a_background_report_that_is_not_an_object_does_not_count(self, nested: Any):
-        # It reports nothing to judge, as content that is not an object does not.
-        report = {"type": "TaskOutput", "Result": nested}
-        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+    def test_a_background_report_that_is_not_an_object_does_not_count(
+        self, name: str, outer: dict[str, Any], nested: Any
+    ):
+        # It reports nothing to judge, as content that is not an object does not. A file read
+        # needs no exit code, so there this rule is the only one that refuses it.
+        report = {**outer, "Result": nested}
+        stats = self._grok(grok_tool_call(name, report))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
 
     @pytest.mark.parametrize(
-        ("children", "succeeded"),
+        ("name", "outer", "children", "succeeded"),
         [
-            ((("failed", 1), ("running", None)), 0),
-            ((("failed", 1), ("completed", 0)), 1),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                (("failed", 1), ("running", None)),
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                (("failed", 1), ("completed", 0)),
+                1,
+            ),
+            ("read_file", READ_FILE, (("failed", 1), ("running", None)), 0),
         ],
-        ids=["none-exited-0", "one-exited-0"],
+        ids=["none-exited-0", "one-exited-0", "file-read-none-exited-0"],
     )
     def test_a_batch_poll_inside_a_background_report_is_judged_as_a_batch(
-        self, children: tuple[tuple[str, int | None], ...], succeeded: int
+        self,
+        name: str,
+        outer: dict[str, Any],
+        children: tuple[tuple[str, int | None], ...],
+        succeeded: int,
     ):
-        report = {"type": "TaskOutput", "Result": task_outputs(*children)}
-        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        # A file read needs no exit code, so there the batch rule is the only one that refuses
+        # a poll in which no command exited 0.
+        report = {**outer, "Result": task_outputs(*children)}
+        stats = self._grok(grok_tool_call(name, report))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     @pytest.mark.parametrize(
