@@ -678,6 +678,13 @@ MUTATIONS: list[Mutation] = [
         '    if "status" not in report:\n        return None',
     ),
     Mutation(
+        # The rule refuses a null status, which is not a missing one, so the refusal names it.
+        "the exit-3 refusal takes a null status for a missing one",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", allowed\) == allowed:\n        return None',
+        '    if report.get("status") in (None, allowed):\n        return None',
+    ),
+    Mutation(
         "the exit-3 refusal names the last ambiguous grok id, not the first",
         "persona_review/validate.py",
         r"GROK_INSPECTING_TOOLS and any\(outcomes\) and ambiguous is None:",

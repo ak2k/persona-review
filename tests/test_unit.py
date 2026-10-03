@@ -1873,8 +1873,23 @@ class TestTheGateRefusesARunThatInspectedNothing:
                 + "\n",
                 "the first to fail reported status \"done\" and printed 'fine'",
             ),
+            # A null status, which the rule refuses where it allows a missing one.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("read_file", {**READ_FILE, "status": None})
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                "the first to fail reported status null and printed nothing",
+            ),
         ],
-        ids=["grok-unknown-status", "codex-exit-0-not-completed", "grok-poll-unknown-status"],
+        ids=[
+            "grok-unknown-status",
+            "codex-exit-0-not-completed",
+            "grok-poll-unknown-status",
+            "grok-null-status",
+        ],
     )
     def test_a_refused_status_is_named_rather_than_the_report_it_came_in(
         self, mode: str, evidence_mode: str, stream: str, said: str
