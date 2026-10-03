@@ -586,10 +586,10 @@ Every command and flag is unchanged.
 - **A call's id has to pair it unambiguously.** A grok id that `tool_use` blocks naming two
   different tools share, a codex id that two item kinds share, or an id reported both
   succeeding and failing, counts for none of them, and the exit-`3` refusal names the id. Such
-  a run used to count the success, except through grok when the failure was reported first,
-  which counted nothing then either. Identical repeated reports, and a grok call echoed under
-  its own id, still count once. One grok tool called twice under one id, each call answered,
-  now counts once; it used to count twice.
+  a run used to count the success; through grok, only when it was the first result under that
+  id after a call to a tool that reads the tree. Identical repeated reports, and a grok call
+  echoed under its own id, still count once. One grok tool called twice under one id, each
+  call answered, now counts once; it used to count twice.
 - **More grok results that do not report success no longer count.** A report carrying an
   `error` key or the type `Error`, a background command's report that is not an object, a batch
   poll whose own report or a sibling report failed, a batch poll inside a background
