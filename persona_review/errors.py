@@ -167,8 +167,8 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
         (
             "the model answered without attempting a single local tool call: it",
             "inspected nothing, so its {answer} -- empty or not -- attest to nothing",
-            "(through codex, a local call is a shell command or a file change or patch;",
-            "a web search, MCP call or function call is not one)",
+            "(through codex, a local call is a shell command; a file change, patch,",
+            "web search, MCP call or function call is not one)",
         ),
     ),
     (BudgetError.exit_code, ("over CE_PERSONA_MAX_PROMPT_TOKENS; refused, never summarized",)),

@@ -165,6 +165,10 @@ def _octets(text: str) -> list[int]:
     return list(text.encode("utf-8"))
 
 
+def _without(report: dict[str, Any], key: str) -> dict[str, Any]:
+    return {k: v for k, v in report.items() if k != key}
+
+
 READ_FILE = {
     "type": "ReadFile",
     "FileContent": {
@@ -212,6 +216,7 @@ GREP_NO_MATCH = {
     "match_count": 0,
     "file_matches": [],
 }
+GREP_MATCHED = {**GREP_NO_MATCH, "exit_code": 0, "match_count": 1}
 # A command moved to the background before anything came back.
 BACKGROUND_STARTED = {
     "type": "BackgroundTaskStarted",
@@ -265,6 +270,9 @@ def task_output(status: str, exit_code: int | None, output: str) -> dict[str, An
     }
 
 
+_TASK_DONE: dict[str, Any] = task_output("completed", 0, "Python 3.14.6\n")["Result"]
+
+
 def task_outputs(*children: tuple[str, int | None]) -> dict[str, Any]:
     """A poll of several background commands at once: each one's report in a list under
     `MultiResult`. Keys and value types as a real grok-4.7 session recorded them."""
@@ -308,6 +316,12 @@ def grok_tool_result(
     return json.dumps({"type": "user", "message": {"role": "user", "content": [block]}})
 
 
+def grok_tool_use(ident: str, name: str) -> str:
+    """A call alone, under the id given, so a test can reuse one id or answer it later."""
+    use: dict[str, Any] = {"type": "tool_use", "id": ident, "name": name, "input": {}}
+    return json.dumps({"type": "assistant", "message": {"content": [use]}})
+
+
 def grok_tool_call(
     name: str = "read_file", report: dict[str, Any] | str | None = READ_FILE, **result: Any
 ) -> str:
@@ -345,18 +359,22 @@ def grok_result(**over: Any) -> str:
     return json.dumps(event)
 
 
+# Tool kinds that change the working tree. A write does not show the tree was read.
+WRITE_KINDS = ["file_change", "patch_apply"]
+
+
 def codex_item(kind: str, item_type: str, ident: str | None = "item_1", **fields: Any) -> str:
-    """One codex item event. A completed local item SUCCEEDS unless `fields` say otherwise,
+    """One codex item event. A completed command SUCCEEDS unless `fields` say otherwise,
     because every completed command in a real stream carries an exit code: 0 when it worked.
+    A completed write carries status "completed", as a real one does.
     """
     item: dict[str, Any] = {"type": item_type}
     if ident is not None:
         item["id"] = ident
-    if kind == "item.completed" and item_type in validate.CODEX_LOCAL_TOOL_ITEMS:
-        if item_type in validate.CODEX_COMMAND_ITEMS:
-            item.update(aggregated_output="", exit_code=0, status="completed")
-        else:
-            item.update(status="completed")
+    if kind == "item.completed" and item_type in validate.CODEX_COMMAND_ITEMS:
+        item.update(aggregated_output="", exit_code=0, status="completed")
+    elif kind == "item.completed" and item_type in WRITE_KINDS:
+        item.update(status="completed")
     item.update(fields)
     return json.dumps({"type": kind, "item": item})
 
@@ -880,16 +898,16 @@ class TestRunEvidence:
             stats = self._codex(codex_item("item.completed", kind, ident))
             assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), ident
 
-    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS + WRITE_KINDS)
     def test_a_kind_that_does_not_prove_the_tree_was_read_is_a_call_but_not_local(self, kind: str):
         stats = self._codex(codex_item("item.completed", kind, "item_1"))
         assert (stats.tool_calls, stats.local_tool_calls) == (1, 0)
 
-    def test_the_local_kinds_are_the_ones_that_act_on_the_working_directory(self):
+    def test_the_local_kinds_are_the_ones_that_read_the_working_directory(self):
         local = validate.CODEX_LOCAL_TOOL_ITEMS
-        assert local == {"command_execution", "file_change", "local_shell_call", "patch_apply"}
+        assert local == {"command_execution", "local_shell_call"}
         not_local = validate.CODEX_TOOL_ITEMS - local
-        assert not_local == set(NOT_LOCAL_KINDS)
+        assert not_local == set(NOT_LOCAL_KINDS) | set(WRITE_KINDS)
 
     def test_grok_counts_every_inspecting_call_as_local(self):
         # The argv disables grok's web tools, so no inspecting call left is one known to leave
@@ -904,7 +922,9 @@ class TestRunEvidence:
                 last_file=None,
             )
         )
-        stats = self._grok(grok_tool_call("grep"), grok_tool_call("read_file"), grok_result())
+        stats = self._grok(
+            grok_tool_call("grep", GREP_MATCHED), grok_tool_call("read_file"), grok_result()
+        )
         assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 2, 2)
 
     def test_an_id_less_call_counts_once_never_twice(self):
@@ -1015,22 +1035,74 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._codex(codex_stream(codex_item("item.completed", kind, exit_code=0)))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
-    @pytest.mark.parametrize(
-        "kind", sorted(validate.CODEX_LOCAL_TOOL_ITEMS - validate.CODEX_COMMAND_ITEMS)
-    )
-    @pytest.mark.parametrize("status", ["failed", "declined", "in_progress", None])
-    def test_a_file_change_counts_only_when_completed(self, kind: str, status: str | None):
-        stats = self._codex(codex_stream(codex_item("item.completed", kind, status=status)))
+    @pytest.mark.parametrize("status", ["failed", "declined", "in_progress", "Completed", None, 0])
+    def test_a_command_that_exited_0_counts_only_with_no_status_or_status_completed(
+        self, status: Any
+    ):
+        refused = codex_item("item.completed", "command_execution", status=status)
+        stats = self._codex(codex_stream(refused))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        # The two that count, as for a grok report: "completed", and no status at all.
+        worked = codex_item("item.completed", "command_execution", status="completed")
+        bare = json.loads(worked)
+        del bare["item"]["status"]
+        for done in (worked, json.dumps(bare)):
+            stats = self._codex(codex_stream(done))
+            assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), done
 
-    def test_the_command_kinds_are_local_kinds(self):
-        assert validate.CODEX_COMMAND_ITEMS < validate.CODEX_LOCAL_TOOL_ITEMS
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_a_completed_write_is_a_tool_call_and_never_a_local_one(self, kind: str):
+        # Grok's edits are skipped for the same reason: changing the tree shows no read of it.
+        stats = self._codex(
+            codex_stream(codex_item("item.started", kind), codex_item("item.completed", kind))
+        )
+        assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (1, 0, 0)
+
+    def test_every_local_kind_succeeds_by_exit_code(self):
+        # A local kind is judged by its exit code alone, so one that carries none would never
+        # succeed: adding such a kind means giving it a rule in `_codex_succeeded` first.
+        assert validate.CODEX_COMMAND_ITEMS == validate.CODEX_LOCAL_TOOL_ITEMS
 
     def test_a_call_reported_complete_twice_succeeds_once(self):
         # So the succeeded count never exceeds the attempts it is a part of.
         done = codex_item("item.completed", "command_execution", "item_1")
         stats = self._codex(codex_stream(done, done))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    def test_a_codex_id_carried_by_two_kinds_pairs_with_neither(self):
+        # A command's start and a write's completion are two calls, and neither is shown to
+        # have worked.
+        wrote = self._codex(
+            codex_stream(
+                codex_item("item.started", "command_execution", "i"),
+                codex_item("item.completed", "file_change", "i"),
+            )
+        )
+        assert (wrote.tool_calls, wrote.local_tool_attempts, wrote.local_tool_calls) == (2, 1, 0)
+        ran = self._codex(
+            codex_stream(
+                codex_item("item.started", "local_shell_call", "i"),
+                codex_item("item.completed", "command_execution", "i"),
+            )
+        )
+        assert (ran.tool_calls, ran.local_tool_attempts, ran.local_tool_calls) == (2, 2, 0)
+        searched = self._codex(
+            codex_stream(
+                codex_item("item.completed", "web_search", "i"),
+                codex_item("item.completed", "command_execution", "i"),
+            )
+        )
+        assert (searched.tool_calls, searched.local_tool_calls) == (2, 0)
+
+    @pytest.mark.parametrize("failed_first", [True, False])
+    def test_a_codex_id_completed_both_ways_counts_for_neither(self, failed_first: bool):
+        failed = codex_item(
+            "item.completed", "command_execution", "i", exit_code=1, status="failed"
+        )
+        worked = codex_item("item.completed", "command_execution", "i")
+        order = (failed, worked) if failed_first else (worked, failed)
+        stats = self._codex(codex_stream(*order))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
 
     def test_a_long_first_line_is_cut(self):
         long = codex_item(
@@ -1057,7 +1129,9 @@ class TestACallCountsOnlyIfItSucceeded:
     def test_a_grok_call_counts_only_on_a_result_reporting_success(
         self, report: dict[str, Any], is_error: bool, succeeded: int
     ):
-        stats = self._grok(grok_tool_call("run_terminal_command", report, is_error=is_error))
+        # A file read's report answers a file read: a command's result must carry an exit code.
+        name = "read_file" if report is READ_FILE else "run_terminal_command"
+        stats = self._grok(grok_tool_call(name, report, is_error=is_error))
         assert (stats.tool_calls, stats.local_tool_attempts) == (1, 1)
         assert stats.local_tool_calls == succeeded
 
@@ -1073,6 +1147,10 @@ class TestACallCountsOnlyIfItSucceeded:
             ({"type": "TaskOutput", "MultiResult": {"results": {"exit_code": 0}}}, 0),
             ({"type": "TaskOutput", "MultiResult": {"results": [{"exit_code": "0"}]}}, 0),
             ({"type": "TaskOutput", "MultiResult": [{"exit_code": 0}]}, 0),
+            (task_outputs(("failed", 0)), 0),
+            (task_outputs(("failed", 0), ("completed", 0)), 1),
+            ({"type": "TaskOutput", "MultiResult": {"results": [{"exit_code": 0}]}}, 1),
+            ({"type": "TaskOutput", "MultiResult": {"results": [{"status": "completed"}]}}, 0),
         ],
         ids=[
             "all-exited-0",
@@ -1084,14 +1162,263 @@ class TestACallCountsOnlyIfItSucceeded:
             "results-not-a-list",
             "exit-code-not-a-number",
             "batch-not-an-object",
+            "exited-0-but-failed",
+            "exited-0-but-failed-beside-one-completed",
+            "exited-0-without-a-status",
+            "completed-without-an-exit-code",
         ],
     )
-    def test_a_batch_poll_counts_only_when_one_of_its_commands_exited_0(
+    def test_a_batch_poll_counts_only_when_one_of_its_commands_completed_with_exit_0(
         self, report: dict[str, Any], succeeded: int
     ):
         # No status or exit code on the outer object: reading only that counted a poll of
-        # commands that all failed as a successful read.
+        # commands that all failed as a successful read. A child needs both halves, an
+        # `exit_code` of 0 and no status other than "completed".
         stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            ("run_terminal_command", _without(BASH_OK, "exit_code"), 0),
+            ("run_terminal_command", {**_without(BASH_OK, "exit_code"), "exitCode": 0}, 0),
+            ("run_terminal_command", BASH_OK, 1),
+            ("grep", _without(GREP_NO_MATCH, "exit_code"), 0),
+            ("grep", {**_without(GREP_NO_MATCH, "exit_code"), "returncode": 0}, 0),
+            ("grep", {**GREP_NO_MATCH, "exit_code": 0}, 1),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput", "Result": _without(_TASK_DONE, "exit_code")},
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "Result": {**_without(_TASK_DONE, "exit_code"), "exitCode": 0},
+                },
+                0,
+            ),
+            ("get_command_or_subagent_output", {"type": "TaskOutput", "Result": _TASK_DONE}, 1),
+        ],
+        ids=[
+            "command-no-exit-code",
+            "command-renamed-exit-code",
+            "command-exit-0",
+            "search-no-exit-code",
+            "search-renamed-exit-code",
+            "search-exit-0",
+            "poll-no-exit-code",
+            "poll-renamed-exit-code",
+            "poll-exit-0",
+        ],
+    )
+    def test_a_command_search_or_poll_counts_only_with_exit_code_0(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        # Only exit code 0 says a command ran, so a missing or renamed exit code refuses, as it
+        # does through codex. A file read and a listing carry none and rest on `is_error`.
+        stats = self._grok(grok_tool_call(name, report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("report", "succeeded"),
+        [
+            ({**task_outputs(("completed", 0)), "status": "failed"}, 0),
+            (
+                {
+                    **task_outputs(("completed", 0)),
+                    "Result": {"task_id": "call-9", "status": "failed", "exit_code": 1},
+                },
+                0,
+            ),
+            ({**task_outputs(("completed", 0)), "status": "completed"}, 1),
+        ],
+        ids=["status-failed", "beside-a-failed-result", "status-completed"],
+    )
+    def test_a_batch_poll_counts_only_when_every_report_in_it_passes(
+        self, report: dict[str, Any], succeeded: int
+    ):
+        # A child that worked does not outvote the poll's own report, or a sibling's.
+        stats = self._grok(grok_tool_call("get_command_or_subagent_output", report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("name", "outer", "nested"),
+        [
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, "failed"),
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, None),
+            ("get_command_or_subagent_output", {"type": "TaskOutput"}, 0),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                [{"status": "completed", "exit_code": 0}],
+            ),
+            ("read_file", READ_FILE, None),
+        ],
+        ids=["string", "null", "number", "list", "file-read-null"],
+    )
+    def test_a_background_report_that_is_not_an_object_does_not_count(
+        self, name: str, outer: dict[str, Any], nested: Any
+    ):
+        # It reports nothing to judge, as content that is not an object does not. A file read
+        # needs no exit code, so there this rule is the only one that refuses it.
+        report = {**outer, "Result": nested}
+        stats = self._grok(grok_tool_call(name, report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
+    @pytest.mark.parametrize(
+        ("name", "outer", "children", "succeeded"),
+        [
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                (("failed", 1), ("running", None)),
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput"},
+                (("failed", 1), ("completed", 0)),
+                1,
+            ),
+            ("read_file", READ_FILE, (("failed", 1), ("running", None)), 0),
+        ],
+        ids=["none-exited-0", "one-exited-0", "file-read-none-exited-0"],
+    )
+    def test_a_batch_poll_inside_a_background_report_is_judged_as_a_batch(
+        self,
+        name: str,
+        outer: dict[str, Any],
+        children: tuple[tuple[str, int | None], ...],
+        succeeded: int,
+    ):
+        # A file read needs no exit code, so there the batch rule is the only one that refuses
+        # a poll in which no command exited 0.
+        report = {**outer, "Result": task_outputs(*children)}
+        stats = self._grok(grok_tool_call(name, report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            # As grok reports a tool that could not execute, here beside `is_error` false.
+            (
+                "run_terminal_command",
+                {"error": "tool_execution_failed", "message": "self-matching pkill/-f"},
+                0,
+            ),
+            ("read_file", {**READ_FILE, "error": None}, 0),
+            ("read_file", {"type": "Error", "message": "permission denied"}, 0),
+            (
+                "get_command_or_subagent_output",
+                task_output("completed", 0, "") | {"error": "lost"},
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "Result": {**task_output("completed", 0, "")["Result"], "type": "Error"},
+                },
+                0,
+            ),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "MultiResult": {
+                        "results": [{"status": "completed", "exit_code": 0, "error": "lost"}]
+                    },
+                },
+                0,
+            ),
+            ("read_file", READ_FILE, 1),
+            ("get_command_or_subagent_output", task_output("completed", 0, ""), 1),
+        ],
+        ids=[
+            "error-key",
+            "null-error-key",
+            "error-type",
+            "error-key-beside-a-background-report",
+            "background-report-of-error-type",
+            "batch-child-with-an-error-key",
+            "control-file-read",
+            "control-background-report",
+        ],
+    )
+    def test_a_grok_report_carrying_an_error_does_not_count(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        # `is_error` false beside a report that says it is an error is not a success, and no
+        # report of a real success carries either.
+        stats = self._grok(grok_tool_call(name, report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "command not found",
+            json.dumps([{"type": "text", "text": "x"}]),
+            "",
+            json.dumps("oops"),
+            [{"type": "text", "text": "x"}],
+        ],
+        ids=["plain-string", "json-array", "empty-string", "json-string", "raw-list"],
+    )
+    def test_a_grok_result_counts_only_when_its_content_is_a_json_object(self, content: Any):
+        # `is_error` false beside content that reports nothing: no object, so no status and
+        # no exit code to read, and an empty list of reports would pass every rule on it.
+        call = grok_tool_call("run_terminal_command", None)
+        block: dict[str, Any] = {"type": "tool_result", "tool_use_id": "toolu_run_terminal_command"}
+        block.update(content=content, is_error=False)
+        answer = json.dumps({"type": "user", "message": {"role": "user", "content": [block]}})
+        stats = self._grok(call, answer)
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+        # The control: the same call, answered with an object reporting exit code 0.
+        stats = self._grok(grok_tool_call("run_terminal_command", BASH_OK))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
+
+    @pytest.mark.parametrize(
+        ("name", "report", "succeeded"),
+        [
+            # A status, and no exit code to fail on: at the top, and in a background
+            # command's own report.
+            ("run_terminal_command", {**_without(BASH_OK, "exit_code"), "status": "failed"}, 0),
+            (
+                "get_command_or_subagent_output",
+                {"type": "TaskOutput", "Result": {"task_id": "call-1", "status": "failed"}},
+                0,
+            ),
+            # A status grok has never reported is not taken for success.
+            ("run_terminal_command", {**BASH_OK, "status": "succeeded"}, 0),
+            ("read_file", {**READ_FILE, "status": None}, 0),
+            # The two a report may carry and still count.
+            ("run_terminal_command", {**BASH_OK, "status": "completed"}, 1),
+            ("read_file", READ_FILE, 1),
+            (
+                "get_command_or_subagent_output",
+                {
+                    "type": "TaskOutput",
+                    "Result": {"task_id": "call-1", "status": "completed", "exit_code": 0},
+                },
+                1,
+            ),
+        ],
+        ids=[
+            "failed-no-exit-code",
+            "nested-failed-no-exit-code",
+            "unknown-status",
+            "null-status",
+            "completed",
+            "no-status",
+            "nested-completed",
+        ],
+    )
+    def test_a_grok_report_counts_only_with_no_status_or_status_completed(
+        self, name: str, report: dict[str, Any], succeeded: int
+    ):
+        stats = self._grok(grok_tool_call(name, report))
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, succeeded)
 
     def test_a_bookkeeping_call_beside_failed_commands_is_not_inspection(self):
@@ -1103,6 +1430,8 @@ class TestACallCountsOnlyIfItSucceeded:
             grok_result(),
         )
         assert (stats.tool_calls, stats.local_tool_attempts, stats.local_tool_calls) == (2, 1, 0)
+        # The todo's id is its own, so the refusal has no ambiguous id to name.
+        assert stats.ambiguous_id is None
 
     @pytest.mark.parametrize(
         ("name", "report"),
@@ -1154,6 +1483,55 @@ class TestACallCountsOnlyIfItSucceeded:
         stats = self._grok(grok_tool_call("read_file"), twice, grok_result())
         assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1)
 
+    def test_a_grok_id_two_tools_share_pairs_a_result_with_neither(self):
+        # A todo reusing a command's id would otherwise lend the command its result.
+        shared = self._grok(
+            grok_tool_use("a", "run_terminal_command"),
+            grok_tool_use("a", "todo_write"),
+            grok_tool_result("a", TODO_UPDATED),
+        )
+        assert (shared.tool_calls, shared.local_tool_attempts, shared.local_tool_calls) == (2, 1, 0)
+        # Two inspecting tools: the result is one of theirs, and nothing says which.
+        both = self._grok(
+            grok_tool_use("a", "read_file"), grok_tool_use("a", "grep"), grok_tool_result("a")
+        )
+        assert (both.local_tool_attempts, both.local_tool_calls) == (2, 0)
+        # Reuse after the result is reuse too: the stream never says which call it answered.
+        later = self._grok(
+            grok_tool_use("a", "read_file"), grok_tool_result("a"), grok_tool_use("a", "todo_write")
+        )
+        assert later.local_tool_calls == 0
+        alone = self._grok(grok_tool_use("a", "read_file"), grok_tool_result("a"))
+        assert alone.local_tool_calls == 1
+
+    def test_a_grok_id_one_tool_is_named_under_twice_counts_once(self):
+        # Every call under the id is the same tool, so whichever one the result answers, that
+        # tool worked: an echoed `tool_use` block, or the id reused for the same tool.
+        echoed = self._grok(
+            grok_tool_use("a", "read_file"), grok_tool_use("a", "read_file"), grok_tool_result("a")
+        )
+        assert (echoed.local_tool_attempts, echoed.local_tool_calls) == (2, 1)
+        reused = self._grok(
+            grok_tool_use("a", "run_terminal_command"),
+            grok_tool_result("a", BASH_OK),
+            grok_tool_use("a", "run_terminal_command"),
+            grok_tool_result("a", BASH_OK),
+        )
+        assert (reused.local_tool_attempts, reused.local_tool_calls) == (2, 1)
+
+    @pytest.mark.parametrize("first_is_error", [False, True])
+    def test_a_grok_id_answered_both_ways_counts_for_neither(self, first_is_error: bool):
+        stats = self._grok(
+            grok_tool_use("a", "read_file"),
+            grok_tool_result("a", is_error=first_is_error),
+            grok_tool_result("a", is_error=not first_is_error),
+        )
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
+    def test_a_grok_result_before_its_call_answers_nothing(self):
+        stats = self._grok(grok_tool_result("a"), grok_tool_use("a", "read_file"))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0)
+
     def test_a_failed_grok_call_quotes_the_first_line_it_printed(self):
         stats = self._grok(grok_tool_call("run_terminal_command", BASH_FAILED))
         assert stats.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
@@ -1161,6 +1539,65 @@ class TestACallCountsOnlyIfItSucceeded:
             grok_tool_call("read_file", "\nError: permission denied\nmore", is_error=True)
         )
         assert refused.first_failure == "Error: permission denied"
+        # A failed todo is not a failed local call, so it is not the one quoted.
+        after_todo = self._grok(
+            grok_tool_call("todo_write", "todo store unavailable", is_error=True),
+            grok_tool_call("run_terminal_command", BASH_FAILED),
+        )
+        assert after_todo.first_failure == "error: Failed to initialize cache at `/work/.cache/uv`"
+
+    def test_the_first_failed_grok_call_is_the_one_quoted(self):
+        # Each failure prints a different first line, so quoting a later one shows here.
+        stats = self._grok(
+            grok_tool_use("a", "run_terminal_command"),
+            grok_tool_result("a", bash_report(2, "first failure line\n")),
+            grok_tool_use("b", "run_terminal_command"),
+            grok_tool_result("b", bash_report(1, "second failure line\n")),
+        )
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (2, 0)
+        assert stats.first_failure == "first failure line"
+
+    def test_a_status_the_rule_allows_is_never_named_as_the_reason(self):
+        # These failed on their exit code; naming "completed" would send someone to the wrong fix.
+        codex = self._codex(
+            codex_stream(
+                codex_item(
+                    "item.completed",
+                    "command_execution",
+                    exit_code=1,
+                    status="completed",
+                    aggregated_output="boom\n",
+                )
+            )
+        )
+        assert (codex.first_failure, codex.first_status) == ("boom", None)
+        polled = task_output("completed", 2, "Traceback\n")
+        grok = self._grok(grok_tool_call("get_command_or_subagent_output", polled))
+        assert (grok.first_failure, grok.first_status) == ("Traceback", None)
+
+    def test_the_first_ambiguous_id_is_the_one_named(self):
+        grok = self._grok(
+            *(
+                line
+                for ident in ("a", "b")
+                for line in (
+                    grok_tool_use(ident, "read_file"),
+                    grok_tool_use(ident, "list_dir"),
+                    grok_tool_result(ident),
+                )
+            )
+        )
+        assert (grok.local_tool_calls, grok.ambiguous_id) == (0, "a")
+        codex = self._codex(
+            codex_stream(
+                *(
+                    codex_item("item.completed", kind, ident)
+                    for ident in ("a", "b")
+                    for kind in ("web_search", "command_execution")
+                )
+            )
+        )
+        assert (codex.local_tool_calls, codex.ambiguous_id) == (0, "a")
 
     def test_the_run_description_names_the_attempts_beside_none_succeeded(self):
         # "(0 local)" alone would describe a run that never tried.
@@ -1218,6 +1655,18 @@ class TestDriftIsNotBlamedOnTheModel:
                 )
             )
         assert "shell_call_v2" in str(caught.value)
+
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_a_completed_write_beside_a_renamed_kind_is_still_drift(self, kind: str):
+        # A write is no local attempt, so it cannot vouch for the vocabulary either.
+        with pytest.raises(errors.EnvError) as caught:
+            self._codex(
+                codex_stream(
+                    codex_item("item.completed", kind, "item_1"),
+                    codex_item("item.completed", "shell_call_v2", "item_2"),
+                )
+            )
+        assert "shell_call_v2" in str(caught.value) and "drift" in str(caught.value)
 
     def test_a_recognised_kind_alongside_them_is_still_a_review(self):
         # The control that keeps the check from firing on every mixed stream: one kind we do
@@ -1319,7 +1768,7 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert record["run_stats"]["tool_calls"] == 2
         assert record["run_stats"]["local_tool_calls"] == 0
 
-    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS)
+    @pytest.mark.parametrize("kind", NOT_LOCAL_KINDS + WRITE_KINDS)
     def test_a_run_whose_only_calls_are_not_local_is_refused(self, kind: str):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, message = self._gate(
@@ -1358,6 +1807,8 @@ class TestTheGateRefusesARunThatInspectedNothing:
         # non-zero lands here too.
         assert "never opened the diff" not in message
         assert "sandbox" not in message
+        # Every command failed, so no id carries a success to name.
+        assert "a success under id" not in message, message
         assert "\n" not in message, "stderr carries one line"
         stats = record["run_stats"]
         assert (stats["tool_calls"], stats["local_tool_attempts"], stats["local_tool_calls"]) == (
@@ -1391,12 +1842,161 @@ class TestTheGateRefusesARunThatInspectedNothing:
         assert "none of whose local tool calls succeeded" in message, message
         assert "drift" not in message, message
 
+    @pytest.mark.parametrize("kind", WRITE_KINDS)
+    def test_failed_commands_beside_a_completed_write_exit_3(self, kind: str):
+        # The write is the one call that completed, and it read nothing.
+        failed = codex_item(
+            "item.completed",
+            "command_execution",
+            exit_code=1,
+            status="failed",
+            aggregated_output="rg: f.py: No such file or directory (os error 2)\n",
+        )
+        wrote = codex_item("item.completed", kind, "item_2")
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(failed, wrote))
+        assert code == 3, message
+        assert out == ""
+        assert "2 tool calls (1 local, 0 succeeded)" in message, message
+
     def test_a_run_whose_local_calls_never_finished_says_so(self):
         started = codex_item("item.started", "command_execution", exit_code=None)
         with tempfile.TemporaryDirectory() as tmp:
             code, _, message = self._gate(Path(tmp), EMPTY_EXAMPLE, codex_stream(started))
         assert code == 3, message
         assert "(1 local, 0 succeeded)" in message and "none of them finished" in message
+
+    @pytest.mark.parametrize(
+        ("mode", "evidence_mode", "stream", "said"),
+        [
+            # A status grok has never sent, on a file read, whose report is the file.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("read_file", {**READ_FILE, "status": "succeeded"})
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                'the first to fail reported status "succeeded" and printed nothing',
+            ),
+            # A command that exited 0 under a status other than completed.
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item(
+                        "item.completed",
+                        "command_execution",
+                        status="declined",
+                        aggregated_output="f.py\n",
+                    )
+                ),
+                "the first to fail reported status \"declined\" and printed 'f.py'",
+            ),
+            # A renamed status in a background command's own report, where grok's live.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("get_command_or_subagent_output", task_output("done", 0, "fine\n"))
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                "the first to fail reported status \"done\" and printed 'fine'",
+            ),
+            # A null status, which the rule refuses where it allows a missing one.
+            (
+                "grok-events",
+                "grok-messages",
+                grok_tool_call("read_file", {**READ_FILE, "status": None})
+                + "\n"
+                + grok_result(structured_output=artifact())
+                + "\n",
+                "the first to fail reported status null and printed nothing",
+            ),
+        ],
+        ids=[
+            "grok-unknown-status",
+            "codex-exit-0-not-completed",
+            "grok-poll-unknown-status",
+            "grok-null-status",
+        ],
+    )
+    def test_a_refused_status_is_named_rather_than_the_report_it_came_in(
+        self, mode: str, evidence_mode: str, stream: str, said: str
+    ):
+        # Drift renaming a status refuses every run, and the refusal has to say which status.
+        answer = EMPTY_EXAMPLE if mode == "object" else stream
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, stream, mode, evidence_mode)
+        assert code == 3, message
+        assert out == ""
+        assert said in message, message
+        assert "[project]" not in message, "the file read is not the reason, and not quoted"
+        assert "\n" not in message, "stderr carries one line"
+
+    @pytest.mark.parametrize(
+        ("mode", "evidence_mode", "stream", "failed"),
+        [
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item("item.completed", "web_search", "i"),
+                    codex_item("item.completed", "command_execution", "i"),
+                ),
+                None,
+            ),
+            (
+                "object",
+                "codex-items",
+                codex_stream(
+                    codex_item("item.completed", "command_execution", "i"),
+                    codex_item(
+                        "item.completed",
+                        "command_execution",
+                        "i",
+                        exit_code=1,
+                        status="failed",
+                        aggregated_output="boom\n",
+                    ),
+                ),
+                "the first to fail reported status \"failed\" and printed 'boom'",
+            ),
+            (
+                "grok-events",
+                "grok-messages",
+                "\n".join(
+                    [
+                        grok_tool_use("i", "read_file"),
+                        grok_tool_use("i", "grep"),
+                        grok_tool_result("i", GREP_MATCHED),
+                        grok_result(structured_output=artifact()),
+                    ]
+                )
+                + "\n",
+                None,
+            ),
+        ],
+        ids=["codex-two-kinds", "codex-both-ways", "grok-two-tools"],
+    )
+    def test_a_success_an_ambiguous_id_set_aside_is_named_by_its_id(
+        self, mode: str, evidence_mode: str, stream: str, failed: str | None
+    ):
+        # The call finished and reported success, so "none of them finished" would be false;
+        # what kept it from counting is the id.
+        answer = EMPTY_EXAMPLE if mode == "object" else stream
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, message = self._gate(Path(tmp), answer, stream, mode, evidence_mode)
+        assert code == 3, message
+        assert out == ""
+        assert "none of them finished" not in message, message
+        assert (
+            "a success under id 'i' does not count, because that id names more than one call "
+            "or also reported a failure"
+        ) in message, message
+        if failed is not None:
+            assert f"{failed}, and a success under id 'i'" in message, message
+        assert "\n" not in message, "stderr carries one line"
 
     def test_a_run_whose_only_inspecting_call_polled_failed_commands_exits_3(self):
         poll = task_outputs(("failed", 1), ("running", None))
@@ -2716,6 +3316,162 @@ class TestGateIsFailClosed:
         except validate.GateError:
             return
         assert "boolean" in names, f"True passed a field typed {names}"
+
+
+# The keys a grok report is judged by. Payloads never carry them, so only an arm below or a
+# spoiler decides them. `MultiResult` is among them: a batch poll counts when any one child
+# worked, a different rule, held by its own table in `TestACallCountsOnlyIfItSucceeded`.
+_GROK_JUDGED_KEYS = frozenset({"status", "exit_code", "Result", "MultiResult", "type", "error"})
+_grok_payload: st.SearchStrategy[dict[str, Any]] = st.dictionaries(
+    st.text(max_size=8).filter(lambda key: key not in _GROK_JUDGED_KEYS), json_values, max_size=3
+)
+_grok_task_report: st.SearchStrategy[dict[str, Any]] = st.fixed_dictionaries(
+    {"status": st.just("completed"), "exit_code": st.just(0), "output": json_values}
+)
+
+# What an inspecting grok call returns when it worked, one arm per shape real grok-4.7
+# streams carry: a file read, a directory listing, a search and a command that exited 0, and
+# a background command's own report completing with 0.
+grok_successes: st.SearchStrategy[tuple[str, dict[str, Any]]] = st.one_of(
+    st.tuples(
+        st.just("read_file"),
+        st.fixed_dictionaries({"type": st.just("ReadFile"), "FileContent": _grok_payload}),
+    ),
+    st.tuples(
+        st.just("list_dir"),
+        st.fixed_dictionaries({"type": st.just("ListDir"), "Content": json_values}),
+    ),
+    st.tuples(
+        st.just("grep"),
+        st.fixed_dictionaries(
+            {"type": st.just("GrepSearch"), "exit_code": st.just(0), "stdout": json_values}
+        ),
+    ),
+    st.tuples(
+        st.just("run_terminal_command"),
+        st.fixed_dictionaries(
+            {"type": st.just("Bash"), "exit_code": st.just(0), "output": json_values}
+        ),
+    ),
+    st.tuples(
+        st.just("get_command_or_subagent_output"),
+        st.fixed_dictionaries({"type": st.just("TaskOutput"), "Result": _grok_task_report}),
+    ),
+)
+
+
+def _holds_no_object(text: str) -> bool:
+    try:
+        return not isinstance(json.loads(text), dict)
+    except ValueError:
+        return True
+
+
+# A result block without an `is_error` key at all.
+_ABSENT = object()
+
+# Each way a result fails to report success, built directly rather than asked of the code
+# under test: content holding no JSON object, a status other than "completed", an exit code
+# other than the integer 0, an `is_error` other than false, a report carrying an `error` key
+# or the type "Error", and a background command's report that is not an object.
+grok_spoilers: st.SearchStrategy[tuple[str, str, Any]] = st.one_of(
+    st.tuples(
+        st.just("content"),
+        st.just("top"),
+        st.one_of(
+            json_values.filter(lambda value: not isinstance(value, dict)).map(json.dumps),
+            st.text(max_size=24).filter(_holds_no_object),
+            json_values.filter(lambda value: not isinstance(value, (dict, str))),
+        ),
+    ),
+    st.tuples(
+        st.just("status"),
+        st.sampled_from(["top", "nested"]),
+        st.one_of(
+            st.text(max_size=12).filter(lambda status: status != "completed"),
+            st.sampled_from(["failed", "running", "succeeded", "Completed", None, 0, True, []]),
+        ),
+    ),
+    st.tuples(
+        st.just("exit_code"),
+        st.sampled_from(["top", "nested"]),
+        st.one_of(
+            st.integers().filter(lambda code: code != 0),
+            st.sampled_from([None, False, True, 0.0, "0", [0]]),
+        ),
+    ),
+    st.tuples(
+        st.just("is_error"), st.just("top"), st.sampled_from([True, None, 0, "false", _ABSENT])
+    ),
+    st.tuples(st.just("error"), st.sampled_from(["top", "nested"]), json_values),
+    st.tuples(st.just("type"), st.sampled_from(["top", "nested"]), st.just("Error")),
+    st.tuples(
+        st.just("Result"),
+        st.just("top"),
+        json_values.filter(lambda value: not isinstance(value, dict)),
+    ),
+)
+
+
+class TestAGrokResultCountsOnlyWhenItReportsSuccess:
+    """The success rule over generated results rather than the few shapes named above.
+
+    Both directions, because either alone is satisfied by a rule that is wrong the other way:
+    every real success shape counts, and every one of them stops counting when any single
+    rule is broken in it.
+    """
+
+    def _answered(self, name: str, content: Any, is_error: Any = False) -> validate.RunStats:
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": f"toolu_{name}",
+            "content": content,
+        }
+        if is_error is not _ABSENT:
+            block["is_error"] = is_error
+        lines = [
+            grok_tool_call(name, None),
+            json.dumps({"type": "user", "message": {"role": "user", "content": [block]}}),
+        ]
+        return validate.run_stats("grok-messages", validate.objects(lines), None)
+
+    @PROPERTY
+    @given(success=grok_successes, extra=_grok_payload, completed=st.booleans())
+    def test_every_real_success_shape_counts(
+        self, success: tuple[str, dict[str, Any]], extra: dict[str, Any], completed: bool
+    ):
+        name, report = success
+        report = {**extra, **report}
+        if completed:
+            report["status"] = "completed"
+        stats = self._answered(name, json.dumps(report))
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 1), report
+
+    @PROPERTY
+    @given(success=grok_successes, extra=_grok_payload, spoiler=grok_spoilers)
+    def test_a_success_with_any_one_rule_broken_does_not_count(
+        self,
+        success: tuple[str, dict[str, Any]],
+        extra: dict[str, Any],
+        spoiler: tuple[str, str, Any],
+    ):
+        name, report = success
+        report = {**extra, **report}
+        rule, where, value = spoiler
+        nested = report.get("Result")
+        nested_report = cast(dict[str, Any], nested) if isinstance(nested, dict) else None
+        target = nested_report if where == "nested" and nested_report is not None else report
+        content: Any = json.dumps(report)
+        is_error: Any = False
+        if rule == "content":
+            content = value
+        elif rule == "is_error":
+            is_error = value
+        else:
+            target[rule] = value
+            content = json.dumps(report)
+        stats = self._answered(name, content, is_error)
+        assert (stats.local_tool_attempts, stats.local_tool_calls) == (1, 0), (spoiler, content)
 
 
 version_names = st.text(alphabet="0123456789.-abz²", min_size=1, max_size=8)
@@ -5003,7 +5759,8 @@ class TestTheValidatorBatch:
         assert "element 3 repeats #1" in str(caught.value)
         assert caught.value.exit_code == 2
 
-    @settings(max_examples=60)
+    # PROPERTY's settings: its lack of a deadline matters under a loaded build sandbox.
+    @settings(PROPERTY, max_examples=60)
     @given(numbers=st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=6))
     def test_a_batch_is_accepted_exactly_when_its_numbers_are_a_set(self, numbers: list[int]):
         # The property, over MULTISETS: uniqueness is the whole contract, because the

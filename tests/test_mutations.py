@@ -274,13 +274,7 @@ MUTATIONS: list[Mutation] = [
         # The c156 incident: every command failed, all five counted, exit 0 on nothing read.
         "a codex command counts whatever its exit code",
         "persona_review/validate.py",
-        r'        return _whole_number\(item\.get\("exit_code"\)\) == 0',
-        "        return True",
-    ),
-    Mutation(
-        "a codex file change counts whatever its status",
-        "persona_review/validate.py",
-        r'    return item\.get\("status"\) == "completed"',
+        r'    return _whole_number\(item\.get\("exit_code"\)\) == 0',
         "    return True",
     ),
     Mutation(
@@ -294,14 +288,34 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a codex call reported complete twice succeeds twice",
         "persona_review/validate.py",
-        r"            elif ident not in worked:",
-        "            elif True:",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):\n            local \+= 1",
+        "        if len(kinds[ident]) == 1 and all(outcomes):\n            local += len(outcomes)",
+    ),
+    Mutation(
+        # A command's start and a write's completion under one id read as one command that
+        # completed.
+        "a codex id two kinds share pairs anyway",
+        "persona_review/validate.py",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):",
+        "        if all(outcomes):",
+    ),
+    Mutation(
+        "a codex id completed both ways counts",
+        "persona_review/validate.py",
+        r"        if len\(kinds\[ident\]\) == 1 and all\(outcomes\):",
+        "        if len(kinds[ident]) == 1 and any(outcomes):",
+    ),
+    Mutation(
+        "a codex call pairs its events on the id alone",
+        "persona_review/validate.py",
+        r"                if \(ident, item_kind\) not in seen:",
+        "                if ident not in {seen_id for seen_id, _ in seen}:",
     ),
     Mutation(
         "an id-less codex call that worked is never counted as succeeded",
         "persona_review/validate.py",
-        r"            elif not isinstance\(ident, str\):\n                local \+= 1",
-        "            elif not isinstance(ident, str):\n                pass",
+        r"            elif succeeded:\n                local \+= 1",
+        "            elif succeeded:\n                pass",
     ),
     Mutation(
         # Not 6: the model tried. Reverting this blames it with the status that invites a
@@ -334,14 +348,14 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "the exit-3 refusal quotes nothing a codex call printed",
         "persona_review/validate.py",
-        r'                    failure = _first_line\(item\.get\("aggregated_output"\)\)',
-        '                    failure = ""',
+        r'                failure = _first_line\(item\.get\("aggregated_output"\)\)',
+        '                failure = ""',
     ),
     Mutation(
         "the exit-3 refusal quotes the last codex failure, not the first",
         "persona_review/validate.py",
-        r"                if failure is None:",
-        "                if True:",
+        r"            if not succeeded and failure is None:",
+        "            if not succeeded:",
     ),
     Mutation(
         "the exit-3 refusal quotes a failed call's output uncut",
@@ -361,28 +375,42 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "web_search is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "web_search",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "web_search",\n    }\n)',
     ),
     Mutation(
         # An MCP server may be remote; a run whose only calls went to one has not been shown
         # to have read the tree, and counting it local passes it silently.
         "mcp_tool_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "mcp_tool_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "mcp_tool_call",\n    }\n)',
     ),
     Mutation(
         "function_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "function_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "function_call",\n    }\n)',
     ),
     Mutation(
         "custom_tool_call is counted as a local tool call",
         "persona_review/validate.py",
-        r'        "patch_apply",\n    \}\n\)',
-        '        "patch_apply",\n        "custom_tool_call",\n    }\n)',
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "custom_tool_call",\n    }\n)',
+    ),
+    Mutation(
+        # A write changes the tree without showing it was read; a run that only wrote
+        # attempted no read and is the model's doing.
+        "a codex file change is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "file_change",\n    }\n)',
+    ),
+    Mutation(
+        "a codex patch is counted as a local tool call",
+        "persona_review/validate.py",
+        r'        "local_shell_call",\n    \}\n\)',
+        '        "local_shell_call",\n        "patch_apply",\n    }\n)',
     ),
     Mutation(
         # The id-less arm carries the local tally too; without it an id-less local call
@@ -397,8 +425,8 @@ MUTATIONS: list[Mutation] = [
         # none as local would refuse every grok run, which is the refusal made meaningless.
         "grok calls that worked are not counted as local",
         "persona_review/validate.py",
-        r"                if _grok_succeeded\(block\):\n                    local \+= 1",
-        "                if _grok_succeeded(block):\n                    pass",
+        r"and all\(outcomes\):\n            local \+= 1\n        elif tools & ",
+        "and all(outcomes):\n            pass\n        elif tools & ",
     ),
     Mutation(
         "grok calls are not counted as local attempts",
@@ -424,47 +452,262 @@ MUTATIONS: list[Mutation] = [
         # grok returns a command that exited 2 with `is_error` false.
         "a grok command counts whatever its exit code",
         "persona_review/validate.py",
-        r'        if "exit_code" in report and _whole_number\(report\["exit_code"\]\) != 0:',
-        "        if False:",
+        r'    return "exit_code" not in report or _whole_number\(report\["exit_code"\]\) == 0',
+        "    return True",
     ),
     Mutation(
-        "a grok command still running counts",
+        # A command moved to the background reports "running" before anything came back.
+        "a grok report's status is not read",
         "persona_review/validate.py",
-        r'        if report\.get\("status"\) == "running":',
-        "        if False:",
+        r'    if report\.get\("status", GROK_COMPLETED\) != GROK_COMPLETED:',
+        "    if False:",
+    ),
+    Mutation(
+        # The denylist it replaced: "failed" with no exit code beside it counted.
+        "the grok status allowlist is a denylist of running again",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", GROK_COMPLETED\) != GROK_COMPLETED:',
+        '    if report.get("status") == "running":',
+    ),
+    Mutation(
+        # Content that is not a JSON object reports nothing, and an empty list of reports
+        # passed every rule on it.
+        "grok content that is not a JSON object counts",
+        "persona_review/validate.py",
+        r"    if not reports:\n        return False",
+        "    if not reports:\n        return True",
+    ),
+    Mutation(
+        "a batch poll's command that exited 0 counts whatever its status",
+        "persona_review/validate.py",
+        r"        and _grok_report_ok\(child\)\n",
+        "",
+    ),
+    Mutation(
+        "a batch poll's command counts without an exit code",
+        "persona_review/validate.py",
+        r'        and _whole_number\(child\.get\("exit_code"\)\) == 0\n',
+        "",
     ),
     Mutation(
         # A background command's own status and exit code arrive one level down.
         "a background command's own report is not read",
         "persona_review/validate.py",
-        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[content\]",
+        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[\]",
         "    return [content]",
+    ),
+    Mutation(
+        # Dropped, it leaves the outer object, which carries no status or exit code.
+        "a background command's report that is not an object is passed over",
+        "persona_review/validate.py",
+        r"    return \[content, nested\] if isinstance\(nested, dict\) else \[\]",
+        "    return [content, nested] if isinstance(nested, dict) else [content]",
     ),
     Mutation(
         # The outer object of a batch poll carries no status or exit code, so reading only
         # it counted a poll of commands that all failed as a successful read.
         "a grok batch poll is judged by its outer object alone",
         "persona_review/validate.py",
-        r"    if reports and GROK_BATCH_REPORT in reports\[0\]:",
+        r"    return all\(_grok_batch_ok\(batch\) for batch in batches\)",
+        "    return True",
+    ),
+    Mutation(
+        # A child that exited 0 outvoted the poll's own failed status, or a failed sibling.
+        "a grok batch poll skips the rule every other report passes",
+        "persona_review/validate.py",
+        r"    if not all\(_grok_report_ok\(report\) for report in reports\):",
+        "    if GROK_BATCH_REPORT not in reports[0] and not all(\n"
+        "        _grok_report_ok(report) for report in reports\n"
+        "    ):",
+    ),
+    Mutation(
+        "a grok batch poll inside a background command's report skips the batch rule",
+        "persona_review/validate.py",
+        r"for report in reports if GROK_BATCH_REPORT in report\]",
+        "for report in reports[:1] if GROK_BATCH_REPORT in report]",
+    ),
+    Mutation(
+        # `is_error` false beside a report saying it is an error.
+        "a grok report's error key is not read",
+        "persona_review/validate.py",
+        r"    if GROK_ERROR_KEY in report or ",
+        "    if ",
+    ),
+    Mutation(
+        # A renamed exit-code field passed, where a renamed status was already refused.
+        "a grok command result counts without an exit code",
+        "persona_review/validate.py",
+        r'    if command and not batches and all\(_whole_number\(r\.get\("exit_code"\)\) != 0 '
+        r"for r in reports\):",
         "    if False:",
+    ),
+    Mutation(
+        "a grok result is never judged as a command's",
+        "persona_review/validate.py",
+        r"block, bool\(GROK_COMMAND_TOOLS\.intersection\(called\[ident\]\)\)",
+        "block, False",
+    ),
+    Mutation(
+        "a grok report of the error type is not read",
+        "persona_review/validate.py",
+        r' or report\.get\("type"\) == GROK_ERROR_TYPE:',
+        ":",
     ),
     Mutation(
         "a grok result for a call this run never made counts",
         "persona_review/validate.py",
-        r"                if ident not in pending:\n                    continue\n",
+        r"                if ident not in called:\n                    continue\n",
         "",
     ),
     Mutation(
         "a grok call answered twice succeeds twice",
         "persona_review/validate.py",
-        r"                pending\.discard\(ident\)\n",
-        "",
+        r"and all\(outcomes\):\n            local \+= 1\n        elif tools & ",
+        "and all(outcomes):\n            local += len(outcomes)\n        elif tools & ",
+    ),
+    Mutation(
+        # A todo reusing a command's id lent the command the todo's result.
+        "a grok id two calls share pairs anyway",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools <= GROK_INSPECTING_TOOLS and ",
+        "        if tools & GROK_INSPECTING_TOOLS and ",
+    ),
+    Mutation(
+        "a grok result answering a bookkeeping call counts",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools <= GROK_INSPECTING_TOOLS and ",
+        "        if len(tools) == 1 and ",
+    ),
+    Mutation(
+        # An echoed `tool_use` names one tool twice; judged as two calls, a real read of the
+        # tree is refused.
+        "a grok id one tool is named under twice is judged as two calls",
+        "persona_review/validate.py",
+        r"        if len\(tools\) == 1 and tools <= ",
+        "        if len(called[ident]) == 1 and tools <= ",
+    ),
+    Mutation(
+        "a grok id answered both ways counts",
+        "persona_review/validate.py",
+        r"<= GROK_INSPECTING_TOOLS and all\(outcomes\):",
+        "<= GROK_INSPECTING_TOOLS and any(outcomes):",
     ),
     Mutation(
         "the exit-3 refusal quotes nothing a grok call printed",
         "persona_review/validate.py",
         r"                    failure = _first_line\(_grok_output\(block\)\)",
         '                    failure = ""',
+    ),
+    Mutation(
+        "the exit-3 refusal quotes a failed grok bookkeeping call",
+        "persona_review/validate.py",
+        r"                if any\(tool in GROK_INSPECTING_TOOLS for tool in called\[ident\]\):",
+        "                if True:",
+    ),
+    Mutation(
+        "the exit-3 refusal quotes the last grok failure, not the first",
+        "persona_review/validate.py",
+        r"                if succeeded or failure is not None:",
+        "                if succeeded:",
+    ),
+    Mutation(
+        # A run whose only success came under an ambiguous id then reads "none of them
+        # finished", about a call that finished and reported success.
+        "the exit-3 refusal is silent on a grok success an ambiguous id set aside",
+        "persona_review/validate.py",
+        r"        elif tools & GROK_INSPECTING_TOOLS and any\(outcomes\) and ambiguous is None:",
+        "        elif False:",
+    ),
+    Mutation(
+        # A todo's success is not a local call's, so its id is no local call's either.
+        "a grok bookkeeping call's success is named as an ambiguous id",
+        "persona_review/validate.py",
+        r"        elif tools & GROK_INSPECTING_TOOLS and any\(outcomes\)",
+        "        elif any(outcomes)",
+    ),
+    Mutation(
+        "the exit-3 refusal is silent on a codex success an ambiguous id set aside",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif False:",
+    ),
+    Mutation(
+        # Every command failing then reads as a success set aside under the first id.
+        "a codex id with no success is named as an ambiguous id",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif ambiguous is None:",
+    ),
+    Mutation(
+        "the exit-3 refusal does not name the ambiguous id it was given",
+        "persona_review/validate.py",
+        r"    if stats\.ambiguous_id is None:",
+        "    if True:",
+    ),
+    Mutation(
+        # `exit_code` 0 beside a status that says the command did not complete.
+        "a codex command that exited 0 counts whatever its status",
+        "persona_review/validate.py",
+        r'    if item\.get\("status", CODEX_COMPLETED\) != CODEX_COMPLETED:',
+        "    if False:",
+    ),
+    Mutation(
+        # A renamed status refuses every run, and the refusal would not say which status.
+        "the exit-3 refusal does not name the status a grok call reported",
+        "persona_review/validate.py",
+        r"                    failure_status = _grok_status\(block\)",
+        "                    failure_status = None",
+    ),
+    Mutation(
+        "the exit-3 refusal does not name the status a codex call reported",
+        "persona_review/validate.py",
+        r"                failure_status = _refused_status\(item, CODEX_COMPLETED\)",
+        "                failure_status = None",
+    ),
+    Mutation(
+        # A background command's own status is in its nested report, where drift would land.
+        "the exit-3 refusal names only a grok result's outer status",
+        "persona_review/validate.py",
+        r"    for report in _grok_reports\(block\):\n        status = _refused_status",
+        "    for report in _grok_reports(block)[:1]:\n        status = _refused_status",
+    ),
+    Mutation(
+        "the exit-3 refusal names an allowed status as refused",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", allowed\) == allowed:\n        return None',
+        '    if "status" not in report:\n        return None',
+    ),
+    Mutation(
+        # The rule refuses a null status, which is not a missing one, so the refusal names it.
+        "the exit-3 refusal takes a null status for a missing one",
+        "persona_review/validate.py",
+        r'    if report\.get\("status", allowed\) == allowed:\n        return None',
+        '    if report.get("status") in (None, allowed):\n        return None',
+    ),
+    Mutation(
+        "the exit-3 refusal names the last ambiguous grok id, not the first",
+        "persona_review/validate.py",
+        r"GROK_INSPECTING_TOOLS and any\(outcomes\) and ambiguous is None:",
+        "GROK_INSPECTING_TOOLS and any(outcomes):",
+    ),
+    Mutation(
+        "the exit-3 refusal names the last ambiguous codex id, not the first",
+        "persona_review/validate.py",
+        r"        elif any\(outcomes\) and ambiguous is None:",
+        "        elif any(outcomes):",
+    ),
+    Mutation(
+        "the exit-3 refusal drops the status it was given",
+        "persona_review/validate.py",
+        r"        if stats\.first_status is not None:",
+        "        if False:",
+    ),
+    Mutation(
+        # For a file read the serialized report is the file, which says nothing of why.
+        "the exit-3 refusal quotes the report a refused grok status came in",
+        "persona_review/validate.py",
+        r'    if _grok_status\(block\) is not None:\n        return ""',
+        '    if False:\n        return ""',
     ),
     Mutation(
         # `agent_message` and `reasoning` are items too. Taking every item as a tool call
@@ -480,7 +723,7 @@ MUTATIONS: list[Mutation] = [
         # the real answer is small, which is the case this whole guard is about.
         "codex tool calls are counted twice, once per event",
         "persona_review/validate.py",
-        r"                if ident not in seen:",
+        r"                if \(ident, item_kind\) not in seen:",
         "                if True:",
     ),
     Mutation(
@@ -504,7 +747,7 @@ MUTATIONS: list[Mutation] = [
         # tree-reading kind, and every run then exits 6: the outage the check exists to stop.
         "the drift recovery stops naming the local-kind list",
         "persona_review/validate.py",
-        r'            "A kind that reads or edits the working tree also goes in "\n'
+        r'            "A kind that reads the working tree also goes in "\n'
         r'            "validate\.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this '
         r'error "\n'
         r'            "and every run then exits 6\."\n',

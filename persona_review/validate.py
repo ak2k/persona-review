@@ -497,13 +497,17 @@ def from_grok_events(text: str, key: str = "findings") -> Artifact:
 class RunStats:
     """What a run DID, as opposed to what it said.
 
-    `local_tool_calls` is the field that gates: the calls that acted on the machine the
-    review ran on, which is where the repository is, AND succeeded. A run whose only calls
-    were web searches read the internet and not the diff, and a command that could not start
-    read nothing at all, so neither has certified anything. `local_tool_attempts` is every
-    local call, succeeded or not, and it is what tells the two refusals apart: none attempted
-    is the model's doing, every one failing is not. `tool_calls` is every call, local or
-    not, recorded so the refusal can say what the run did instead. All three are ints when
+    `local_tool_calls` is the field that gates: the calls that can read the machine the
+    review ran on, which is where the repository is, AND that the stream shows succeeded. A
+    run whose only calls were web searches read the internet and not the diff, one whose only
+    calls were edits wrote to the tree without reading it, and a command that could not start
+    read nothing at all, so none of them has certified anything. A call counts only when its
+    id pairs it with its outcome unambiguously: an id two different tools or item kinds
+    share, or one reported both succeeding and failing, counts for none of them.
+    `local_tool_attempts` is every local call, succeeded or not, and it is what tells the
+    two refusals apart: none attempted is the model's doing, every one failing is not.
+    `tool_calls` is every call, local or not, recorded so the refusal can say what the run
+    did instead. All three are ints when
     counted from a stream, because "the adapter could not tell" is not an answer this package
     is entitled to give. A stream carrying nothing this module recognizes counts zero and the
     run is refused; a stream that cannot be READ is an environment error rather than a quiet
@@ -513,9 +517,11 @@ class RunStats:
 
     `local_tool_attempts` is None where it was never recorded: a sidecar written before
     0.3.5, whose `local_tool_calls` counted attempts rather than successes. `first_failure`
-    is the first line the first failed local call printed, for the refusal to quote; it is
-    not written to provenance, because the event stream kept beside the sidecar holds all of
-    it.
+    is the first line the first failed local call printed, `first_status` the status it
+    reported, as JSON text, when the success rule refuses that status, and `ambiguous_id`
+    the first id whose reported success did not count because the id was ambiguous, all for
+    the refusal to quote. None is written to provenance, because the event stream kept
+    beside the sidecar holds all of it.
     """
 
     tool_calls: int
@@ -525,6 +531,8 @@ class RunStats:
     duration_s: float | None
     local_tool_attempts: int | None = None
     first_failure: str | None = None
+    ambiguous_id: str | None = None
+    first_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -554,9 +562,10 @@ class Evidence:
 # A call SUCCEEDED only when the provider reports that it ran and worked. Neither a
 # `failed` status nor a non-zero exit code separates a command that never started from one
 # that ran and found nothing, since both read the same; only exit code 0 says a command ran.
-# So a codex command counts on `exit_code` 0 and a grok call on a `tool_result` reporting no
-# error, no non-zero exit code and no command still running — or, for a poll of several
-# background commands, at least one that exited 0.
+# So a codex command counts on `exit_code` 0 beside no status but "completed", and a grok
+# call on a `tool_result` reporting no error whose content is a JSON object in which no
+# report names an error or carries a status but "completed" or an exit code but 0 — and, for
+# a poll of several background commands, at least one of them completed with 0.
 
 # A `tool_use` block, inside an ASSISTANT message. Restricting to assistant events is
 # defense in depth rather than a fix for an observed shape: grok returns tool RESULTS in
@@ -579,6 +588,12 @@ GROK_INSPECTING_TOOLS = frozenset(
     {"get_command_or_subagent_output", "grep", "list_dir", "read_file", "run_terminal_command"}
 )
 
+# The inspecting tools that report an exit code: a command, a search, and a background
+# command's output. Only exit code 0 says one ran, so a result of theirs with none, or with the
+# field renamed, does not count, as through codex. Verified against 473 local grok event
+# streams, where every counted result of these three carried an integer `exit_code`.
+GROK_COMMAND_TOOLS = frozenset({"get_command_or_subagent_output", "grep", "run_terminal_command"})
+
 # Known tools that read nothing: bookkeeping, and edits. Named, like `CODEX_QUIET_ITEMS`, so
 # that "a tool we skip on purpose" and "a tool we have never heard of" stay different facts —
 # a list of names can go stale, and the drift check in `_grok_stats` is what notices.
@@ -592,6 +607,15 @@ GROK_NESTED_REPORT = "Result"
 # A poll of several background commands at once has no status or exit code of its own: each
 # command's report is in a list under this key's `results`.
 GROK_BATCH_REPORT = "MultiResult"
+
+# The one `status` a report may carry and still count; a report may also carry none.
+GROK_COMPLETED = "completed"
+
+# A report that names an error, by this key or by this type, is no success whatever
+# `is_error` says. grok reports a tool that could not execute as `{"error": ...,
+# "message": ...}`; no report of a real success carries either.
+GROK_ERROR_KEY = "error"
+GROK_ERROR_TYPE = "Error"
 
 # codex's `--json` stream is items rather than messages: one `item.started` and one
 # `item.completed` per call, both carrying the same `item.id`. These are the kinds that reach
@@ -613,28 +637,32 @@ CODEX_TOOL_ITEMS = frozenset(
     }
 )
 
-# The kinds that act on the working directory by what they are, which is what the refusal
+# The kinds that can read the working directory by what they are, which is what the refusal
 # turns on. Listed rather than derived from `CODEX_TOOL_ITEMS`, so a kind added there is not
 # local until someone decides it is.
 #
 # `web_search` reads the internet. `function_call`, `custom_tool_call` and `mcp_tool_call`
-# name a tool without saying where it runs, so one of them may be a remote server's. None
-# of them proves the tree was read, so they count in `tool_calls` and not here. A codex
-# build that does read the tree through one of them is then refused visibly, with exit 6,
-# rather than an MCP-only run being passed silently.
+# name a tool without saying where it runs, so one of them may be a remote server's.
+# `file_change` and `patch_apply` write to the tree, and a write shows no read of it, as
+# grok's edits do not. None of them proves the tree was read, so they count in `tool_calls`
+# and not here. A codex build that does read the tree through one of them is then refused
+# visibly, with exit 6, rather than an MCP-only or edit-only run being passed silently.
 CODEX_LOCAL_TOOL_ITEMS = frozenset(
     {
         "command_execution",
-        "file_change",
         "local_shell_call",
-        "patch_apply",
     }
 )
 
-# The local kinds that succeed by exit code. Every other local kind succeeds by its status,
-# because a file change has no exit code to read. Verified against codex-cli 0.152.1 and
-# 0.156.1: every completed `command_execution` carries an integer `exit_code`.
+# The local kinds that succeed by exit code, which is every one: `_codex_succeeded` reads
+# only that and the status, so a local kind that carries no exit code needs its own rule
+# there first. Verified against codex-cli 0.152.1 and 0.156.1: every completed
+# `command_execution` carries an integer `exit_code`.
 CODEX_COMMAND_ITEMS = frozenset({"command_execution", "local_shell_call"})
+
+# The one `status` a completed command may carry and still count, as for grok; it may also
+# carry none. An exit code of 0 beside any other status is not taken for success.
+CODEX_COMPLETED = "completed"
 
 # Kinds this wrapper knows about and deliberately does not count: the model talking to
 # itself, and the plan it writes for itself. Named explicitly so that "a kind we chose to
@@ -664,14 +692,25 @@ def _text(value: JSONValue) -> str:
     return ""
 
 
-def _first_line(value: JSONValue) -> str:
-    line = next((line.strip() for line in _text(value).splitlines() if line.strip()), "")
+def _cut(line: str) -> str:
     return line if len(line) <= FAILURE_LINE_CHARS else line[:FAILURE_LINE_CHARS] + "..."
+
+
+def _first_line(value: JSONValue) -> str:
+    return _cut(next((line.strip() for line in _text(value).splitlines() if line.strip()), ""))
+
+
+def _refused_status(report: JSONObject, allowed: str) -> str | None:
+    """A report's status as JSON text, which keeps it one line, when it is not `allowed`."""
+    if report.get("status", allowed) == allowed:
+        return None
+    return _cut(json.dumps(report["status"]))
 
 
 def _grok_reports(block: JSONObject) -> list[JSONObject]:
     """The objects a `tool_result` reports a call's outcome in: its content, and the report
-    nested in it when the call was a background command's."""
+    nested in it when the call was a background command's. None at all when either is not
+    an object, because it then reports nothing to judge."""
     content = block.get("content")
     if isinstance(content, str):
         try:
@@ -680,47 +719,87 @@ def _grok_reports(block: JSONObject) -> list[JSONObject]:
             return []
     if not isinstance(content, dict):
         return []
-    nested = content.get(GROK_NESTED_REPORT)
-    return [content, nested] if isinstance(nested, dict) else [content]
+    if GROK_NESTED_REPORT not in content:
+        return [content]
+    nested = content[GROK_NESTED_REPORT]
+    return [content, nested] if isinstance(nested, dict) else []
 
 
-def _grok_succeeded(block: JSONObject) -> bool:
+def _grok_report_ok(report: JSONObject) -> bool:
+    """Whether one report says its call finished and, if it names an exit code, exited 0.
+
+    The status is an allowlist: grok reports "running" for a command it moved to the
+    background and "failed" for one that did not work, and a status it has never sent is not
+    taken for success. A null exit code is a command that has not finished. A report that
+    names an error never passes.
+    """
+    if GROK_ERROR_KEY in report or report.get("type") == GROK_ERROR_TYPE:
+        return False
+    if report.get("status", GROK_COMPLETED) != GROK_COMPLETED:
+        return False
+    return "exit_code" not in report or _whole_number(report["exit_code"]) == 0
+
+
+def _grok_batch_ok(batch: JSONValue) -> bool:
+    """Whether a poll of several background commands holds one that completed with exit 0."""
+    results = batch.get("results") if isinstance(batch, dict) else None
+    return isinstance(results, list) and any(
+        isinstance(child, dict)
+        and _whole_number(child.get("exit_code")) == 0
+        and _grok_report_ok(child)
+        for child in results
+    )
+
+
+def _grok_succeeded(block: JSONObject, command: bool) -> bool:
     """Whether a `tool_result` reports a call that ran and worked.
 
     `is_error` false alone is not that: grok returns a command that exited 2 with `is_error`
-    false and the exit code in the content, and a command moved to the background as
-    "running" before anything came back. A report carrying an `exit_code` must carry 0, and
-    null is a command that has not finished. A result with no exit code at all, a file read,
-    rests on `is_error`.
+    false and the exit code in the content. The content must hold a JSON object, because
+    content that is not one reports nothing to judge, and every report in it must pass
+    `_grok_report_ok`. A `command` result must also carry exit code 0 in one of its reports;
+    a result with no status and no exit code, a file read, rests on `is_error`.
 
-    A batch poll worked when any command in it exited 0: that one inspected something, and a
-    sibling still running or failed does not undo it. Any other batch shape fails closed.
+    A batch poll, whichever report carries it, worked when any command in it completed with
+    exit code 0: that one inspected something, and a sibling still running or failed does
+    not undo it. The reports around the batch still have to pass, and any other batch shape
+    fails closed.
     """
     if block.get("is_error") is not False:
         return False
     reports = _grok_reports(block)
-    if reports and GROK_BATCH_REPORT in reports[0]:
-        batch = reports[0][GROK_BATCH_REPORT]
-        results = batch.get("results") if isinstance(batch, dict) else None
-        return isinstance(results, list) and any(
-            isinstance(child, dict) and _whole_number(child.get("exit_code")) == 0
-            for child in results
-        )
-    for report in reports:
-        if report.get("status") == "running":
-            return False
-        if "exit_code" in report and _whole_number(report["exit_code"]) != 0:
-            return False
-    return True
+    if not reports:
+        return False
+    if not all(_grok_report_ok(report) for report in reports):
+        return False
+    batches = [report[GROK_BATCH_REPORT] for report in reports if GROK_BATCH_REPORT in report]
+    if command and not batches and all(_whole_number(r.get("exit_code")) != 0 for r in reports):
+        return False
+    return all(_grok_batch_ok(batch) for batch in batches)
+
+
+def _grok_status(block: JSONObject) -> str | None:
+    """The first status in a result's reports that the success rule refuses."""
+    for report in _grok_reports(block):
+        status = _refused_status(report, GROK_COMPLETED)
+        if status is not None:
+            return status
+    return None
 
 
 def _grok_output(block: JSONObject) -> str:
-    """What a failed call printed, for the refusal to quote."""
+    """What a failed call printed, for the refusal to quote.
+
+    The content as it came stands in when no report printed anything, unless a report names
+    a refused status: that status is the reason, and a file read's content is the file.
+    """
     for report in _grok_reports(block):
         for key in ("output", "stderr", "stdout"):
             text = _text(report.get(key))
             if text.strip():
                 return text
+    if _grok_status(block) is not None:
+        return ""
     content = block.get("content")
     return content if isinstance(content, str) else ""
 
@@ -730,11 +809,13 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     attempts = 0
     local = 0
     failure: str | None = None
+    failure_status: str | None = None
+    ambiguous: str | None = None
     unknown: set[str] = set()
-    # The inspecting calls made and not yet answered. A result counts once, for such a call
-    # this run made: a second result for the same id, one for an id never called, or one
-    # answering a bookkeeping call, is evidence of nothing.
-    pending: set[str] = set()
+    # Every call's id with the tool each call under it named, and the outcome of each result
+    # answering it once called. A result for an id not yet called is evidence of nothing.
+    called: dict[str, list[str]] = {}
+    answered: dict[str, list[bool]] = {}
     turns: int | None = None
     output_tokens: int | None = None
     for event in events:
@@ -748,26 +829,30 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
                     calls += 1
                     name = block.get("name")
                     tool = name if isinstance(name, str) else ""
+                    ident = block.get("id")
+                    if isinstance(ident, str):
+                        called.setdefault(ident, []).append(tool)
                     if tool not in GROK_INSPECTING_TOOLS:
                         if tool not in GROK_QUIET_TOOLS:
                             unknown.add(tool or "<unnamed>")
                         continue
                     attempts += 1
-                    ident = block.get("id")
-                    if isinstance(ident, str):
-                        pending.add(ident)
         elif kind == "user":
             for block in blocks:
                 ident = block.get("tool_use_id")
                 if block.get("type") != GROK_RESULT_BLOCK or not isinstance(ident, str):
                     continue
-                if ident not in pending:
+                if ident not in called:
                     continue
-                pending.discard(ident)
-                if _grok_succeeded(block):
-                    local += 1
-                elif failure is None:
+                succeeded = _grok_succeeded(
+                    block, bool(GROK_COMMAND_TOOLS.intersection(called[ident]))
+                )
+                answered.setdefault(ident, []).append(succeeded)
+                if succeeded or failure is not None:
+                    continue
+                if any(tool in GROK_INSPECTING_TOOLS for tool in called[ident]):
                     failure = _first_line(_grok_output(block))
+                    failure_status = _grok_status(block)
         elif kind == "result":
             # LAST wins, where the extractor refuses a stream carrying more than one. The
             # laxity is unreachable rather than a disagreement: `gate` extracts and validates
@@ -777,6 +862,15 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
+    for ident, outcomes in answered.items():
+        # ONE tool under the id, an inspecting one, and every result a success. An id two
+        # tools share, or one answered both ways, does not say which call worked; one tool
+        # named under it twice, as an echo would, leaves no doubt.
+        tools = set(called[ident])
+        if len(tools) == 1 and tools <= GROK_INSPECTING_TOOLS and all(outcomes):
+            local += 1
+        elif tools & GROK_INSPECTING_TOOLS and any(outcomes) and ambiguous is None:
+            ambiguous = ident
     if attempts == 0 and unknown:
         # The codex drift check's reason, for a list of names instead of kinds: a renamed
         # inspecting tool would otherwise make every run exit 6, blaming the model. An MCP
@@ -797,25 +891,32 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
         duration_s=None,
         local_tool_attempts=attempts,
         first_failure=failure,
+        ambiguous_id=ambiguous,
+        first_status=failure_status,
     )
 
 
-def _codex_succeeded(item_kind: str, item: JSONObject) -> bool:
+def _codex_succeeded(item: JSONObject) -> bool:
     """Whether a local item's `item.completed` reports that it ran and worked."""
-    if item_kind in CODEX_COMMAND_ITEMS:
-        return _whole_number(item.get("exit_code")) == 0
-    return item.get("status") == "completed"
+    if item.get("status", CODEX_COMPLETED) != CODEX_COMPLETED:
+        return False
+    return _whole_number(item.get("exit_code")) == 0
 
 
 def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
-    seen: set[str] = set()
-    worked: set[str] = set()
+    # One call is the item id and kind its two events share.
+    seen: set[tuple[str, str]] = set()
+    # Per id, the kinds of call made under it and the outcome of each local completion.
+    kinds: dict[str, set[str]] = {}
+    completed: dict[str, list[bool]] = {}
     unknown: set[str] = set()
     total = 0
     calls = 0
     attempts = 0
     local = 0
     failure: str | None = None
+    failure_status: str | None = None
+    ambiguous: str | None = None
     # codex's own turn accounting, which counts one per `exec` turn rather than one per
     # model round-trip. It is not comparable with grok's `num_turns` and is recorded because
     # it is the number codex publishes, not because the two mean the same thing.
@@ -845,10 +946,11 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             ident = item.get("id")
             is_local = item_kind in CODEX_LOCAL_TOOL_ITEMS
             if isinstance(ident, str):
-                # Deduped on the item's own id, so a call the run started and never finished
-                # is still an attempt.
-                if ident not in seen:
-                    seen.add(ident)
+                # Deduped on the item's own id and kind, so a call the run started and never
+                # finished is still an attempt, and a completion of another kind is another call.
+                kinds.setdefault(ident, set()).add(item_kind)
+                if (ident, item_kind) not in seen:
+                    seen.add((ident, item_kind))
                     calls += 1
                     attempts += is_local
             elif kind == "item.completed":
@@ -860,14 +962,21 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             # `status` "in_progress", whatever the call goes on to do.
             if not is_local or kind != "item.completed":
                 continue
-            if not _codex_succeeded(item_kind, item):
-                if failure is None:
-                    failure = _first_line(item.get("aggregated_output"))
-            elif not isinstance(ident, str):
+            succeeded = _codex_succeeded(item)
+            if not succeeded and failure is None:
+                failure = _first_line(item.get("aggregated_output"))
+                failure_status = _refused_status(item, CODEX_COMPLETED)
+            if isinstance(ident, str):
+                completed.setdefault(ident, []).append(succeeded)
+            elif succeeded:
                 local += 1
-            elif ident not in worked:
-                worked.add(ident)
-                local += 1
+    for ident, outcomes in completed.items():
+        # One kind of call under the id, and every completion a success. An id two kinds
+        # share, or one completed both ways, does not say which call worked.
+        if len(kinds[ident]) == 1 and all(outcomes):
+            local += 1
+        elif any(outcomes) and ambiguous is None:
+            ambiguous = ident
 
     if total == 0:
         # `codex exec --json` opens every run with `thread.started` and `turn.started`, so a
@@ -895,7 +1004,7 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
             f"does not recognize: {', '.join(sorted(unknown))}. That is provider CLI drift, "
             "not model behavior, and no run through codex can be believed until each kind "
             "is added to validate.CODEX_TOOL_ITEMS. "
-            "A kind that reads or edits the working tree also goes in "
+            "A kind that reads the working tree also goes in "
             "validate.CODEX_LOCAL_TOOL_ITEMS: added only to the first, it silences this error "
             "and every run then exits 6."
         )
@@ -907,6 +1016,8 @@ def _codex_stats(events: Iterable[JSONObject]) -> RunStats:
         duration_s=None,
         local_tool_attempts=attempts,
         first_failure=failure,
+        ambiguous_id=ambiguous,
+        first_status=failure_status,
     )
 
 
@@ -968,12 +1079,27 @@ def describe_run(stats: RunStats) -> str:
 
 
 def _first_failure(stats: RunStats) -> str:
-    """What the first failed local call printed, quoted as data: it is the provider's text."""
+    """What the first failed local call printed, quoted as data: it is the provider's text.
+
+    A status the success rule refused is named before it, since after a provider renames a
+    status that is the only reason every run fails. A success an ambiguous id kept from
+    counting is named by that id, because a run whose only success it was would otherwise
+    read as one whose calls never finished.
+    """
     if stats.first_failure is None:
-        return "none of them finished"
-    if not stats.first_failure:
-        return "the first to fail printed nothing"
-    return f"the first to fail printed {stats.first_failure!r}"
+        said = ""
+    else:
+        printed = f"printed {stats.first_failure!r}" if stats.first_failure else "printed nothing"
+        if stats.first_status is not None:
+            printed = f"reported status {stats.first_status} and {printed}"
+        said = f"the first to fail {printed}"
+    if stats.ambiguous_id is None:
+        return said or "none of them finished"
+    unpaired = (
+        f"a success under id {stats.ambiguous_id!r} does not count, because that id names "
+        "more than one call or also reported a failure"
+    )
+    return f"{said}, and {unpaired}" if said else unpaired
 
 
 def _sha256(filename: str) -> str:
