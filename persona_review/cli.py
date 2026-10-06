@@ -220,7 +220,27 @@ def _clear_run_dir(run_dir: Path, stem: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _check_model_and_effort(provider: Provider, args: argparse.Namespace) -> None:
+    """Refuse a `-m` or `-e` the provider CLI must never be handed.
+
+    Both values reach the provider's argv, and codex's effort lands inside a `-c` config
+    override, where anything but a level it knows is written into its config verbatim. A
+    model that is empty or starts with `-` would be parsed as the CLI's next option.
+    """
+    if args.effort not in provider.effort_levels:
+        raise errors.UsageError(
+            f"-e {args.effort!r} is not a {provider.binary} effort level; "
+            f"use one of: {', '.join(provider.effort_levels)}"
+        )
+    if not args.model or args.model.startswith("-"):
+        raise errors.UsageError(f"-m {args.model!r} is not a model name")
+
+
 def _run(provider: Provider, args: argparse.Namespace, flow: Flow) -> int:
+    # Before the lock and the clear: a mistyped flag is refused without deleting the
+    # previous run's artifacts.
+    _check_model_and_effort(provider, args)
+
     # The environment is parsed FIRST and in full, so a malformed CE_PERSONA_* value is
     # refused before any work: it used to be read three quarters of the way down, after the
     # run directory had been cleared and the prompt built.
@@ -422,7 +442,7 @@ def _review_locked(
         prov_pairs=[
             f"provider={provider.name}",
             f"model={args.model}",
-            f"effort={args.effort or 'config-default'}",
+            f"effort={args.effort}",
             f"persona={persona}",
             f"assets_dir={asset_dir}",
             f"base_ref={args.base}",
@@ -516,7 +536,7 @@ def _validate_locked(
         prov_pairs=[
             f"provider={provider.name}",
             f"model={args.model}",
-            f"effort={args.effort or 'config-default'}",
+            f"effort={args.effort}",
             # WHICH MODE WROTE THIS. The artifact stem already says it, but a sidecar is
             # read on its own and a consumer must not have to parse a filename to learn
             # whether these are findings or judgments of somebody else's.

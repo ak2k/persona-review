@@ -2564,16 +2564,34 @@ class TestProviders:
         assert "--output-schema" not in argv
         assert argv[-1] == "-"
 
-    def test_codex_omits_the_effort_flag_when_it_is_unset(self):
+    @pytest.mark.parametrize("effort", [providers.CODEX.default_effort, "low"])
+    def test_codex_always_passes_the_effort_it_was_given(self, effort: str):
+        # Never left to ~/.codex/config.toml, so two machines run the same review.
         inv = providers.Invocation(
             model="m",
-            effort="",
+            effort=effort,
             repo=Path("/r"),
             prompt_file=Path("/p"),
             schema_text="{}",
             last_file=None,
         )
-        assert "model_reasoning_effort" not in " ".join(providers.CODEX.argv(inv))
+        argv = providers.CODEX.argv(inv)
+        assert argv[argv.index("-c") + 1] == f'model_reasoning_effort="{effort}"'
+
+    def test_the_defaults_are_explicit_and_among_each_provider_s_levels(self):
+        assert (providers.GROK.default_model, providers.GROK.default_effort) == (
+            "grok-4.7",
+            "xhigh",
+        )
+        assert (providers.CODEX.default_model, providers.CODEX.default_effort) == (
+            "gpt-6.1-sol",
+            "high",
+        )
+        for provider in providers.PROVIDERS.values():
+            assert provider.default_effort in provider.effort_levels
+            assert "" not in provider.effort_levels
+            assert provider.default_effort in provider.effort_help
+            assert provider.default_model in provider.model_help
 
     def test_every_provider_is_covered_by_the_flag_probe_shape(self):
         argv = flags.reference_argv()

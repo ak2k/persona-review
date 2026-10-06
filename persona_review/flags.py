@@ -22,8 +22,10 @@ grok validates its arguments in two places, and only the first is reachable offl
   * the model catalog, fetched from xAI after sign-in. `--model` and `--effort` resolve
     there, so the accepted effort set is per-model and per-account. This CANNOT cover them,
     and the offline fallback accepts a superset — `max` parses clean here while a real run
-    rejects it. A green run means the clap-checkable flags survived a grok bump; it says
-    nothing about effort.
+    rejects it. The wrapper refuses an `-e` outside `providers.GROK.effort_levels` before
+    grok starts, but whether the requested model accepts a listed level is still decided
+    only by a real run. A green run means the clap-checkable flags survived a grok bump; it
+    says nothing about effort.
 
 Run by hand (`python3 -m persona_review.flags`); no flake check drives it, because every
 probe needs a real authenticated `grok` that a build sandbox has neither network nor

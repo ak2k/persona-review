@@ -706,23 +706,114 @@ class TestContract(Harness):
         assert "exactly one JSON object" in prompt
         assert prompt.rstrip().endswith(assets.BOUNDARY)
 
-    # NON-DEFAULT sentinels. Asserting `-e xhigh` reaches grok proves nothing, because xhigh
-    # is grok's default: hardcoding the flag and ignoring -e kept the suite green.
+    # NON-DEFAULT values. Asserting `-e xhigh` reaches grok proves nothing, because xhigh is
+    # grok's default: hardcoding the flag and ignoring -e kept the suite green. `low` is the
+    # default for neither provider and a level both accept.
     @pytest.mark.parametrize(
         ("provider", "expected"),
         [
-            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
-            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+            ("grok", ["--model", "sentinel-model", "--effort", "low"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="low"']),
         ],
     )
     def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
         self.good_answer(provider)
-        self.review(
-            provider, "adversarial-reviewer", "-e", "sentinel-effort", "-m", "sentinel-model"
-        )
+        self.review(provider, "adversarial-reviewer", "-e", "low", "-m", "sentinel-model")
         argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
         for token in expected:
             assert token in argv, argv
+
+
+MODES = ("review", "validate")
+
+
+class TestModelAndEffortArguments(Harness):
+    """`-m` and `-e` are the override path for every caller, so a bad value stops here."""
+
+    def run_mode(self, mode: str, provider: str, *args: str) -> subprocess.CompletedProcess[str]:
+        if mode == "review":
+            self.good_answer(provider)
+            return self.review(provider, "adversarial-reviewer", *args)
+        self.good_verdicts(provider)
+        return self.validate(provider, str(self.batch), *args)
+
+    def assert_refused_before_the_runner(self, proc: subprocess.CompletedProcess[str]) -> None:
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert proc.stdout == "", proc.stdout
+        # ONE legible reason: not argparse's usage block, not a traceback.
+        assert len(proc.stderr.strip().splitlines()) == 1, proc.stderr
+        assert not self.argv_log.exists(), "the provider was started with a refused value"
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize(
+        ("provider", "expected", "recorded"),
+        [
+            ("grok", ["--effort", "xhigh"], "xhigh"),
+            ("codex", ['model_reasoning_effort="high"'], "high"),
+        ],
+    )
+    def test_each_provider_passes_its_own_default_effort(
+        self, mode: str, provider: str, expected: list[str], recorded: str
+    ):
+        # codex used to pass no effort at all, leaving the level to whatever the machine's
+        # ~/.codex/config.toml said, and the sidecar recorded "config-default".
+        proc = self.run_mode(mode, provider)
+        assert proc.returncode == 0, proc.stderr
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        for token in expected:
+            assert token in argv, argv
+        review = mode == "review"
+        sidecar = self.provenance(provider) if review else self.validator_provenance(provider)
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["effort"] == recorded
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize(
+        "effort",
+        ["sentinel-effort", "", "XHIGH", 'high" sandbox_mode="danger-full-access'],
+    )
+    def test_an_effort_the_provider_does_not_parse_is_a_usage_error(
+        self, mode: str, provider: str, effort: str
+    ):
+        # The last value is the reason this is a guard and not a nicety: codex parses an
+        # unknown level as a custom one, so the quote closed the `-c` override and wrote a
+        # second config key.
+        proc = self.run_mode(mode, provider, "-e", effort)
+        self.assert_refused_before_the_runner(proc)
+        assert "use one of:" in proc.stderr, proc.stderr
+
+    def test_the_effort_levels_are_each_provider_s_own(self):
+        # grok's enum carries `max` but its builds reject it; codex parses it.
+        grok = self.run_mode("review", "grok", "-e", "max")
+        self.assert_refused_before_the_runner(grok)
+        assert "low, medium, high, xhigh" in grok.stderr, grok.stderr
+        codex = self.run_mode("review", "codex", "-e", "max")
+        assert codex.returncode == 0, codex.stderr
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        assert 'model_reasoning_effort="max"' in argv, argv
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize("model_args", [["--model=-x"], ["-m-x"], ["-m", ""]])
+    def test_a_model_the_cli_would_misread_is_a_usage_error(
+        self, mode: str, provider: str, model_args: list[str]
+    ):
+        # argparse already refuses `-m -x`; these are the spellings that get past it.
+        proc = self.run_mode(mode, provider, *model_args)
+        self.assert_refused_before_the_runner(proc)
+        assert "-m" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_bad_effort_leaves_the_previous_run_s_artifacts_in_place(self, provider: str):
+        # Refused before the lock and the clear, so a typo costs nothing that was on disk.
+        assert self.run_mode("review", provider).returncode == 0
+        kept = {
+            path: path.read_bytes() for path in (self.artifact(provider), self.provenance(provider))
+        }
+        self.argv_log.unlink()
+        self.assert_refused_before_the_runner(self.run_mode("review", provider, "-e", "nope"))
+        for path, before in kept.items():
+            assert path.read_bytes() == before, f"{path.name} did not survive a bad -e"
 
 
 class TestGate(Harness):
@@ -2080,13 +2171,13 @@ class TestValidatorMode(Harness):
     @pytest.mark.parametrize(
         ("provider", "expected"),
         [
-            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
-            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+            ("grok", ["--model", "sentinel-model", "--effort", "low"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="low"']),
         ],
     )
     def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
         self.good_verdicts(provider)
-        self.validate(provider, str(self.batch), "-e", "sentinel-effort", "-m", "sentinel-model")
+        self.validate(provider, str(self.batch), "-e", "low", "-m", "sentinel-model")
         argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
         for token in expected:
             assert token in argv, argv
