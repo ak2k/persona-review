@@ -306,6 +306,9 @@ Q2_MIXED_STREAM = r"""
 """  # noqa: E501
 
 
+GROK_SERVED = "grok-4.7-build"
+
+
 def grok_stream(
     payload: str | None = None,
     *,
@@ -320,6 +323,9 @@ def grok_stream(
         "stop_reason": "end_turn",
         "num_turns": 3,
         "usage": {"output_tokens": 4096},
+        # The shape a real grok-4.7 run reports: the build that served it, which matches the
+        # default requested model, so a default success is the case that must stay silent.
+        "modelUsage": {GROK_SERVED: {"inputTokens": 248826, "outputTokens": 4096}},
     }
     if payload is not None:
         event["structured_output"] = json.loads(payload)
@@ -562,6 +568,14 @@ class Harness:
                 last=ANSWER,
             )
 
+    def run_mode(self, mode: str, provider: str, *args: str) -> subprocess.CompletedProcess[str]:
+        """A good run of either mode, for a guard both modes share."""
+        if mode == "review":
+            self.good_answer(provider)
+            return self.review(provider, "adversarial-reviewer", *args)
+        self.good_verdicts(provider)
+        return self.validate(provider, str(self.batch), *args)
+
     def findings(self, *args: str) -> subprocess.CompletedProcess[str]:
         """The retrieval command, as installed. On Harness rather than on its own test class
         because the vacuous-run tests need it too: the refusal is only closed if BOTH the
@@ -730,13 +744,6 @@ MODES = ("review", "validate")
 class TestModelAndEffortArguments(Harness):
     """`-m` and `-e` are the override path for every caller, so a bad value stops here."""
 
-    def run_mode(self, mode: str, provider: str, *args: str) -> subprocess.CompletedProcess[str]:
-        if mode == "review":
-            self.good_answer(provider)
-            return self.review(provider, "adversarial-reviewer", *args)
-        self.good_verdicts(provider)
-        return self.validate(provider, str(self.batch), *args)
-
     def assert_refused_before_the_runner(self, proc: subprocess.CompletedProcess[str]) -> None:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert proc.stdout == "", proc.stdout
@@ -814,6 +821,82 @@ class TestModelAndEffortArguments(Harness):
         self.assert_refused_before_the_runner(self.run_mode("review", provider, "-e", "nope"))
         for path, before in kept.items():
             assert path.read_bytes() == before, f"{path.name} did not survive a bad -e"
+
+
+class TestServedModel(Harness):
+    """The model the provider says served the run, recorded beside the one requested."""
+
+    def sidecar(self, mode: str, provider: str) -> dict[str, Any]:
+        review = mode == "review"
+        path = self.provenance(provider) if review else self.validator_provenance(provider)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def run_grok(self, mode: str, **result: Any) -> subprocess.CompletedProcess[str]:
+        payload = ANSWER if mode == "review" else VERDICTS
+        self.set_spec(stdout=grok_stream(payload, tool_call=True, **result))
+        if mode == "review":
+            return self.review("grok", "adversarial-reviewer")
+        return self.validate("grok", str(self.batch))
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_default_run_writes_nothing_to_stderr(self, mode: str, provider: str):
+        # grok's served build matches the default model, and codex names no model at all:
+        # neither is worth a line a caller has to read.
+        proc = self.run_mode(mode, provider)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == "", proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1, proc.stdout
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_grok_records_the_build_that_served_it(self, mode: str):
+        assert self.run_grok(mode).returncode == 0
+        record = self.sidecar(mode, "grok")
+        assert record["model"] == "grok-4.7"
+        assert record["served_models"] == [GROK_SERVED]
+        assert record["served_model_match"] is True
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_codex_records_that_it_names_no_model(self, mode: str):
+        assert self.run_mode(mode, "codex").returncode == 0
+        record = self.sidecar(mode, "codex")
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_another_model_serving_the_run_is_one_warning_line(self, mode: str):
+        proc = self.run_grok(mode, modelUsage={"grok-4.8-build": {"outputTokens": 1}})
+        # A warning, not a refusal: the review happened and its one stdout line stands.
+        assert proc.returncode == 0, proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1, proc.stdout
+        command = "ce-grok-persona" if mode == "review" else "ce-grok-validate"
+        assert proc.stderr == f"{command}: warning: requested grok-4.7, served grok-4.8-build\n"
+        record = self.sidecar(mode, "grok")
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
+
+    @pytest.mark.parametrize(
+        "usage", [None, [GROK_SERVED], GROK_SERVED, {}, {"": {"outputTokens": 1}}]
+    )
+    def test_grok_naming_no_usable_model_is_warned_about_not_refused(self, usage: Any):
+        proc = self.run_grok("review", modelUsage=usage)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == "ce-grok-persona: warning: requested grok-4.7, served not reported\n"
+        record = self.sidecar("review", "grok")
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    def test_a_refused_run_keeps_its_one_reason_and_still_records_what_served(self):
+        # The warning would be a second stderr line beside a refusal, which a caller reads as
+        # the reason. The sidecar still records the mismatch: a refused run is evidence.
+        self.set_spec(stdout=grok_stream(ANSWER, modelUsage={"grok-4.8-build": {}}))
+        proc = self.review("grok", "adversarial-reviewer")
+        assert proc.returncode == 6, proc.stderr
+        assert len(proc.stderr.strip().splitlines()) == 1, proc.stderr
+        assert "warning" not in proc.stderr, proc.stderr
+        record = self.sidecar("review", "grok")
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
 
 
 class TestGate(Harness):

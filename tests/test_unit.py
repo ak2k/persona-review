@@ -2885,6 +2885,99 @@ class TestProvenance:
         }
 
 
+class TestServedModel:
+    """What grok says served a run, read from the keys of its terminal `modelUsage`."""
+
+    @staticmethod
+    def _served(*events: str) -> tuple[str, ...] | None:
+        return validate.run_stats("grok-messages", validate.objects(events), None).served_models
+
+    def test_the_keys_of_model_usage_are_what_served(self):
+        # The real grok-4.7 shape. `model` on the init event echoes the request, so a reader
+        # of that field would see a match whatever served.
+        usage = {"grok-4.7-build": {"outputTokens": 1}, "grok-4.7-mini": {"outputTokens": 1}}
+        init = json.dumps({"type": "system", "subtype": "init", "model": "grok-4.7"})
+        assert self._served(init, grok_result(modelUsage=usage)) == (
+            "grok-4.7-build",
+            "grok-4.7-mini",
+        )
+
+    @pytest.mark.parametrize(
+        "usage",
+        [None, ["grok-4.7-build"], "grok-4.7-build", 7, {}, {"": {"outputTokens": 1}}],
+    )
+    def test_a_model_usage_that_names_nothing_reports_nothing(self, usage: Any):
+        assert self._served(grok_result(modelUsage=usage)) is None
+
+    def test_an_unnamed_entry_does_not_hide_a_named_one(self):
+        usage: dict[str, Any] = {"": {}, "grok-4.7-build": {}}
+        assert self._served(grok_result(modelUsage=usage)) == ("grok-4.7-build",)
+
+    def test_a_stream_without_model_usage_reports_nothing(self):
+        assert self._served(grok_result()) is None
+
+    def test_codex_reports_nothing(self):
+        stats = validate.run_stats(
+            "codex-items", validate.objects(CODEX_ONE_CALL.splitlines()), None
+        )
+        assert stats.served_models is None
+
+    @pytest.mark.parametrize(
+        ("served", "match"),
+        [
+            (("grok-4.7",), True),
+            (("grok-4.7-build",), True),
+            # A dot is not the boundary: 4.75 is another model.
+            (("grok-4.75",), False),
+            (("grok-4.7build",), False),
+            (("grok-4.8-build",), False),
+            (("grok-4.8", "grok-4.7-build"), True),
+            (None, None),
+        ],
+    )
+    def test_the_match_rule(self, served: tuple[str, ...] | None, match: bool | None):
+        assert validate.served_model_match("grok-4.7", served) is match
+
+    def test_both_keys_are_written_beside_the_requested_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prov.json"
+            stats = validate.RunStats(7, 7, 4, 4096, 1.0, served_models=("grok-4.8-build",))
+            validate.write_provenance(out, ["model=grok-4.7"], {}, stats, None, False)
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["model"] == "grok-4.7"
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
+
+    def test_nothing_reported_is_written_as_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prov.json"
+            validate.write_provenance(out, [], {}, STATS)
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    @pytest.mark.parametrize(
+        ("reports", "served", "match", "line"),
+        [
+            (True, ("grok-4.7-build",), True, None),
+            (
+                True,
+                ("grok-4.8-build",),
+                False,
+                "x: warning: requested grok-4.7, served grok-4.8-build",
+            ),
+            (True, None, None, "x: warning: requested grok-4.7, served not reported"),
+            (False, None, None, None),
+        ],
+    )
+    def test_the_warning(
+        self, reports: bool, served: tuple[str, ...] | None, match: bool | None, line: str | None
+    ):
+        evidence = validate.Evidence(Path("e"), "grok-messages", None, "grok-4.7", reports)
+        stats = validate.RunStats(1, 1, 1, 1, 1.0, served_models=served)
+        assert validate.served_model_warning("x", evidence, stats, match) == line
+
+
 class TestSettings:
     """The environment boundary. Parsed once, validated wholly, frozen."""
 

@@ -348,7 +348,11 @@ def _dispatch(
     # only the event stream records that. Handed to the gate rather than counted here, so the
     # counting happens where the stream has already been read.
     evidence = validate.Evidence(
-        events_file=events_file, mode=provider.events_mode, duration_s=elapsed
+        events_file=events_file,
+        mode=provider.events_mode,
+        duration_s=elapsed,
+        model=args.model,
+        reports_model=provider.reports_served_model,
     )
     return Dispatched(
         answer_file=answer_file,
