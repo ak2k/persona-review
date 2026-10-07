@@ -950,6 +950,27 @@ def _printable(text: str) -> str:
     )
 
 
+def _warn(line: str) -> None:
+    """`line` on stderr, or nowhere: never on stdout, and never failing the run it warns about.
+
+    With fd 2 closed at startup sys.stderr is None, and print would fall back to stdout. With
+    fd 2 open read-only, as a launcher script can leave it when stderr is closed, the write
+    fails and the line stays buffered for the shutdown flush, which would fail too and exit
+    120; pointing fd 2 at /dev/null lets that flush succeed.
+    """
+    if sys.stderr is None:
+        return
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        with contextlib.suppress(OSError):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, sys.stderr.fileno())
+            finally:
+                os.close(devnull)
+
+
 def _codex_succeeded(item: JSONObject) -> bool:
     """Whether a local item's `item.completed` reports that it ran and worked."""
     if item.get("status", CODEX_COMPLETED) != CODEX_COMPLETED:
@@ -1454,11 +1475,10 @@ def gate(
         )
 
     # After the refusals, so a refused run keeps its one reason; on stderr, so stdout stays
-    # one line. A warning rather than a refusal: the review did happen. With fd 2 closed
-    # sys.stderr is None, and print would fall back to stdout.
+    # one line. A warning rather than a refusal: the review did happen.
     warning = served_model_warning(label, evidence, stats, match)
-    if warning is not None and sys.stderr is not None:
-        print(warning, file=sys.stderr)
+    if warning is not None:
+        _warn(warning)
 
     breakdown = summarize(found, count)
 

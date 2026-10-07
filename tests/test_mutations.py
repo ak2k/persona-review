@@ -2347,8 +2347,7 @@ MUTATIONS: list[Mutation] = [
         "persona_review/validate.py",
         r"(    if stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
         r"(    warning = served_model_warning\(label, evidence, stats, match\)\n"
-        r"    if warning is not None and sys\.stderr is not None:\n"
-        r"        print\(warning, file=sys\.stderr\)\n)",
+        r"    if warning is not None:\n        _warn\(warning\)\n)",
         r"\2\1",
         suite="process",
         selector="refused_run_keeps_its_one_reason",
@@ -2427,10 +2426,19 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "the warning falls back to stdout when stderr is closed",
         "persona_review/validate.py",
-        r"    if warning is not None and sys\.stderr is not None:",
-        "    if warning is not None:",
+        r"    if sys\.stderr is None:\n        return\n",
+        "",
         suite="process",
-        selector="stderr_closed",
+        selector="stderr_cannot_take",
+    ),
+    Mutation(
+        # The failed line stays buffered, so the shutdown flush fails again and exits 120.
+        "a read-only stderr fails the run the warning is about",
+        "persona_review/validate.py",
+        r"                os\.dup2\(devnull, sys\.stderr\.fileno\(\)\)",
+        "                pass",
+        suite="process",
+        selector="stderr_cannot_take",
     ),
 ]
 

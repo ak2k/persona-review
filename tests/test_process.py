@@ -887,12 +887,15 @@ class TestServedModel(Harness):
         assert record["served_models"] == ["grok-4.8-build"]
         assert record["served_model_match"] is False
 
-    def test_a_warning_with_stderr_closed_never_reaches_stdout(self):
-        # With fd 2 closed Python sets sys.stderr to None, and `print(file=None)` writes to
-        # stdout, so the warning would arrive as a first stdout line ahead of the summary.
+    @pytest.mark.parametrize("redirect", ["2>&-", "2</dev/null"], ids=["closed", "read-only"])
+    def test_a_warning_stderr_cannot_take_never_reaches_stdout(self, redirect: str):
+        # Closed at startup, fd 2 leaves sys.stderr None, and `print(file=None)` writes to
+        # stdout. Open read-only, as a launcher script can leave it when stderr is closed,
+        # the write fails, and so would the shutdown flush of the line still buffered,
+        # exiting 120 with no summary.
         self.set_spec(stdout=grok_stream(ANSWER, tool_call=True, modelUsage={"grok-4.8-build": {}}))
         proc = subprocess.run(
-            ["/bin/sh", "-c", 'exec "$@" 2>&-', "sh", str(self.commands["grok"])]
+            ["/bin/sh", "-c", f'exec "$@" {redirect}', "sh", str(self.commands["grok"])]
             + ["adversarial-reviewer"],
             stdout=subprocess.PIPE,
             text=True,
