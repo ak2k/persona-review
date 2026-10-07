@@ -3667,6 +3667,30 @@ class TestPersonaNamesAreBare:
         assert (Path("/run") / f"{bare}-grok.json").parent == Path("/run")
 
 
+# Every character `str.splitlines` breaks on. The second arm plants one in an id, so a rewrite
+# that escapes only some of them is reached on every run, not left to the generator's luck.
+LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+model_ids = st.text() | st.builds(
+    lambda head, brk, tail: head + brk + tail, st.text(), st.sampled_from(LINE_BREAKS), st.text()
+)
+
+
+class TestTheServedModelWarningIsOneLine:
+    @PROPERTY
+    @given(requested=model_ids, served=st.lists(model_ids, min_size=1, max_size=3))
+    def test_any_requested_or_served_id_stays_on_one_line(self, requested: str, served: list[str]):
+        # The requested model is driven too: the CLI refuses a non-printable `-m`, so only a
+        # caller of the warning itself can hand one over.
+        evidence = validate.Evidence(Path("e"), "grok-messages", None, requested, True)
+        stats = validate.RunStats(1, 1, 1, 1, 1.0, served_models=tuple(served))
+        line = validate.served_model_warning("x", evidence, stats, False)
+        assert line is not None
+        assert len(line.splitlines()) == 1, line
+        for name in (requested, *served):
+            if name.isprintable():
+                assert name in line, (name, line)
+
+
 # The merge-tier projection lives at the end of this file because its property test reuses
 # PROPERTY and `json_values` above.
 

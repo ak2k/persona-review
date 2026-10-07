@@ -887,6 +887,25 @@ class TestServedModel(Harness):
         assert record["served_models"] == ["grok-4.8-build"]
         assert record["served_model_match"] is False
 
+    def test_a_warning_with_stderr_closed_never_reaches_stdout(self):
+        # With fd 2 closed Python sets sys.stderr to None, and `print(file=None)` writes to
+        # stdout, so the warning would arrive as a first stdout line ahead of the summary.
+        self.set_spec(stdout=grok_stream(ANSWER, tool_call=True, modelUsage={"grok-4.8-build": {}}))
+        proc = subprocess.run(
+            ["/bin/sh", "-c", 'exec "$@" 2>&-', "sh", str(self.commands["grok"])]
+            + ["adversarial-reviewer"],
+            stdout=subprocess.PIPE,
+            text=True,
+            env=self.env(),
+            cwd=self.work,
+            timeout=120,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert len(proc.stdout.splitlines()) == 1, proc.stdout
+        assert "warning" not in proc.stdout, proc.stdout
+        assert self.sidecar("review", "grok")["served_model_match"] is False
+
     @pytest.mark.parametrize("mode", MODES)
     @pytest.mark.parametrize(("served", "match"), [(GROK_SERVED, False), ("grok-4.8-build", True)])
     def test_the_served_model_is_checked_against_the_m_override(

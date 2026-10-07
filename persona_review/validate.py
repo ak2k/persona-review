@@ -1454,9 +1454,10 @@ def gate(
         )
 
     # After the refusals, so a refused run keeps its one reason; on stderr, so stdout stays
-    # one line. A warning rather than a refusal: the review did happen.
+    # one line. A warning rather than a refusal: the review did happen. With fd 2 closed
+    # sys.stderr is None, and print would fall back to stdout.
     warning = served_model_warning(label, evidence, stats, match)
-    if warning is not None:
+    if warning is not None and sys.stderr is not None:
         print(warning, file=sys.stderr)
 
     breakdown = summarize(found, count)
