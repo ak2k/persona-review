@@ -223,9 +223,11 @@ def _clear_run_dir(run_dir: Path, stem: Path) -> None:
 def _check_model_and_effort(provider: Provider, args: argparse.Namespace) -> None:
     """Refuse a `-m` or `-e` the provider CLI must never be handed.
 
-    Both values reach the provider's argv, and codex's effort lands inside a `-c` config
-    override, where anything but a level it knows is written into its config verbatim. A
-    model that is empty or starts with `-` would be parsed as the CLI's next option.
+    Both values reach the provider's argv, and codex's effort is the value of its
+    `-c model_reasoning_effort` override, so a value outside the provider's levels never
+    reaches the provider. A model that is empty or starts with `-` would be parsed as the
+    CLI's next option, and one holding whitespace or a non-printable character is no model
+    id and would split the one-line warning that names it.
     """
     if args.effort not in provider.effort_levels:
         raise errors.UsageError(
@@ -234,6 +236,8 @@ def _check_model_and_effort(provider: Provider, args: argparse.Namespace) -> Non
         )
     if not args.model or args.model.startswith("-"):
         raise errors.UsageError(f"-m {args.model!r} is not a model name")
+    if not args.model.isprintable() or any(ch.isspace() for ch in args.model):
+        raise errors.UsageError(f"-m {args.model!r} holds whitespace or a non-printable character")
 
 
 def _run(provider: Provider, args: argparse.Namespace, flow: Flow) -> int:

@@ -2895,7 +2895,8 @@ class TestServedModel:
     def test_the_keys_of_model_usage_are_what_served(self):
         # The real grok-4.7 shape. `model` on the init event echoes the request, so a reader
         # of that field would see a match whatever served.
-        usage = {"grok-4.7-build": {"outputTokens": 1}, "grok-4.7-mini": {"outputTokens": 1}}
+        # Reverse order, so the recorded list is sorted rather than merely kept.
+        usage = {"grok-4.7-mini": {"outputTokens": 1}, "grok-4.7-build": {"outputTokens": 1}}
         init = json.dumps({"type": "system", "subtype": "init", "model": "grok-4.7"})
         assert self._served(init, grok_result(modelUsage=usage)) == (
             "grok-4.7-build",
@@ -2967,6 +2968,12 @@ class TestServedModel:
                 "x: warning: requested grok-4.7, served grok-4.8-build",
             ),
             (True, None, None, "x: warning: requested grok-4.7, served not reported"),
+            (
+                True,
+                ("a\nb", "c\u2028d"),
+                False,
+                "x: warning: requested grok-4.7, served a\\nb, c\\u2028d",
+            ),
             (False, None, None, None),
         ],
     )

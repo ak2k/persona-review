@@ -2208,8 +2208,8 @@ MUTATIONS: list[Mutation] = [
         selector="ignore_sigterm and grok",
     ),
     Mutation(
-        # codex parses an unknown level as a custom one inside a `-c` config override, so an
-        # unchecked `-e` is config injection as well as a wasted run.
+        # A value outside the levels reaches the provider; for codex, as the value of its
+        # `-c model_reasoning_effort` override, which it accepts as a custom level.
         "an effort outside the provider's levels reaches the provider again",
         "persona_review/cli.py",
         r"    if args\.effort not in provider\.effort_levels:",
@@ -2360,6 +2360,49 @@ MUTATIONS: list[Mutation] = [
         "    write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)",
         suite="process",
         selector="records_the_build_that_served_it",
+    ),
+    Mutation(
+        # `-m` is the tactical override; checked against the default instead, a run that
+        # pinned another model reads as matching whenever the default's build serves it.
+        "the served model is checked against the default rather than -m",
+        "persona_review/cli.py",
+        r"^        model=args\.model,(?=\n        reports_model=)",
+        "        model=provider.default_model,",
+        suite="process",
+        selector="checked_against_the_m_override",
+    ),
+    Mutation(
+        "a model holding a non-printable character reaches the provider again",
+        "persona_review/cli.py",
+        r"    if not args\.model\.isprintable\(\) or any",
+        "    if any",
+        suite="process",
+        selector="model_the_cli_would_misread and review and grok",
+    ),
+    Mutation(
+        "a model holding whitespace reaches the provider again",
+        "persona_review/cli.py",
+        r"    if not args\.model\.isprintable\(\) or any\(ch\.isspace\(\) for ch in args\.model\):",
+        "    if not args.model.isprintable():",
+        suite="process",
+        selector="model_the_cli_would_misread and review and grok",
+    ),
+    Mutation(
+        # A served id carrying a line break would print a second stderr line of its own
+        # choosing, one that can read as the command's summary.
+        "a served id is printed raw in the warning",
+        "persona_review/validate.py",
+        r'        ch if ch\.isprintable\(\) else ch\.encode\("unicode_escape"\)\.decode\("ascii"\) '
+        r"for ch in text",
+        "        ch for ch in text",
+        suite="process",
+        selector="cannot_break_the_warning",
+    ),
+    Mutation(
+        "served_models is recorded in stream order rather than sorted",
+        "persona_review/validate.py",
+        r"tuple\(sorted\(name for name in usage_by_model if name\)\)",
+        "tuple(name for name in usage_by_model if name)",
     ),
 ]
 

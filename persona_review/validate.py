@@ -936,9 +936,18 @@ def served_model_warning(
 ) -> str | None:
     """The one stderr line for a run that served another model, or did not say which."""
     if match is False or (evidence.reports_model and stats.served_models is None):
-        served = ", ".join(stats.served_models) if stats.served_models else "not reported"
-        return f"{label}: warning: requested {evidence.model}, served {served}"
+        named = stats.served_models
+        served = ", ".join(_printable(name) for name in named) if named else "not reported"
+        return f"{label}: warning: requested {_printable(evidence.model)}, served {served}"
     return None
+
+
+def _printable(text: str) -> str:
+    """`text` with every non-printable character escaped. An id the provider chose must not
+    be able to break the warning across lines, and a normal id prints as itself."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text
+    )
 
 
 def _codex_succeeded(item: JSONObject) -> bool:

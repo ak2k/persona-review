@@ -113,10 +113,10 @@ class Provider:
     binary: str
     default_model: str
     default_effort: str
-    # The levels the provider CLI parses. `-e` is checked against these before anything runs:
-    # codex parses an unknown level as a custom one and writes it into a `-c` config override,
-    # so an unchecked value is config injection. Whether a given model supports a level is
-    # still the CLI's call.
+    # The levels this wrapper lets through to the provider CLI. `-e` is checked against these
+    # before anything runs, so a value outside them never reaches the provider: for codex, the
+    # value of its `-c model_reasoning_effort` override, which it would otherwise accept as a
+    # custom level. Whether a given model supports a listed level is still the CLI's call.
     effort_levels: tuple[str, ...]
     # Whether the event stream names the model that actually served the run. When it should
     # and does not, that is worth a warning; when it never does, silence is the only answer.
