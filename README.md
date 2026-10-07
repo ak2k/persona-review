@@ -556,6 +556,19 @@ exit `6`, attempts and no successes exit `3` — so they are recorded rather tha
 refusal you cannot audit afterwards is one you have to take on trust. `ce-persona-findings` refuses
 a sidecar whose `local_tool_calls` is zero.
 
+`model` and `effort` record what was requested. Two keys record what served: `served_models` is
+the sorted list of model ids the provider's stream reported, and `served_model_match` is `true`
+when one of them is the requested model or the requested model followed by `-` and a suffix
+(`grok-4.7-build` matches `grok-4.7`; `grok-4.75` does not), `false` when ids were reported and
+none matches, and `null` when none were. grok reports them as the keys of its terminal event's
+`modelUsage`. codex reports none, so both keys are `null` for every codex run. A `modelUsage`
+that is not an object, or names no model, counts as none reported. A run that exits `0` with
+`served_model_match` false, or through grok with nothing reported, prints one stderr line, for
+example `ce-grok-persona: warning: requested grok-4.7, served grok-4.8-build`; the exit status
+and the stdout line are unchanged. The match is a warning, not a proof: the suffix rule also
+accepts a sibling such as `grok-4.7-mini`, and one matching id does not flag a run that also
+used another model. `served_models` lists every id, so a reader can see both.
+
 Older sidecars are read by the rule they were written under. One written before 0.3.3 carries no
 `local_tool_calls` and is refused when `tool_calls` is zero. One written by 0.3.3 or 0.3.4 carries
 no `local_tool_attempts`, and its `local_tool_calls` counted attempts, failed ones included: a
@@ -568,6 +581,29 @@ only comparable if they ran the same brief — and `base_ref=HEAD~1` names a dif
 day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
+
+## Changes in 0.3.8
+
+persona-review owns the model and effort defaults, checks the overrides before anything runs,
+and records which model actually served the run. Exit statuses keep their meanings.
+
+- **Codex default effort is `high`.** It used to pass no effort, leaving the level to
+  `~/.codex/config.toml`, and the sidecar recorded `config-default`. Every run now passes an
+  effort and the sidecar records it. grok stays `grok-4.7` at `xhigh`, codex `gpt-6.1-sol`.
+  `--help` names each default.
+- **`-e` must be one of the provider's levels.** codex: `none minimal low medium high xhigh
+  max ultra`; grok: `low medium high xhigh`. Anything else, including an empty value, exits
+  `2` with one stderr line naming the levels, before the run directory is touched, in both
+  review and validate modes. codex used to accept any string and write it into a `-c` config
+  override. Whether a model supports a listed level is still the provider's call.
+- **`-m` must not be empty or start with `-`.** `--model=-x`, `-m-x` and `-m ''` exit `2`
+  instead of reaching the provider's argv.
+- **The sidecar records the served model.** `served_models` and `served_model_match` are new
+  top-level keys (see Provenance), written on every run that writes a sidecar, refused runs
+  included.
+- **A mismatch is one stderr warning.** A run that exits `0` after another model served it,
+  or after grok named none, prints `<command>: warning: requested <model>, served <ids>`. A
+  refused run prints only its refusal.
 
 ## Changes in 0.3.7
 
