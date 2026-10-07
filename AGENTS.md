@@ -62,8 +62,11 @@ one line, and a person reading one error.
 The review and validate commands have one non-refusal stderr line, and only on a run that
 exits `0`: `<command>: warning: requested <model>, served <ids or "not reported">`, when the
 provider served another model or grok named none. It is printed after the refusal checks,
-so a refused run still carries exactly its one reason. (`ce-persona-findings` already prints
-its success summaries to stderr; that is a different command and contract.)
+so a refused run still carries exactly its one reason, and it escapes every non-printable
+character in the ids it names so it stays one line. (`ce-persona-findings` already prints
+its success summaries to stderr; that is a different command and contract.) The one-reason
+rule covers this package's own refusals: argparse's refusal of a malformed command line,
+such as `-e -x`, keeps argparse's usage-plus-error format.
 
 `tests/test_process.py` asserts the one-line contract directly, and that a default run
 writes nothing to stderr.

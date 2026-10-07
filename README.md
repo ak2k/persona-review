@@ -565,7 +565,8 @@ none matches, and `null` when none were. grok reports them as the keys of its te
 that is not an object, or names no model, counts as none reported. A run that exits `0` with
 `served_model_match` false, or through grok with nothing reported, prints one stderr line, for
 example `ce-grok-persona: warning: requested grok-4.7, served grok-4.8-build`; the exit status
-and the stdout line are unchanged. The match is a warning, not a proof: the suffix rule also
+and the stdout line are unchanged. A non-printable character in a served id is escaped in that
+line (a newline prints as `\n`), so it stays one line; the sidecar keeps the id as reported. The match is a warning, not a proof: the suffix rule also
 accepts a sibling such as `grok-4.7-mini`, and one matching id does not flag a run that also
 used another model. `served_models` lists every id, so a reader can see both.
 
@@ -594,10 +595,15 @@ and records which model actually served the run. Exit statuses keep their meanin
 - **`-e` must be one of the provider's levels.** codex: `none minimal low medium high xhigh
   max ultra`; grok: `low medium high xhigh`. Anything else, including an empty value, exits
   `2` with one stderr line naming the levels, before the run directory is touched, in both
-  review and validate modes. codex used to accept any string and write it into a `-c` config
-  override. Whether a model supports a listed level is still the provider's call.
-- **`-m` must not be empty or start with `-`.** `--model=-x`, `-m-x` and `-m ''` exit `2`
-  instead of reaching the provider's argv.
+  review and validate modes, so a value outside the levels never reaches the provider. codex
+  used to receive any string as the value of its `-c model_reasoning_effort` override. Whether
+  a model supports a listed level is still the provider's call.
+- **`-m` must be a plain model id.** An empty value, one starting with `-`, or one holding
+  whitespace or a non-printable character exits `2` with one stderr line instead of reaching
+  the provider's argv: `--model=-x`, `-m-x`, `-m ''` and `-m 'grok 4.7'` among them.
+- The one-line refusal covers the values argparse accepts. A value given as a separate
+  argument that starts with `-` (`-e -x`, `-m -x`) is refused by argparse itself, at exit `2`
+  with its usage text, as before.
 - **The sidecar records the served model.** `served_models` and `served_model_match` are new
   top-level keys (see Provenance), written on every run that writes a sidecar, refused runs
   included.
