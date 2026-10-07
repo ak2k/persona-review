@@ -522,6 +522,9 @@ class RunStats:
     the first id whose reported success did not count because the id was ambiguous, all for
     the refusal to quote. None is written to provenance, because the event stream kept
     beside the sidecar holds all of it.
+
+    `served_models` is every model id the stream says served the run, sorted, or None when
+    it names none: the provider does not report one, or this stream carried no usable one.
     """
 
     tool_calls: int
@@ -533,6 +536,7 @@ class RunStats:
     first_failure: str | None = None
     ambiguous_id: str | None = None
     first_status: str | None = None
+    served_models: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -543,11 +547,16 @@ class Evidence:
     stream has already been read. grok's answer arrives INSIDE its event stream, so
     `events_file` is then the same path as the answer file and the gate counts from the text
     it already holds rather than opening a megabyte twice.
+
+    `model` is the id the run asked for, and `reports_model` whether its provider's stream
+    is expected to name the model that served it, so the gate can say when the two differ.
     """
 
     events_file: Path
     mode: str
     duration_s: float | None
+    model: str = ""
+    reports_model: bool = False
 
 
 # BOTH ADAPTERS ASK TWO QUESTIONS: did the model reach outside itself, and did what it
@@ -818,6 +827,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
     answered: dict[str, list[bool]] = {}
     turns: int | None = None
     output_tokens: int | None = None
+    served: tuple[str, ...] | None = None
     for event in events:
         kind = event.get("type")
         message = event.get("message")
@@ -862,6 +872,7 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
             usage = event.get("usage")
             if isinstance(usage, dict):
                 output_tokens = _whole_number(usage.get("output_tokens"))
+            served = _served_models(event.get("modelUsage"))
     for ident, outcomes in answered.items():
         # ONE tool under the id, an inspecting one, and every result a success. An id two
         # tools share, or one answered both ways, does not say which call worked; one tool
@@ -893,7 +904,71 @@ def _grok_stats(events: Iterable[JSONObject]) -> RunStats:
         first_failure=failure,
         ambiguous_id=ambiguous,
         first_status=failure_status,
+        served_models=served,
     )
+
+
+def _served_models(usage_by_model: JSONValue) -> tuple[str, ...] | None:
+    """The model ids keying grok's `modelUsage`, which names what served rather than what
+    was asked for. Anything that is not an object of named entries reports nothing: this is
+    provenance, so a malformed one is neither a crash nor a refusal."""
+    if not isinstance(usage_by_model, dict):
+        return None
+    served = tuple(sorted(name for name in usage_by_model if name))
+    return served or None
+
+
+def served_model_match(requested: str, served: tuple[str, ...] | None) -> bool | None:
+    """Whether a served id is the requested one, or that id with a build suffix.
+
+    grok serves `grok-4.7` as `grok-4.7-build`, so a suffix after `-` matches; `grok-4.75`
+    is another model and does not. The suffix rule also accepts a sibling such as
+    `grok-4.7-mini`, and one matching id does not clear a run that also used another, which
+    is why every served id is recorded. None when the stream named none.
+    """
+    if served is None:
+        return None
+    return any(name == requested or name.startswith(requested + "-") for name in served)
+
+
+def served_model_warning(
+    label: str, evidence: Evidence, stats: RunStats, match: bool | None
+) -> str | None:
+    """The one stderr line for a run that served another model, or did not say which."""
+    if match is False or (evidence.reports_model and stats.served_models is None):
+        named = stats.served_models
+        served = ", ".join(_printable(name) for name in named) if named else "not reported"
+        return f"{label}: warning: requested {_printable(evidence.model)}, served {served}"
+    return None
+
+
+def _printable(text: str) -> str:
+    """`text` with every non-printable character escaped. An id the provider chose must not
+    be able to break the warning across lines, and a normal id prints as itself."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text
+    )
+
+
+def _warn(line: str) -> None:
+    """`line` on stderr, or nowhere: never on stdout, and never failing the run it warns about.
+
+    With fd 2 closed at startup sys.stderr is None, and print would fall back to stdout. With
+    fd 2 open read-only, as a launcher script can leave it when stderr is closed, the write
+    fails and the line stays buffered for the shutdown flush, which would fail too and exit
+    120; pointing fd 2 at /dev/null lets that flush succeed.
+    """
+    if sys.stderr is None:
+        return
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        with contextlib.suppress(OSError):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, sys.stderr.fileno())
+            finally:
+                os.close(devnull)
 
 
 def _codex_succeeded(item: JSONObject) -> bool:
@@ -1126,6 +1201,7 @@ def write_provenance(
     files: dict[str, str],
     stats: RunStats,
     digests: dict[str, str] | None = None,
+    served_match: bool | None = None,
 ) -> None:
     """Record which brief and schema this run used, by content hash, and what it did.
 
@@ -1158,6 +1234,10 @@ def write_provenance(
         "output_tokens": stats.output_tokens,
         "duration_s": stats.duration_s,
     }
+    # Beside `model`, which records only what was asked for.
+    served = stats.served_models
+    record["served_models"] = list(served) if served is not None else None
+    record["served_model_match"] = served_match
     path.write_text(json.dumps(record, indent=1, sort_keys=True), encoding="utf-8")
 
 
@@ -1356,7 +1436,8 @@ def gate(
     # Findings first, provenance second: the sidecar's job is attesting THIS artifact, so it
     # must never be the only thing on disk.
     findings_out.write_text(json.dumps(found, indent=1), encoding="utf-8")
-    write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)
+    match = served_model_match(evidence.model, stats.served_models)
+    write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests, match)
 
     # A reviewer with ZERO successful local tool calls has shown no read of the diff, so it
     # has no verdict to summarize: empty findings and a page of them are equally unfounded. A
@@ -1392,6 +1473,12 @@ def gate(
             f"({describe_run(stats)}). The model never opened the diff, so nothing it "
             f"reported is founded; the evidence is {provenance_out}."
         )
+
+    # After the refusals, so a refused run keeps its one reason; on stderr, so stdout stays
+    # one line. A warning rather than a refusal: the review did happen.
+    warning = served_model_warning(label, evidence, stats, match)
+    if warning is not None:
+        _warn(warning)
 
     breakdown = summarize(found, count)
 

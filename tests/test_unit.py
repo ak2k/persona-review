@@ -2564,16 +2564,34 @@ class TestProviders:
         assert "--output-schema" not in argv
         assert argv[-1] == "-"
 
-    def test_codex_omits_the_effort_flag_when_it_is_unset(self):
+    @pytest.mark.parametrize("effort", [providers.CODEX.default_effort, "low"])
+    def test_codex_always_passes_the_effort_it_was_given(self, effort: str):
+        # Never left to ~/.codex/config.toml, so two machines run the same review.
         inv = providers.Invocation(
             model="m",
-            effort="",
+            effort=effort,
             repo=Path("/r"),
             prompt_file=Path("/p"),
             schema_text="{}",
             last_file=None,
         )
-        assert "model_reasoning_effort" not in " ".join(providers.CODEX.argv(inv))
+        argv = providers.CODEX.argv(inv)
+        assert argv[argv.index("-c") + 1] == f'model_reasoning_effort="{effort}"'
+
+    def test_the_defaults_are_explicit_and_among_each_provider_s_levels(self):
+        assert (providers.GROK.default_model, providers.GROK.default_effort) == (
+            "grok-4.7",
+            "xhigh",
+        )
+        assert (providers.CODEX.default_model, providers.CODEX.default_effort) == (
+            "gpt-6.1-sol",
+            "high",
+        )
+        for provider in providers.PROVIDERS.values():
+            assert provider.default_effort in provider.effort_levels
+            assert "" not in provider.effort_levels
+            assert provider.default_effort in provider.effort_help
+            assert provider.default_model in provider.model_help
 
     def test_every_provider_is_covered_by_the_flag_probe_shape(self):
         argv = flags.reference_argv()
@@ -2865,6 +2883,106 @@ class TestProvenance:
             "output_tokens": 151,
             "duration_s": 4.5,
         }
+
+
+class TestServedModel:
+    """What grok says served a run, read from the keys of its terminal `modelUsage`."""
+
+    @staticmethod
+    def _served(*events: str) -> tuple[str, ...] | None:
+        return validate.run_stats("grok-messages", validate.objects(events), None).served_models
+
+    def test_the_keys_of_model_usage_are_what_served(self):
+        # The real grok-4.7 shape. `model` on the init event echoes the request, so a reader
+        # of that field would see a match whatever served.
+        # Reverse order, so the recorded list is sorted rather than merely kept.
+        usage = {"grok-4.7-mini": {"outputTokens": 1}, "grok-4.7-build": {"outputTokens": 1}}
+        init = json.dumps({"type": "system", "subtype": "init", "model": "grok-4.7"})
+        assert self._served(init, grok_result(modelUsage=usage)) == (
+            "grok-4.7-build",
+            "grok-4.7-mini",
+        )
+
+    @pytest.mark.parametrize(
+        "usage",
+        [None, ["grok-4.7-build"], "grok-4.7-build", 7, {}, {"": {"outputTokens": 1}}],
+    )
+    def test_a_model_usage_that_names_nothing_reports_nothing(self, usage: Any):
+        assert self._served(grok_result(modelUsage=usage)) is None
+
+    def test_an_unnamed_entry_does_not_hide_a_named_one(self):
+        usage: dict[str, Any] = {"": {}, "grok-4.7-build": {}}
+        assert self._served(grok_result(modelUsage=usage)) == ("grok-4.7-build",)
+
+    def test_a_stream_without_model_usage_reports_nothing(self):
+        assert self._served(grok_result()) is None
+
+    def test_codex_reports_nothing(self):
+        stats = validate.run_stats(
+            "codex-items", validate.objects(CODEX_ONE_CALL.splitlines()), None
+        )
+        assert stats.served_models is None
+
+    @pytest.mark.parametrize(
+        ("served", "match"),
+        [
+            (("grok-4.7",), True),
+            (("grok-4.7-build",), True),
+            # A dot is not the boundary: 4.75 is another model.
+            (("grok-4.75",), False),
+            (("grok-4.7build",), False),
+            (("grok-4.8-build",), False),
+            (("grok-4.8", "grok-4.7-build"), True),
+            (None, None),
+        ],
+    )
+    def test_the_match_rule(self, served: tuple[str, ...] | None, match: bool | None):
+        assert validate.served_model_match("grok-4.7", served) is match
+
+    def test_both_keys_are_written_beside_the_requested_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prov.json"
+            stats = validate.RunStats(7, 7, 4, 4096, 1.0, served_models=("grok-4.8-build",))
+            validate.write_provenance(out, ["model=grok-4.7"], {}, stats, None, False)
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["model"] == "grok-4.7"
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
+
+    def test_nothing_reported_is_written_as_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prov.json"
+            validate.write_provenance(out, [], {}, STATS)
+            record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    @pytest.mark.parametrize(
+        ("reports", "served", "match", "line"),
+        [
+            (True, ("grok-4.7-build",), True, None),
+            (
+                True,
+                ("grok-4.8-build",),
+                False,
+                "x: warning: requested grok-4.7, served grok-4.8-build",
+            ),
+            (True, None, None, "x: warning: requested grok-4.7, served not reported"),
+            (
+                True,
+                ("a\nb", "c\u2028d"),
+                False,
+                "x: warning: requested grok-4.7, served a\\nb, c\\u2028d",
+            ),
+            (False, None, None, None),
+        ],
+    )
+    def test_the_warning(
+        self, reports: bool, served: tuple[str, ...] | None, match: bool | None, line: str | None
+    ):
+        evidence = validate.Evidence(Path("e"), "grok-messages", None, "grok-4.7", reports)
+        stats = validate.RunStats(1, 1, 1, 1, 1.0, served_models=served)
+        assert validate.served_model_warning("x", evidence, stats, match) == line
 
 
 class TestSettings:
@@ -3547,6 +3665,36 @@ class TestPersonaNamesAreBare:
         assert bare == Path(bare).name
         assert not bare.startswith(".")
         assert (Path("/run") / f"{bare}-grok.json").parent == Path("/run")
+
+
+# Every character `str.splitlines` breaks on. The second arm plants one in an id, so a rewrite
+# that escapes only some of them is reached on every run, not left to the generator's luck.
+LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _broken(head: str, brk: str, tail: str) -> str:
+    return head + brk + tail
+
+
+model_ids: st.SearchStrategy[str] = st.text() | st.builds(
+    _broken, st.text(), st.sampled_from(LINE_BREAKS), st.text()
+)
+
+
+class TestTheServedModelWarningIsOneLine:
+    @PROPERTY
+    @given(requested=model_ids, served=st.lists(model_ids, min_size=1, max_size=3))
+    def test_any_requested_or_served_id_stays_on_one_line(self, requested: str, served: list[str]):
+        # The requested model is driven too: the CLI refuses a non-printable `-m`, so only a
+        # caller of the warning itself can hand one over.
+        evidence = validate.Evidence(Path("e"), "grok-messages", None, requested, True)
+        stats = validate.RunStats(1, 1, 1, 1, 1.0, served_models=tuple(served))
+        line = validate.served_model_warning("x", evidence, stats, False)
+        assert line is not None
+        assert len(line.splitlines()) == 1, line
+        for name in (requested, *served):
+            if name.isprintable():
+                assert name in line, (name, line)
 
 
 # The merge-tier projection lives at the end of this file because its property test reuses

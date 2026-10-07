@@ -50,7 +50,7 @@ replace claims about coverage with checks. Four modules had no entry at all.
 
 `test_every_module_is_represented_or_explicitly_exempt` stops a module having no entries
 unnoticed: one with neither an entry nor a written exemption in `UNMUTATED_MODULES` fails
-the suite. Two modules are exempt and say why.
+the suite. One module is exempt and says why.
 
 WHAT THAT CHECK DOES NOT CLAIM. It is MODULE granularity, not guard granularity. cli.py and
 validate.py each have fewer entries than raise sites. So "every
@@ -110,9 +110,6 @@ UNMUTATED_MODULES: dict[str, str] = {
     # Probes a real authenticated `grok` binary for CLI drift. No automated check drives it —
     # the same reason it is omitted from the coverage gate — so there is no test to kill.
     "flags.py": "manual CLI-drift probe; no automated check exercises it",
-    # Pure data: the Provider dataclass and its argv builders, with no guard to revert. Its
-    # argv shape IS asserted, by test_process.py's model/effort tests and by flags.py.
-    "providers.py": "declarative provider table; no branch that can fail open",
 }
 
 
@@ -2193,8 +2190,8 @@ MUTATIONS: list[Mutation] = [
         # drives `run_stats` and `gate` directly.
         "the gate is pointed at the wrong file for its evidence",
         "persona_review/cli.py",
-        r"        events_file=events_file, mode=provider\.events_mode, duration_s=elapsed",
-        "        events_file=prompt_file, mode=provider.events_mode, duration_s=elapsed",
+        r"^        events_file=events_file,$",
+        "        events_file=prompt_file,",
         suite="process",
         selector="one_tool_call_is_enough and grok",
     ),
@@ -2209,6 +2206,239 @@ MUTATIONS: list[Mutation] = [
         "                start_new_session=False,",
         suite="process",
         selector="ignore_sigterm and grok",
+    ),
+    Mutation(
+        # A value outside the levels reaches the provider; for codex, as the value of its
+        # `-c model_reasoning_effort` override, which it accepts as a custom level.
+        "an effort outside the provider's levels reaches the provider again",
+        "persona_review/cli.py",
+        r"    if args\.effort not in provider\.effort_levels:",
+        "    if False:",
+        suite="process",
+        selector="effort_the_provider_does_not_parse and review and codex",
+    ),
+    Mutation(
+        "a model that is empty or option-shaped reaches the provider again",
+        "persona_review/cli.py",
+        r'    if not args\.model or args\.model\.startswith\("-"\):',
+        "    if False:",
+        suite="process",
+        selector="model_the_cli_would_misread and review",
+    ),
+    Mutation(
+        # The half argparse does not already cover: `--model=-x` and `-m-x`.
+        "a model starting with a dash reaches the provider again",
+        "persona_review/cli.py",
+        r'    if not args\.model or args\.model\.startswith\("-"\):',
+        "    if not args.model:",
+        suite="process",
+        selector="model_the_cli_would_misread and review and grok",
+    ),
+    Mutation(
+        # Ordering: checked after the clear, a typo in -e deletes the last good review.
+        "the -m/-e check runs after the artifact clear",
+        "persona_review/cli.py",
+        r"    _check_model_and_effort\(provider, args\)\n"
+        r"([\s\S]*?        _clear_run_dir\(run_dir, stem\)\n)",
+        r"\1        _check_model_and_effort(provider, args)\n",
+        suite="process",
+        selector="previous_run_s_artifacts",
+    ),
+    Mutation(
+        # The per-provider set, not the check: grok's builds reject `max` although its enum
+        # carries it.
+        "grok accepts the max effort its builds reject",
+        "persona_review/providers.py",
+        r'    effort_levels=\("low", "medium", "high", "xhigh"\),',
+        '    effort_levels=("low", "medium", "high", "xhigh", "max"),',
+        suite="process",
+        selector="levels_are_each_provider_s_own",
+    ),
+    Mutation(
+        "codex leaves the effort to ~/.codex/config.toml again",
+        "persona_review/providers.py",
+        r"""    argv \+= \["-c", f'model_reasoning_effort="\{inv\.effort\}"'\]\n""",
+        "",
+    ),
+    Mutation(
+        # `2.75` is not a build of `2.7`: without the dash the prefix rule matches siblings
+        # that are other models.
+        "the served-model match loses its dash boundary",
+        "persona_review/validate.py",
+        r'name\.startswith\(requested \+ "-"\)',
+        "name.startswith(requested)",
+    ),
+    Mutation(
+        "every served model matches the requested one",
+        "persona_review/validate.py",
+        r"    return any\(name == requested or name\.startswith\(requested \+ \"-\"\) "
+        r"for name in served\)",
+        "    return True",
+    ),
+    Mutation(
+        # A modelUsage that is a list or a string is read as names, or crashes the gate.
+        "a modelUsage that is not an object is believed",
+        "persona_review/validate.py",
+        r"    if not isinstance\(usage_by_model, dict\):\n        return None\n",
+        "",
+    ),
+    Mutation(
+        "an unnamed modelUsage entry counts as a served model",
+        "persona_review/validate.py",
+        r"for name in usage_by_model if name\)",
+        "for name in usage_by_model)",
+    ),
+    Mutation(
+        "a run served by another model is not warned about",
+        "persona_review/validate.py",
+        r"    if match is False or \(evidence\.reports_model and stats\.served_models is None\):",
+        "    if False:",
+        suite="process",
+        selector="another_model_serving_the_run",
+    ),
+    Mutation(
+        # The default grok run serves `grok-4.7-build` for `grok-4.7`, so a warning on a match
+        # fires on every default run.
+        "a matching grok run is warned about",
+        "persona_review/validate.py",
+        r"    if match is False or \(",
+        "    if match is not None or (",
+        suite="process",
+        selector="writes_nothing_to_stderr and grok",
+    ),
+    Mutation(
+        # codex never names a model, so a warning on null fires on every codex run.
+        "a provider that never reports a model is warned about",
+        "persona_review/validate.py",
+        r"    if match is False or \(",
+        "    if match is not True or (",
+        suite="process",
+        selector="writes_nothing_to_stderr and codex",
+    ),
+    Mutation(
+        "codex is expected to name the model that served it",
+        "persona_review/providers.py",
+        r"    reports_served_model=False,",
+        "    reports_served_model=True,",
+        suite="process",
+        selector="writes_nothing_to_stderr and codex",
+    ),
+    Mutation(
+        "grok is no longer expected to name the model that served it",
+        "persona_review/providers.py",
+        r"    reports_served_model=True,",
+        "    reports_served_model=False,",
+        suite="process",
+        selector="naming_no_usable_model",
+    ),
+    Mutation(
+        # The data is right and the wiring drops it: the gate never learns grok should report.
+        "the gate is not told the provider reports its served model",
+        "persona_review/cli.py",
+        r"        reports_model=provider\.reports_served_model,",
+        "        reports_model=False,",
+        suite="process",
+        selector="naming_no_usable_model",
+    ),
+    Mutation(
+        # Printed before the refusal, a refused run has two stderr lines and a caller reading
+        # the first reads a warning as the reason.
+        "the served-model warning is printed on a refused run",
+        "persona_review/validate.py",
+        r"(    if stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
+        r"(    warning = served_model_warning\(label, evidence, stats, match\)\n"
+        r"    if warning is not None:\n        _warn\(warning\)\n)",
+        r"\2\1",
+        suite="process",
+        selector="refused_run_keeps_its_one_reason",
+    ),
+    Mutation(
+        "the gate does not record whether the served model matched",
+        "persona_review/validate.py",
+        r"    write_provenance\(provenance_out, prov_pairs, prov_files, stats, prov_digests, "
+        r"match\)",
+        "    write_provenance(provenance_out, prov_pairs, prov_files, stats, prov_digests)",
+        suite="process",
+        selector="records_the_build_that_served_it",
+    ),
+    Mutation(
+        # `-m` is the tactical override; checked against the default instead, a run that
+        # pinned another model reads as matching whenever the default's build serves it.
+        "the served model is checked against the default rather than -m",
+        "persona_review/cli.py",
+        r"^        model=args\.model,(?=\n        reports_model=)",
+        "        model=provider.default_model,",
+        suite="process",
+        selector="checked_against_the_m_override",
+    ),
+    Mutation(
+        "a model holding a non-printable character reaches the provider again",
+        "persona_review/cli.py",
+        r"    if not args\.model\.isprintable\(\) or any",
+        "    if any",
+        suite="process",
+        selector="model_the_cli_would_misread and review and grok",
+    ),
+    Mutation(
+        "a model holding whitespace reaches the provider again",
+        "persona_review/cli.py",
+        r"    if not args\.model\.isprintable\(\) or any\(ch\.isspace\(\) for ch in args\.model\):",
+        "    if not args.model.isprintable():",
+        suite="process",
+        selector="model_the_cli_would_misread and review and grok",
+    ),
+    Mutation(
+        # A served id carrying a line break would print a second stderr line of its own
+        # choosing, one that can read as the command's summary.
+        "a served id is printed raw in the warning",
+        "persona_review/validate.py",
+        r'        ch if ch\.isprintable\(\) else ch\.encode\("unicode_escape"\)\.decode\("ascii"\) '
+        r"for ch in text",
+        "        ch for ch in text",
+        suite="process",
+        selector="cannot_break_the_warning",
+    ),
+    Mutation(
+        "served_models is recorded in stream order rather than sorted",
+        "persona_review/validate.py",
+        r"tuple\(sorted\(name for name in usage_by_model if name\)\)",
+        "tuple(name for name in usage_by_model if name)",
+    ),
+    Mutation(
+        # Escaping a fixed list of separators leaves the rest of `splitlines`' breaks raw.
+        "only some line breaks are escaped in the warning",
+        "persona_review/validate.py",
+        r'        ch if ch\.isprintable\(\) else ch\.encode\("unicode_escape"\)\.decode\("ascii"\) '
+        r"for ch in text",
+        r'        ch if ch not in "\\n\\u2028\\x85" else ch.encode("unicode_escape")'
+        r'.decode("ascii") for ch in text',
+        selector="WarningIsOneLine",
+    ),
+    Mutation(
+        # The CLI refuses a non-printable `-m`, so only a direct caller of the warning reaches
+        # this call site.
+        "the requested model is printed raw in the warning",
+        "persona_review/validate.py",
+        r"requested \{_printable\(evidence\.model\)\}",
+        "requested {evidence.model}",
+        selector="WarningIsOneLine",
+    ),
+    Mutation(
+        "the warning falls back to stdout when stderr is closed",
+        "persona_review/validate.py",
+        r"    if sys\.stderr is None:\n        return\n",
+        "",
+        suite="process",
+        selector="stderr_cannot_take",
+    ),
+    Mutation(
+        # The failed line stays buffered, so the shutdown flush fails again and exits 120.
+        "a read-only stderr fails the run the warning is about",
+        "persona_review/validate.py",
+        r"                os\.dup2\(devnull, sys\.stderr\.fileno\(\)\)",
+        "                pass",
+        suite="process",
+        selector="stderr_cannot_take",
     ),
 ]
 
@@ -2442,8 +2672,8 @@ class TestGuardsCanFail:
     def test_every_module_is_represented_or_explicitly_exempt(self):
         """No module may quietly have no entries.
 
-        Four did: cli.py, runner.py, providers.py and flags.py. Two now have a tier, and two
-        are listed in UNMUTATED_MODULES with a written reason. The point is that adding a
+        Four did: cli.py, runner.py, providers.py and flags.py. Three now have entries, and
+        flags.py is listed in UNMUTATED_MODULES with a written reason. The point is that adding a
         module with guards and no entries fails HERE rather than going unnoticed for a
         release, which is how the first four accumulated.
         """

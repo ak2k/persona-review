@@ -98,8 +98,7 @@ def _codex_argv(inv: Invocation) -> list[str]:
     # changing what a finding means. The schema travels in the prompt and the gate enforces
     # it afterwards.
     argv = ["codex", "exec", "-C", str(inv.repo), "-s", "read-only", "-m", inv.model]
-    if inv.effort:
-        argv += ["-c", f'model_reasoning_effort="{inv.effort}"']
+    argv += ["-c", f'model_reasoning_effort="{inv.effort}"']
     argv += ["--ephemeral", "--color", "never", "--json"]
     if inv.last_file is not None:
         argv += ["-o", str(inv.last_file)]
@@ -114,6 +113,14 @@ class Provider:
     binary: str
     default_model: str
     default_effort: str
+    # The levels this wrapper lets through to the provider CLI. `-e` is checked against these
+    # before anything runs, so a value outside them never reaches the provider: for codex, the
+    # value of its `-c model_reasoning_effort` override, which it would otherwise accept as a
+    # custom level. Whether a given model supports a listed level is still the CLI's call.
+    effort_levels: tuple[str, ...]
+    # Whether the event stream names the model that actually served the run. When it should
+    # and does not, that is worth a warning; when it never does, silence is the only answer.
+    reports_served_model: bool
     mode: str
     # Which event vocabulary the run's stdout stream speaks, so the wrapper can count the
     # tool calls it made. Both providers write one; the schemas share nothing.
@@ -124,8 +131,14 @@ class Provider:
     # codex writes its final message to a separate file via -o; grok's answer is in the stream.
     writes_last_message: bool
     install_hint: str
-    model_help: str
-    effort_help: str
+
+    @property
+    def model_help(self) -> str:
+        return f"{self.name} model (default: {self.default_model})"
+
+    @property
+    def effort_help(self) -> str:
+        return f"reasoning effort: {'|'.join(self.effort_levels)} (default: {self.default_effort})"
 
     @property
     def command(self) -> str:
@@ -150,34 +163,38 @@ GROK = Provider(
     default_model="grok-4.7",
     # The top tier; the TUI labels it "Deep / Maximum reasoning". Not `max`: grok's
     # ReasoningEffort enum carries it and clap parses it, but the builds reject it during
-    # validation. The value goes through verbatim, so a build whose accepted set catches up
-    # with the enum needs no change here.
+    # validation, so it is not a level here either. A level a newer build accepts needs a
+    # release of this package, the same channel as a change of default.
     default_effort="xhigh",
+    effort_levels=("low", "medium", "high", "xhigh"),
+    # The keys of the terminal event's `modelUsage`. The `model` on the init and assistant
+    # events echoes the requested id, so it is no evidence of what served.
+    reports_served_model=True,
     mode=MODE_GROK_EVENTS,
     events_mode=EVENTS_GROK,
     argv=_grok_argv,
     prompt_on_stdin=False,
     writes_last_message=False,
     install_hint="see https://github.com/xai-org/grok-build",
-    model_help="grok model",
-    effort_help="reasoning effort: low|medium|high|xhigh",
 )
 
 CODEX = Provider(
     name="codex",
     binary="codex",
     default_model="gpt-6.1-sol",
-    # Empty means "whatever ~/.codex/config.toml sets in model_reasoning_effort" — the
-    # provider's own default, rather than one invented here.
-    default_effort="",
+    # Explicit rather than ~/.codex/config.toml's, so every machine runs the same review.
+    # high, not xhigh: on gpt-6.1-sol it found 16 of 21 planted defects to xhigh's 15, in
+    # half the time.
+    default_effort="high",
+    effort_levels=("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+    # `codex exec --json` names no model anywhere in its stream.
+    reports_served_model=False,
     mode=MODE_OBJECT,
     events_mode=EVENTS_CODEX,
     argv=_codex_argv,
     prompt_on_stdin=True,
     writes_last_message=True,
     install_hint="install the OpenAI codex CLI and run `codex login`",
-    model_help="codex model",
-    effort_help="model reasoning effort: minimal|low|medium|high|xhigh (default: config.toml)",
 )
 
 PROVIDERS: dict[str, Provider] = {p.name: p for p in (GROK, CODEX)}

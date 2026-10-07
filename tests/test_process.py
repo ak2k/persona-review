@@ -306,6 +306,9 @@ Q2_MIXED_STREAM = r"""
 """  # noqa: E501
 
 
+GROK_SERVED = "grok-4.7-build"
+
+
 def grok_stream(
     payload: str | None = None,
     *,
@@ -320,6 +323,9 @@ def grok_stream(
         "stop_reason": "end_turn",
         "num_turns": 3,
         "usage": {"output_tokens": 4096},
+        # The shape a real grok-4.7 run reports: the build that served it, which matches the
+        # default requested model, so a default success is the case that must stay silent.
+        "modelUsage": {GROK_SERVED: {"inputTokens": 248826, "outputTokens": 4096}},
     }
     if payload is not None:
         event["structured_output"] = json.loads(payload)
@@ -562,6 +568,14 @@ class Harness:
                 last=ANSWER,
             )
 
+    def run_mode(self, mode: str, provider: str, *args: str) -> subprocess.CompletedProcess[str]:
+        """A good run of either mode, for a guard both modes share."""
+        if mode == "review":
+            self.good_answer(provider)
+            return self.review(provider, "adversarial-reviewer", *args)
+        self.good_verdicts(provider)
+        return self.validate(provider, str(self.batch), *args)
+
     def findings(self, *args: str) -> subprocess.CompletedProcess[str]:
         """The retrieval command, as installed. On Harness rather than on its own test class
         because the vacuous-run tests need it too: the refusal is only closed if BOTH the
@@ -706,23 +720,253 @@ class TestContract(Harness):
         assert "exactly one JSON object" in prompt
         assert prompt.rstrip().endswith(assets.BOUNDARY)
 
-    # NON-DEFAULT sentinels. Asserting `-e xhigh` reaches grok proves nothing, because xhigh
-    # is grok's default: hardcoding the flag and ignoring -e kept the suite green.
+    # NON-DEFAULT values. Asserting `-e xhigh` reaches grok proves nothing, because xhigh is
+    # grok's default: hardcoding the flag and ignoring -e kept the suite green. `low` is the
+    # default for neither provider and a level both accept.
     @pytest.mark.parametrize(
         ("provider", "expected"),
         [
-            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
-            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+            ("grok", ["--model", "sentinel-model", "--effort", "low"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="low"']),
         ],
     )
     def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
         self.good_answer(provider)
-        self.review(
-            provider, "adversarial-reviewer", "-e", "sentinel-effort", "-m", "sentinel-model"
-        )
+        self.review(provider, "adversarial-reviewer", "-e", "low", "-m", "sentinel-model")
         argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
         for token in expected:
             assert token in argv, argv
+
+
+MODES = ("review", "validate")
+
+
+class TestModelAndEffortArguments(Harness):
+    """`-m` and `-e` are the override path for every caller, so a bad value stops here."""
+
+    def assert_refused_before_the_runner(self, proc: subprocess.CompletedProcess[str]) -> None:
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert proc.stdout == "", proc.stdout
+        # ONE legible reason: not argparse's usage block, not a traceback.
+        assert len(proc.stderr.strip().splitlines()) == 1, proc.stderr
+        assert not self.argv_log.exists(), "the provider was started with a refused value"
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize(
+        ("provider", "expected", "recorded"),
+        [
+            ("grok", ["--effort", "xhigh"], "xhigh"),
+            ("codex", ['model_reasoning_effort="high"'], "high"),
+        ],
+    )
+    def test_each_provider_passes_its_own_default_effort(
+        self, mode: str, provider: str, expected: list[str], recorded: str
+    ):
+        # The effort is explicit for both providers, never ~/.codex/config.toml's, so every
+        # machine runs the same review and the sidecar records the level that was passed.
+        proc = self.run_mode(mode, provider)
+        assert proc.returncode == 0, proc.stderr
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        for token in expected:
+            assert token in argv, argv
+        review = mode == "review"
+        sidecar = self.provenance(provider) if review else self.validator_provenance(provider)
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["effort"] == recorded
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize(
+        "effort",
+        ["sentinel-effort", "", "XHIGH", 'high" sandbox_mode="danger-full-access'],
+    )
+    def test_an_effort_the_provider_does_not_parse_is_a_usage_error(
+        self, mode: str, provider: str, effort: str
+    ):
+        # A value outside the levels must never reach the provider: for codex it would be
+        # the value of a `-c model_reasoning_effort` override, which codex accepts as a
+        # custom level.
+        proc = self.run_mode(mode, provider, "-e", effort)
+        self.assert_refused_before_the_runner(proc)
+        assert "use one of:" in proc.stderr, proc.stderr
+
+    def test_the_effort_levels_are_each_provider_s_own(self):
+        # grok's enum carries `max` but its builds reject it; codex parses it.
+        grok = self.run_mode("review", "grok", "-e", "max")
+        self.assert_refused_before_the_runner(grok)
+        assert "low, medium, high, xhigh" in grok.stderr, grok.stderr
+        codex = self.run_mode("review", "codex", "-e", "max")
+        assert codex.returncode == 0, codex.stderr
+        argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
+        assert 'model_reasoning_effort="max"' in argv, argv
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    @pytest.mark.parametrize(
+        "model_args",
+        [
+            ["--model=-x"],
+            ["-m-x"],
+            ["-m", ""],
+            ["-m", "grok-4.7\nX"],
+            ["-m", "grok 4.7"],
+            ["-m", "grok-4.7\x1b[2K"],
+            ["-m", "grok-4.7\u2028X"],
+        ],
+    )
+    def test_a_model_the_cli_would_misread_is_a_usage_error(
+        self, mode: str, provider: str, model_args: list[str]
+    ):
+        # argparse already refuses `-m -x`; these are the spellings that get past it. The
+        # rest are no model id, and would split the one-line warning that names the model.
+        proc = self.run_mode(mode, provider, *model_args)
+        self.assert_refused_before_the_runner(proc)
+        assert "-m" in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_bad_effort_leaves_the_previous_run_s_artifacts_in_place(self, provider: str):
+        # Refused before the lock and the clear, so a typo costs nothing that was on disk.
+        assert self.run_mode("review", provider).returncode == 0
+        kept = {
+            path: path.read_bytes() for path in (self.artifact(provider), self.provenance(provider))
+        }
+        self.argv_log.unlink()
+        self.assert_refused_before_the_runner(self.run_mode("review", provider, "-e", "nope"))
+        for path, before in kept.items():
+            assert path.read_bytes() == before, f"{path.name} did not survive a bad -e"
+
+
+class TestServedModel(Harness):
+    """The model the provider says served the run, recorded beside the one requested."""
+
+    def sidecar(self, mode: str, provider: str) -> dict[str, Any]:
+        review = mode == "review"
+        path = self.provenance(provider) if review else self.validator_provenance(provider)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def run_grok(self, mode: str, *args: str, **result: Any) -> subprocess.CompletedProcess[str]:
+        payload = ANSWER if mode == "review" else VERDICTS
+        self.set_spec(stdout=grok_stream(payload, tool_call=True, **result))
+        if mode == "review":
+            return self.review("grok", "adversarial-reviewer", *args)
+        return self.validate("grok", str(self.batch), *args)
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_default_run_writes_nothing_to_stderr(self, mode: str, provider: str):
+        # grok's served build matches the default model, and codex names no model at all:
+        # neither is worth a line a caller has to read.
+        proc = self.run_mode(mode, provider)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == "", proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1, proc.stdout
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_grok_records_the_build_that_served_it(self, mode: str):
+        assert self.run_grok(mode).returncode == 0
+        record = self.sidecar(mode, "grok")
+        assert record["model"] == "grok-4.7"
+        assert record["served_models"] == [GROK_SERVED]
+        assert record["served_model_match"] is True
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_codex_records_that_it_names_no_model(self, mode: str):
+        assert self.run_mode(mode, "codex").returncode == 0
+        record = self.sidecar(mode, "codex")
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_another_model_serving_the_run_is_one_warning_line(self, mode: str):
+        proc = self.run_grok(mode, modelUsage={"grok-4.8-build": {"outputTokens": 1}})
+        # A warning, not a refusal: the review happened and its one stdout line stands.
+        assert proc.returncode == 0, proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1, proc.stdout
+        command = "ce-grok-persona" if mode == "review" else "ce-grok-validate"
+        assert proc.stderr == f"{command}: warning: requested grok-4.7, served grok-4.8-build\n"
+        record = self.sidecar(mode, "grok")
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
+
+    @pytest.mark.parametrize("redirect", ["2>&-", "2</dev/null"], ids=["closed", "read-only"])
+    def test_a_warning_stderr_cannot_take_never_reaches_stdout(self, redirect: str):
+        # Closed at startup, fd 2 leaves sys.stderr None, and `print(file=None)` writes to
+        # stdout. Open read-only, as a launcher script can leave it when stderr is closed,
+        # the write fails, and so would the shutdown flush of the line still buffered,
+        # exiting 120 with no summary.
+        self.set_spec(stdout=grok_stream(ANSWER, tool_call=True, modelUsage={"grok-4.8-build": {}}))
+        proc = subprocess.run(
+            ["/bin/sh", "-c", f'exec "$@" {redirect}', "sh", str(self.commands["grok"])]
+            + ["adversarial-reviewer"],
+            stdout=subprocess.PIPE,
+            text=True,
+            env=self.env(),
+            cwd=self.work,
+            timeout=120,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert len(proc.stdout.splitlines()) == 1, proc.stdout
+        assert "warning" not in proc.stdout, proc.stdout
+        assert self.sidecar("review", "grok")["served_model_match"] is False
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize(("served", "match"), [(GROK_SERVED, False), ("grok-4.8-build", True)])
+    def test_the_served_model_is_checked_against_the_m_override(
+        self, mode: str, served: str, match: bool
+    ):
+        # `-m` is how a caller pins another model tactically; the check has to compare
+        # against what was asked for, not against the default.
+        proc = self.run_grok(mode, "-m", "grok-4.8", modelUsage={served: {}})
+        assert proc.returncode == 0, proc.stderr
+        command = "ce-grok-persona" if mode == "review" else "ce-grok-validate"
+        warning = f"{command}: warning: requested grok-4.8, served {served}\n"
+        assert proc.stderr == ("" if match else warning), proc.stderr
+        record = self.sidecar(mode, "grok")
+        assert record["model"] == "grok-4.8"
+        assert record["served_model_match"] is match
+
+    @pytest.mark.parametrize(
+        ("served", "shown"),
+        [
+            ("grok-4.8\nce-grok-persona: 0 findings -> /forged.json", "grok-4.8\\nce-grok"),
+            ("grok-4.8\u2028forged", "grok-4.8\\u2028forged"),
+            ("grok-4.8\x85forged", "grok-4.8\\x85forged"),
+        ],
+    )
+    def test_a_served_id_cannot_break_the_warning_across_lines(self, served: str, shown: str):
+        proc = self.run_grok("review", modelUsage={served: {}})
+        assert proc.returncode == 0, proc.stderr
+        assert len(proc.stdout.strip().split("\n")) == 1, proc.stdout
+        # Split on newline alone: `splitlines` would also split on the separators that a
+        # raw id would have smuggled in, and so could not see them.
+        assert proc.stderr.split("\n") == [proc.stderr.rstrip("\n"), ""], proc.stderr
+        assert not set(proc.stderr) & {"\r", "\x85", "\u2028", "\u2029"}, proc.stderr
+        assert proc.stderr.startswith("ce-grok-persona: warning: requested grok-4.7, served ")
+        assert shown in proc.stderr, proc.stderr
+        assert self.sidecar("review", "grok")["served_models"] == [served]
+
+    @pytest.mark.parametrize(
+        "usage", [None, [GROK_SERVED], GROK_SERVED, {}, {"": {"outputTokens": 1}}]
+    )
+    def test_grok_naming_no_usable_model_is_warned_about_not_refused(self, usage: Any):
+        proc = self.run_grok("review", modelUsage=usage)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == "ce-grok-persona: warning: requested grok-4.7, served not reported\n"
+        record = self.sidecar("review", "grok")
+        assert record["served_models"] is None
+        assert record["served_model_match"] is None
+
+    def test_a_refused_run_keeps_its_one_reason_and_still_records_what_served(self):
+        # The warning would be a second stderr line beside a refusal, which a caller reads as
+        # the reason. The sidecar still records the mismatch: a refused run is evidence.
+        self.set_spec(stdout=grok_stream(ANSWER, modelUsage={"grok-4.8-build": {}}))
+        proc = self.review("grok", "adversarial-reviewer")
+        assert proc.returncode == 6, proc.stderr
+        assert len(proc.stderr.strip().splitlines()) == 1, proc.stderr
+        assert "warning" not in proc.stderr, proc.stderr
+        record = self.sidecar("review", "grok")
+        assert record["served_models"] == ["grok-4.8-build"]
+        assert record["served_model_match"] is False
 
 
 class TestGate(Harness):
@@ -2080,13 +2324,13 @@ class TestValidatorMode(Harness):
     @pytest.mark.parametrize(
         ("provider", "expected"),
         [
-            ("grok", ["--model", "sentinel-model", "--effort", "sentinel-effort"]),
-            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="sentinel-effort"']),
+            ("grok", ["--model", "sentinel-model", "--effort", "low"]),
+            ("codex", ["-m", "sentinel-model", 'model_reasoning_effort="low"']),
         ],
     )
     def test_the_model_and_effort_flags_reach_the_runner(self, provider: str, expected: list[str]):
         self.good_verdicts(provider)
-        self.validate(provider, str(self.batch), "-e", "sentinel-effort", "-m", "sentinel-model")
+        self.validate(provider, str(self.batch), "-e", "low", "-m", "sentinel-model")
         argv = json.loads(self.argv_log.read_text(encoding="utf-8"))
         for token in expected:
             assert token in argv, argv

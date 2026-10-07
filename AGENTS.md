@@ -59,7 +59,18 @@ for a refusal. Neither is a log stream, neither is consumed by a log aggregator,
 event output would make both worse for the only two consumers that exist: an agent reading
 one line, and a person reading one error.
 
-`tests/test_process.py` asserts the one-line contract directly.
+The review and validate commands have one non-refusal stderr line, and only on a run that
+exits `0`: `<command>: warning: requested <model>, served <ids or "not reported">`, when the
+provider served another model or grok named none. It is printed after the refusal checks,
+so a refused run still carries exactly its one reason, and it escapes every non-printable
+character in the ids it names so it stays one line. With stderr closed it is dropped
+rather than written to stdout. (`ce-persona-findings` already prints
+its success summaries to stderr; that is a different command and contract.) The one-reason
+rule covers this package's own refusals: a separate argument that argparse reads as an
+option, such as `-e -x`, is refused by argparse itself in its usage-plus-error format.
+
+`tests/test_process.py` asserts the one-line contract directly, and that a default run
+writes nothing to stderr.
 
 ### 3. No rich
 
