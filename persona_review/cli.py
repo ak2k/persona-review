@@ -223,11 +223,11 @@ def _clear_run_dir(run_dir: Path, stem: Path) -> None:
 def _check_model_and_effort(provider: Provider, args: argparse.Namespace) -> None:
     """Refuse a `-m` or `-e` the provider CLI must never be handed.
 
-    Both values reach the provider's argv, and codex's effort is the value of its
-    `-c model_reasoning_effort` override, so a value outside the provider's levels never
-    reaches the provider. A model that is empty or starts with `-` would be parsed as the
-    CLI's next option, and one holding whitespace or a non-printable character is no model
-    id and would split the one-line warning that names it.
+    Both values reach the provider's argv, codex's effort as the value of its
+    `-c model_reasoning_effort` override; this refusal is what keeps a value outside the
+    provider's levels from reaching the provider. A model that is empty or starts with `-`
+    would be parsed as the CLI's next option, and one holding whitespace or a non-printable
+    character is no model id and would split the one-line warning that names it.
     """
     if args.effort not in provider.effort_levels:
         raise errors.UsageError(
@@ -245,9 +245,8 @@ def _run(provider: Provider, args: argparse.Namespace, flow: Flow) -> int:
     # previous run's artifacts.
     _check_model_and_effort(provider, args)
 
-    # The environment is parsed FIRST and in full, so a malformed CE_PERSONA_* value is
-    # refused before any work: it used to be read three quarters of the way down, after the
-    # run directory had been cleared and the prompt built.
+    # The environment is parsed in full before the lock and the clear, so a malformed
+    # CE_PERSONA_* value is refused before the run directory is cleared or the prompt built.
     settings = Settings.from_env()
 
     # Only the argv is needed to know the artifact paths, and deriving the stem touches no

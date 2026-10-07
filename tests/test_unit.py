@@ -3670,8 +3670,14 @@ class TestPersonaNamesAreBare:
 # Every character `str.splitlines` breaks on. The second arm plants one in an id, so a rewrite
 # that escapes only some of them is reached on every run, not left to the generator's luck.
 LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
-model_ids = st.text() | st.builds(
-    lambda head, brk, tail: head + brk + tail, st.text(), st.sampled_from(LINE_BREAKS), st.text()
+
+
+def _broken(head: str, brk: str, tail: str) -> str:
+    return head + brk + tail
+
+
+model_ids: st.SearchStrategy[str] = st.text() | st.builds(
+    _broken, st.text(), st.sampled_from(LINE_BREAKS), st.text()
 )
 
 

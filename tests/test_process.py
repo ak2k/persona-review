@@ -784,7 +784,7 @@ class TestModelAndEffortArguments(Harness):
     ):
         # A value outside the levels must never reach the provider: for codex it would be
         # the value of a `-c model_reasoning_effort` override, which codex accepts as a
-        # custom level, quotes and all.
+        # custom level.
         proc = self.run_mode(mode, provider, "-e", effort)
         self.assert_refused_before_the_runner(proc)
         assert "use one of:" in proc.stderr, proc.stderr

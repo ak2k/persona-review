@@ -601,15 +601,16 @@ and records which model actually served the run. Exit statuses keep their meanin
 - **`-m` must be a plain model id.** An empty value, one starting with `-`, or one holding
   whitespace or a non-printable character exits `2` with one stderr line instead of reaching
   the provider's argv: `--model=-x`, `-m-x`, `-m ''` and `-m 'grok 4.7'` among them.
-- The one-line refusal covers the values argparse accepts. A value given as a separate
-  argument that starts with `-` (`-e -x`, `-m -x`) is refused by argparse itself, at exit `2`
-  with its usage text, as before.
+- **argparse refuses what it reads as an option.** A separate argument that argparse reads as
+  an option (`-e -x`, `-m -x`) is refused by argparse itself, at exit `2` with its usage text,
+  as before. The one-line refusal covers every value argparse accepts.
 - **The sidecar records the served model.** `served_models` and `served_model_match` are new
   top-level keys (see Provenance), written on every run that writes a sidecar, refused runs
   included.
 - **A mismatch is one stderr warning.** A run that exits `0` after another model served it,
   or after grok named none, prints `<command>: warning: requested <model>, served <ids>`. A
-  refused run prints only its refusal.
+  refused run prints only its refusal. With stderr closed the warning is dropped, never
+  written to stdout.
 
 ## Changes in 0.3.7
 

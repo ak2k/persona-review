@@ -2404,6 +2404,33 @@ MUTATIONS: list[Mutation] = [
         r"tuple\(sorted\(name for name in usage_by_model if name\)\)",
         "tuple(name for name in usage_by_model if name)",
     ),
+    Mutation(
+        # Escaping a fixed list of separators leaves the rest of `splitlines`' breaks raw.
+        "only some line breaks are escaped in the warning",
+        "persona_review/validate.py",
+        r'        ch if ch\.isprintable\(\) else ch\.encode\("unicode_escape"\)\.decode\("ascii"\) '
+        r"for ch in text",
+        r'        ch if ch not in "\\n\\u2028\\x85" else ch.encode("unicode_escape")'
+        r'.decode("ascii") for ch in text',
+        selector="WarningIsOneLine",
+    ),
+    Mutation(
+        # The CLI refuses a non-printable `-m`, so only a direct caller of the warning reaches
+        # this call site.
+        "the requested model is printed raw in the warning",
+        "persona_review/validate.py",
+        r"requested \{_printable\(evidence\.model\)\}",
+        "requested {evidence.model}",
+        selector="WarningIsOneLine",
+    ),
+    Mutation(
+        "the warning falls back to stdout when stderr is closed",
+        "persona_review/validate.py",
+        r"    if warning is not None and sys\.stderr is not None:",
+        "    if warning is not None:",
+        suite="process",
+        selector="stderr_closed",
+    ),
 ]
 
 
