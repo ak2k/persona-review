@@ -2347,7 +2347,8 @@ MUTATIONS: list[Mutation] = [
         "persona_review/validate.py",
         r"(    if stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
         r"(    warning = served_model_warning\(label, evidence, stats, match\)\n"
-        r"    if warning is not None:\n        print\(warning, file=sys\.stderr\)\n)",
+        r"    if warning is not None and sys\.stderr is not None:\n"
+        r"        print\(warning, file=sys\.stderr\)\n)",
         r"\2\1",
         suite="process",
         selector="refused_run_keeps_its_one_reason",
