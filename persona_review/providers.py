@@ -65,6 +65,15 @@ def _grok_argv(inv: Invocation) -> list[str]:
     # against 1.0.4 and 1.0.5: the terminal `result` event carries `structured_output` as a
     # parsed object, so the answer needs no transcript scanning, AND the stream still grows
     # message by message, which is what the idle watchdog measures.
+    #
+    # `--no-wait-for-background`: after the turn ends, headless grok otherwise waits for any
+    # background bash/monitor task or background subagent still pending, for up to
+    # `--background-wait-timeout` (600 s by default), and only then reaps it and exits. grok
+    # backgrounds a slow command on its own, so a review whose answer is already in the
+    # stream could sit idle for the full ten minutes (seen on 1.0.41 CI runs: the last model
+    # turn ends, then exactly 600 s pass before grok exits). The answer is the turn's
+    # `result` event; nothing after it is read. Work still pending at exit is reaped either
+    # way.
     return [
         "grok",
         "--prompt-file",
@@ -81,6 +90,7 @@ def _grok_argv(inv: Invocation) -> list[str]:
         "--permission-mode",
         "bypassPermissions",
         "--disable-web-search",
+        "--no-wait-for-background",
         "--json-schema",
         inv.schema_text,
         "--output-format",

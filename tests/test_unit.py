@@ -2557,6 +2557,11 @@ class TestProviders:
         assert argv[argv.index("--output-format") + 1] == "streaming-messages-json"
         assert "--json-schema" in argv
 
+    def test_grok_exits_when_the_turn_ends_rather_than_waiting_on_background_work(self):
+        # Without it headless grok waits up to 600 s after its answer for a command it moved
+        # to the background on its own.
+        assert "--no-wait-for-background" in providers.GROK.argv(self._inv())
+
     def test_codex_runs_read_only_and_writes_only_the_final_message(self):
         argv = providers.CODEX.argv(self._inv())
         assert argv[argv.index("-s") + 1] == "read-only"
