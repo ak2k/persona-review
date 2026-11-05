@@ -4,7 +4,7 @@ name: Check
 # process and mutations are all flake checks — so one matrix job gates
 # everything. The matrix is the three systems flake.nix declares, and `main`'s
 # protection requires exactly these three contexts: `nix (ubuntu-latest)`,
-# `nix (ubuntu-24.04-arm)`, `nix (macos-14)`.
+# `nix (ubuntu-24.04-arm)`, `nix (macos-15)`.
 
 # Deliberately NO `paths:` filter. A path-filtered workflow does not merely
 # skip — it never REPORTS, so a required status check by that name stays
@@ -37,7 +37,7 @@ jobs:
         os:
           - ubuntu-latest # x86_64-linux
           - ubuntu-24.04-arm # aarch64-linux
-          - macos-14 # aarch64-darwin
+          - macos-15 # aarch64-darwin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
