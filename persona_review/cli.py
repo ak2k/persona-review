@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import assets, errors, runner, validate, verdicts
 from .config import DEFAULT_HARD_SECS, DEFAULT_IDLE_SECS, DEFAULT_MAX_TOKENS, Settings
-from .providers import CODEX, GROK, Invocation, Provider
+from .providers import CODEX, GROK, MODE_GROK_EVENTS, Invocation, Provider
 
 # The verdict vocabulary, read from the exception classes that carry it. Distinct codes,
 # because a caller has to tell "the review found nothing" from "the review never happened",
@@ -334,9 +334,22 @@ def _dispatch(
     )
     elapsed = time.monotonic() - started
 
-    if result.timed_out:
+    # grok writes `result` last, once its session is over, so a watchdog that fires with one
+    # already in the stream killed a run that had answered. The gate judges that answer like
+    # any other, a second `result` included.
+    answered = (
+        result.timed_out
+        and provider.mode == MODE_GROK_EVENTS
+        and any(event.get("type") == "result" for event in validate.file_objects(events_file))
+    )
+    if result.timed_out and not answered:
         raise errors.RunTimeout(f"{result.reason}\n  partial output: {events_file}")
-    if result.status != 0:
+    if answered:
+        print(
+            f"{provider.binary} had written its result when the watchdog fired: {result.reason}",
+            file=sys.stderr,
+        )
+    elif result.status != 0:
         tail = "".join(
             f"\n  {line}" for line in _tail(err_file if err_file.stat().st_size else events_file, 5)
         )

@@ -2262,6 +2262,15 @@ MUTATIONS: list[Mutation] = [
         "",
     ),
     Mutation(
+        # A watchdog firing after grok's terminal `result` fails a review that had finished.
+        "a grok run killed after its result is a timeout again",
+        "persona_review/cli.py",
+        r"    if result\.timed_out and not answered:",
+        "    if result.timed_out:",
+        suite="process",
+        selector="judged_from_that_result",
+    ),
+    Mutation(
         "codex leaves the effort to ~/.codex/config.toml again",
         "persona_review/providers.py",
         r"""    argv \+= \["-c", f'model_reasoning_effort="\{inv\.effort\}"'\]\n""",

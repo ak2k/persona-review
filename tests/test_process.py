@@ -1972,6 +1972,15 @@ class TestWatchdogs(Harness):
                     wrapper.kill()
                     wrapper.wait(timeout=10)
 
+    def test_a_grok_run_killed_after_its_result_is_judged_from_that_result(self):
+        # grok writes `result` last, once the session is over; a watchdog firing after it
+        # (a background wait, a slow exit) would otherwise throw away a finished review.
+        self.set_spec(stdout=grok_stream(ANSWER, tool_call=True), silent_for=90)
+        proc = self.review("grok", "adversarial-reviewer", timeout=60, CE_PERSONA_IDLE_SECS="3")
+        assert proc.returncode == 0, proc.stderr
+        assert "no output for" in proc.stderr, "the watchdog firing should still be reported"
+        assert json.loads(self.artifact("grok").read_text(encoding="utf-8"))["findings"]
+
     def test_partial_output_is_kept_after_a_timeout(self):
         self.set_spec(stdout="partial evidence\n", silent_for=90)
         self.review("grok", "adversarial-reviewer", timeout=60, CE_PERSONA_IDLE_SECS="3")

@@ -66,14 +66,14 @@ def _grok_argv(inv: Invocation) -> list[str]:
     # parsed object, so the answer needs no transcript scanning, AND the stream still grows
     # message by message, which is what the idle watchdog measures.
     #
-    # `--no-wait-for-background`: after the turn ends, headless grok otherwise waits for any
-    # background bash/monitor task or background subagent still pending, for up to
-    # `--background-wait-timeout` (600 s by default), and only then reaps it and exits. grok
-    # backgrounds a slow command on its own, so a review whose answer is already in the
-    # stream could sit idle for the full ten minutes (seen on 1.0.41 CI runs: the last model
-    # turn ends, then exactly 600 s pass before grok exits). The answer is the turn's
-    # `result` event; nothing after it is read. Work still pending at exit is reaped either
-    # way.
+    # `--no-wait-for-background`: without it, headless grok waits after the turn for any
+    # background task it started, up to `--background-wait-timeout` (600 s by default), and
+    # emits no `result` until the wait ends; a task finishing inside the window wakes the
+    # model for another turn, whose text replaces the answer. With it the first turn's
+    # result is final and grok exits within about a second (both seen on 1.0.70). The wait
+    # also races the idle watchdog: CE_PERSONA_IDLE_SECS defaults to 600 too and the stream
+    # is silent meanwhile, so the watchdog can kill a finished run as a timeout before any
+    # `result` exists to judge.
     return [
         "grok",
         "--prompt-file",
