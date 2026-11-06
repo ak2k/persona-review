@@ -2255,6 +2255,13 @@ MUTATIONS: list[Mutation] = [
         selector="levels_are_each_provider_s_own",
     ),
     Mutation(
+        # grok then sits out its 600 s background-wait default after the answer is written.
+        "grok waits on background work after the turn ends",
+        "persona_review/providers.py",
+        r'        "--no-wait-for-background",\n',
+        "",
+    ),
+    Mutation(
         "codex leaves the effort to ~/.codex/config.toml again",
         "persona_review/providers.py",
         r"""    argv \+= \["-c", f'model_reasoning_effort="\{inv\.effort\}"'\]\n""",
