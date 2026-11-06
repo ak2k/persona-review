@@ -211,11 +211,15 @@
                     pkgs.git
                   ];
                   PYTHONDONTWRITEBYTECODE = "1";
+                  # The pull request's changed files, which CI passes under --impure. Pure
+                  # evaluation reads it as empty, which runs every entry.
+                  PERSONA_MUTATION_CHANGED = builtins.getEnv "PERSONA_MUTATION_CHANGED";
                 }
                 ''
                   export HOME=$(mktemp -d)
+                  python3 ${self}/tests/test_mutations.py
                   # --no-cov: the harness spawns a suite per mutation, so the parent covers
-                  # nothing.
+                  # nothing. -rs prints why a tier was skipped.
                   #
                   # PERSONA_REVIEW_PKG makes it mutate a scratch copy of the BUILT package
                   # rather than the source tree, so the guards it proves can fail are the
@@ -225,7 +229,7 @@
                   # honored, so the source-tree fallback cannot silently apply here.
                   PERSONA_REVIEW_PKG=${persona-review}/${python.sitePackages} \
                     python3 -m pytest ${self}/tests/test_mutations.py \
-                      -p no:cacheprovider --no-cov --no-header -q
+                      -p no:cacheprovider --no-cov --no-header -q -rs
                   touch $out
                 '';
 
