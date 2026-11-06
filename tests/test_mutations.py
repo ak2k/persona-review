@@ -62,6 +62,7 @@ coverage-shaped claim this file exists to disbelieve.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -72,6 +73,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -2575,6 +2577,64 @@ def _run_suite(root: Path, suite: str = "unit", selector: str = "") -> Run:
     return Run(proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace"))
 
 
+# The files a pull request changed, as a JSON list of repository paths. CI sets it on pull
+# requests only; unset, empty or malformed runs every entry, so a selection that could not be
+# computed never narrows the suite.
+CHANGED_ENV = "PERSONA_MUTATION_CHANGED"
+
+# A change to any of these can alter what every entry proves, so it runs them all.
+HARNESS_FILES = frozenset(
+    {
+        "tests/test_mutations.py",
+        "flake.nix",
+        "flake.lock",
+        "pyproject.toml",
+        ".github/workflows/check.yml",
+    }
+)
+
+
+def _changed_files(changed: str) -> set[str] | None:
+    """The paths in a change set, or None when it is not a non-empty JSON list of strings."""
+    try:
+        decoded: object = json.loads(changed)
+    except ValueError:
+        return None
+    if not isinstance(decoded, list) or not decoded:
+        return None
+    items = cast(list[object], decoded)
+    names = {name for name in items if isinstance(name, str)}
+    return names if all(isinstance(name, str) for name in items) else None
+
+
+def select(mutations: list[Mutation], changed: str | None) -> tuple[list[Mutation], str]:
+    """The entries a change set runs, and one line saying why.
+
+    An entry runs when its target file changed, or when the suite expected to kill it
+    changed: a deleted or weakened test lets a mutation survive without its target moving.
+    """
+    everything = list(mutations)
+    every = f"all {len(everything)} mutations"
+    if not changed:
+        return everything, f"{every}: no change set given"
+    names = _changed_files(changed)
+    if names is None:
+        return everything, f"{every}: the change set is not a non-empty JSON list of paths"
+    harness = sorted(HARNESS_FILES & names)
+    if harness:
+        return everything, f"{every}: the harness changed ({', '.join(harness)})"
+    suites = {suite for suite, name in SUITE_FILE.items() if f"tests/{name}" in names}
+    chosen = [m for m in everything if m.path in names or m.suite in suites]
+    if not chosen:
+        return chosen, "no mutations: the change touches no mutated file and no suite"
+    targets = {m.path for m in chosen if m.path in names}
+    targets |= {f"tests/{SUITE_FILE[suite]}" for suite in suites}
+    return chosen, f"{len(chosen)} of {len(everything)} mutations, for {', '.join(sorted(targets))}"
+
+
+SELECTED, SELECTION = select(MUTATIONS, os.environ.get(CHANGED_ENV))
+
+
 class TestGuardsCanFail:
     def test_the_scratch_suite_runs_before_any_mutation_is_believed(self):
         """The control. Without it every 'kill' could be an import error.
@@ -2629,8 +2689,12 @@ class TestGuardsCanFail:
 
     def _sweep(self, suite: str) -> tuple[list[str], list[str]]:
         """Revert each fix in this tier and report (survivors, broken)."""
-        entries = [m for m in MUTATIONS if m.suite == suite]
-        assert entries, f"no mutations in the {suite!r} tier, so this sweep proves nothing"
+        assert any(m.suite == suite for m in MUTATIONS), (
+            f"no mutations in the {suite!r} tier, so this sweep proves nothing"
+        )
+        entries = [m for m in SELECTED if m.suite == suite]
+        if not entries:
+            pytest.skip(f"{suite} tier not selected; {SELECTION}")
 
         def verdict(mutation: Mutation) -> tuple[str, str] | None:
             """A named function, not a lambda: strict mode cannot infer a lambda's parameter."""
@@ -2718,3 +2782,47 @@ class TestGuardsCanFail:
             run = _run_suite(root)
         assert run.code != 0, "a syntax error should stop the suite"
         assert not run.executed_tests, "a syntax error must not be classified as a kill"
+
+
+class TestSelection:
+    """Which entries a pull request's change set runs. Narrowing must fail closed."""
+
+    def test_no_change_set_runs_everything(self):
+        assert select(MUTATIONS, None)[0] == MUTATIONS
+        assert select(MUTATIONS, "")[0] == MUTATIONS
+
+    @pytest.mark.parametrize("changed", ["not json", '{"a": 1}', "[]", "[1, 2]", '"README.md"'])
+    def test_a_change_set_that_cannot_be_read_runs_everything(self, changed: str):
+        chosen, why = select(MUTATIONS, changed)
+        assert chosen == MUTATIONS, why
+
+    @pytest.mark.parametrize("harness", sorted(HARNESS_FILES))
+    def test_a_harness_change_runs_everything(self, harness: str):
+        chosen, why = select(MUTATIONS, json.dumps(["README.md", harness]))
+        assert chosen == MUTATIONS
+        assert harness in why
+
+    def test_a_change_to_no_mutated_file_runs_none_and_says_so(self):
+        chosen, why = select(MUTATIONS, json.dumps(["README.md", "persona_review/flags.py"]))
+        assert chosen == []
+        assert why.startswith("no mutations")
+
+    def test_a_target_change_runs_only_that_targets_entries(self):
+        chosen, why = select(MUTATIONS, json.dumps(["persona_review/runner.py"]))
+        assert chosen == [m for m in MUTATIONS if m.path == "persona_review/runner.py"]
+        assert chosen, "runner.py has entries, so this case selects something"
+        assert "persona_review/runner.py" in why
+
+    @pytest.mark.parametrize("suite", sorted(SUITE_FILE))
+    def test_a_suite_change_runs_every_entry_that_suite_must_kill(self, suite: str):
+        chosen, _ = select(MUTATIONS, json.dumps([f"tests/{SUITE_FILE[suite]}"]))
+        assert chosen == [m for m in MUTATIONS if m.suite == suite]
+
+    def test_every_target_is_a_repository_path(self):
+        # A path the diff can never name would make its entry unselectable on a pull request.
+        missing = sorted({m.path for m in MUTATIONS if not (SRC / m.path).is_file()})
+        assert missing == []
+
+
+if __name__ == "__main__":
+    print(f"mutation selection: {SELECTION}")

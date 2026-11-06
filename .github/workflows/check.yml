@@ -40,6 +40,10 @@ jobs:
           - macos-15 # aarch64-darwin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # On a pull request HEAD is the merge commit; its first parent is the base, so
+          # the diff between them is what the PR changes.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
@@ -48,5 +52,20 @@ jobs:
           extra_nix_config: |
             access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
 
+      # A pull request runs only the mutations its change can affect; pushes to main run
+      # them all. Any failure here exports nothing, and no change set runs every entry.
+      - name: select mutations
+        if: github.event_name == 'pull_request'
+        run: |
+          if git rev-parse --verify -q HEAD^2 > /dev/null \
+            && files=$(git diff --name-only --no-renames HEAD^1 HEAD) \
+            && changed=$(printf '%s\n' "$files" | jq -Rnc '[inputs | select(length > 0)]'); then
+            echo "PERSONA_MUTATION_CHANGED=$changed" >> "$GITHUB_ENV"
+            echo "changed: $changed"
+          else
+            echo "could not compute the change set; running every mutation"
+          fi
+
+      # --impure only so the mutations check can read PERSONA_MUTATION_CHANGED.
       - name: nix flake check
-        run: nix flake check -L
+        run: nix flake check -L ${{ github.event_name == 'pull_request' && '--impure' || '' }}
