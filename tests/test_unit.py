@@ -2589,7 +2589,7 @@ class TestProviders:
             "xhigh",
         )
         assert (providers.CODEX.default_model, providers.CODEX.default_effort) == (
-            "gpt-6.1-sol",
+            "gpt-6.2-sol",
             "high",
         )
         for provider in providers.PROVIDERS.values():

@@ -191,7 +191,7 @@ GROK = Provider(
 CODEX = Provider(
     name="codex",
     binary="codex",
-    default_model="gpt-6.1-sol",
+    default_model="gpt-6.2-sol",
     # Explicit rather than ~/.codex/config.toml's, so every machine runs the same review.
     # high, not xhigh: on gpt-6.1-sol it found 16 of 21 planted defects to xhigh's 15, in
     # half the time.
