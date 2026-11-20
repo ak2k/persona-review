@@ -15,16 +15,18 @@ this package exists for lives there, and a second copy is a second place to forg
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import os
 import shutil
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assets, errors, runner, validate, verdicts
+from . import assets, decide, errors, runner, validate, verdicts
 from .config import DEFAULT_HARD_SECS, DEFAULT_IDLE_SECS, DEFAULT_MAX_TOKENS, Settings
 from .providers import CODEX, GROK, MODE_GROK_EVENTS, Invocation, Provider
 
@@ -40,6 +42,7 @@ EXIT_ENV = errors.EnvError.exit_code
 EXIT_RUNNER = errors.RunnerError.exit_code
 EXIT_TIMEOUT = errors.RunTimeout.exit_code
 EXIT_VACUOUS = errors.VacuousRun.exit_code
+EXIT_SUBSCRIPTION = errors.SubscriptionRefused.exit_code
 EXIT_BUDGET = errors.BudgetError.exit_code
 
 
@@ -201,6 +204,9 @@ ARTIFACT_SUFFIXES = (
     # The failure path reads this one back, so a survivor from an earlier run is the stale
     # artifact most likely to be believed.
     "-stderr.log",
+    # A decision's schema as it was read, so the gate holds the answer to the bytes the
+    # model was shown rather than to whatever is at the caller's path afterwards.
+    "-schema.json",
 )
 
 
@@ -285,6 +291,8 @@ def _dispatch(
     prompt: str,
     schema_text: str,
     repo: Path,
+    in_repository: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> Dispatched:
     """Weigh a prompt, run the provider under the watchdogs, and hand back the evidence.
 
@@ -319,6 +327,7 @@ def _dispatch(
         prompt_file=prompt_file,
         schema_text=schema_text,
         last_file=last_file,
+        in_repository=in_repository,
     )
     started_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Monotonic, not wall clock: this measures how long the run took, and a clock stepped by
@@ -331,6 +340,10 @@ def _dispatch(
         stdin_path=prompt_file if provider.prompt_on_stdin else None,
         idle_secs=settings.idle_secs,
         hard_secs=settings.hard_secs,
+        env=env,
+        # Outside a repository the provider is started IN the empty directory too, so no
+        # path it resolves relative to its own cwd reaches the caller's tree.
+        cwd=None if in_repository else repo,
     )
     elapsed = time.monotonic() - started
 
@@ -584,6 +597,132 @@ def _validate_locked(
     )
 
 
+def _decide_parser(provider: Provider) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=provider.decide_command,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            f"Answer a prompt through {provider.binary} with one JSON object that satisfies a\n"
+            "caller's JSON Schema, run in an empty directory on the subscription login.\n\n"
+            "stdout is ONE line naming the artifact; a gating caller reads only the exit status."
+        ),
+        epilog=_epilog(provider, errors.DECIDE_WORDS)
+        + f"""
+  A decide call is killed after at most {int(decide.HARD_SECS_CAP)}s whatever CE_PERSONA_HARD_SECS
+  says, and {provider.binary} runs with every *API_KEY* variable removed from its
+  environment, so it can only use its own subscription login.
+""",
+    )
+    parser.add_argument("prompt", help="file holding the prompt")
+    parser.add_argument(
+        "-s", "--schema", required=True, help="JSON Schema file the answer must satisfy"
+    )
+    parser.add_argument("-m", "--model", default=provider.default_model, help=provider.model_help)
+    parser.add_argument(
+        "-e", "--effort", default=provider.default_effort, help=provider.effort_help
+    )
+    # A decision has no diff to weigh: the budget bounds the prompt alone.
+    parser.set_defaults(base="")
+    return parser
+
+
+def _decide_stem(provider: Provider, args: argparse.Namespace, run_dir: Path) -> Path:
+    # Fixed, like a validation's: nothing the caller names reaches a path. Concurrent
+    # decisions through one provider take separate CE_PERSONA_RUN_DIRs.
+    del args
+    return run_dir / f"decide-{provider.name}"
+
+
+def _refuse_if_unsubscribed(provider: Provider, stem: Path, *, failed: bool) -> None:
+    line = decide.refusal(
+        Path(f"{stem}-stderr.log"), Path(f"{stem}-events.jsonl"), include_stderr=failed
+    )
+    if line is not None:
+        raise errors.SubscriptionRefused(
+            f"{provider.binary} refused the subscription login: {line!r}\n"
+            "  Not retried, and never under an API key: run it again once the login works "
+            "or the usage resets."
+        )
+
+
+def _decide_locked(
+    provider: Provider,
+    args: argparse.Namespace,
+    settings: Settings,
+    stem: Path,
+) -> int:
+    """One decision: the caller's prompt, its schema, an empty directory, a gated answer."""
+    prompt_path = Path(args.prompt).expanduser()
+    try:
+        prompt_bytes = prompt_path.read_bytes()
+    except OSError as exc:
+        raise errors.UsageError(f"cannot read prompt {args.prompt}: {exc}") from exc
+    prompt_text = prompt_bytes.decode("utf-8", "replace")
+    if not prompt_text.strip():
+        raise errors.UsageError(f"prompt {args.prompt} is empty")
+    schema_text, _ = decide.read_schema(Path(args.schema).expanduser())
+    schema_copy = Path(f"{stem}-schema.json")
+    schema_copy.write_text(schema_text, encoding="utf-8")
+
+    if shutil.which(provider.binary) is None:
+        raise errors.MissingTool(f"{provider.binary} not on PATH ({provider.install_hint})")
+
+    prompt = decide.build_prompt(prompt=prompt_text, schema_text=schema_text)
+    capped = dataclasses.replace(settings, hard_secs=decide.hard_secs(settings.hard_secs))
+    env = runner.subscription_env(provider.subscription_env)
+    with tempfile.TemporaryDirectory(
+        prefix="ce-persona-decide.", ignore_cleanup_errors=True
+    ) as empty:
+        try:
+            sent = _dispatch(
+                provider,
+                args,
+                capped,
+                stem,
+                prompt=prompt,
+                schema_text=schema_text,
+                repo=Path(empty),
+                in_repository=False,
+                env=env,
+            )
+        except (errors.RunnerError, errors.GateError):
+            _refuse_if_unsubscribed(provider, stem, failed=True)
+            raise
+    # grok can exit 0 with a `result` that reports the refusal as an error.
+    _refuse_if_unsubscribed(provider, stem, failed=False)
+
+    return validate.gate(
+        answer_file=sent.answer_file,
+        schema_path=schema_copy,
+        mode=provider.mode,
+        findings_out=sent.artifact_out,
+        provenance_out=sent.provenance_out,
+        prov_pairs=[
+            f"provider={provider.name}",
+            f"model={args.model}",
+            f"effort={args.effort}",
+            "kind=decide",
+            f"input_prompt={prompt_path}",
+            f"hard_secs={int(capped.hard_secs)}",
+            f"started_at={sent.started_at}",
+            f"runner_status={sent.status}",
+        ],
+        prov_files={
+            "input_prompt": str(prompt_path),
+            "schema": str(schema_copy),
+            "prompt": str(sent.prompt_file),
+        },
+        prov_digests={"input_prompt": validate.digest_bytes(prompt_bytes)},
+        evidence=sent.evidence,
+        label=provider.decide_command,
+        key=None,
+        check=decide.check_answer,
+        summarize=decide.summarize,
+        noun="answer",
+        inspects=False,
+    )
+
+
 def _tail(path: Path, count: int) -> list[str]:
     try:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[-count:]
@@ -615,12 +754,22 @@ def _validate_command(provider: Provider) -> str:
     return provider.validate_command
 
 
+def _decide_command(provider: Provider) -> str:
+    return provider.decide_command
+
+
 REVIEW = Flow(command=_review_command, parser=_parser, stem=_review_stem, locked=_review_locked)
 VALIDATE = Flow(
     command=_validate_command,
     parser=_validate_parser,
     stem=_validate_stem,
     locked=_validate_locked,
+)
+DECIDE = Flow(
+    command=_decide_command,
+    parser=_decide_parser,
+    stem=_decide_stem,
+    locked=_decide_locked,
 )
 
 
@@ -667,6 +816,14 @@ def grok_validate_main() -> int:
 
 def codex_validate_main() -> int:
     return main(CODEX, flow=VALIDATE)
+
+
+def grok_decide_main() -> int:
+    return main(GROK, flow=DECIDE)
+
+
+def codex_decide_main() -> int:
+    return main(CODEX, flow=DECIDE)
 
 
 if __name__ == "__main__":  # pragma: no cover - module is driven through the entry points
