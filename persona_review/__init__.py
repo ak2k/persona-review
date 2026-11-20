@@ -1,10 +1,12 @@
 """Schema-validated code review through compound-engineering persona briefs.
 
-Three commands, installed as console entry points:
+The commands, installed as console entry points:
 
 - `ce-grok-persona` / `ce-codex-persona` — run one reviewer persona through xAI's `grok` or
   OpenAI's `codex` and hold the answer to the plugin's findings schema. stdout is one
   summary line; the exit status is the verdict.
+- `ce-grok-decide` / `ce-codex-decide` — answer a caller's prompt with one object that satisfies
+  the caller's JSON Schema, in an empty directory, on the subscription login only.
 - `ce-persona-findings` — tiered retrieval over the resulting artifact, so a caller pays for
   detail only when it has a reason to read it.
 

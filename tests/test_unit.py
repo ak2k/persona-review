@@ -6541,24 +6541,27 @@ class TestTheDecideGateWalksTheWholeSchema:
 
     @pytest.mark.parametrize(("allowed", "value"), [([1], True), ([True], 1), ([0], False)])
     def test_an_enum_keeps_booleans_and_numbers_apart(self, allowed: list[Any], value: Any):
-        schema = {"type": "object", "properties": {"v": {"enum": allowed}}}
+        schema: dict[str, Any] = {"type": "object", "properties": {"v": {"enum": allowed}}}
         with pytest.raises(validate.GateError):
-            decide.check_answer({"v": value}, schema)
-        decide.check_answer({"v": allowed[0]}, schema)
+            decide.check_answer({"v": value}, cast(validate.JSONObject, schema))
+        decide.check_answer({"v": allowed[0]}, cast(validate.JSONObject, schema))
 
     @pytest.mark.parametrize(
         ("schema", "said"),
-        [
-            ({"type": "array"}, '"type": "object"'),
-            ({"properties": {}}, '"type": "object"'),
-            ({"type": "object", "properties": {"a": {"pattern": "x"}}}, "pattern"),
-            ({"type": "object", "properties": {"a": {"items": {"oneOf": []}}}}, "oneOf"),
-            ({"type": "object", "additionalProperties": {"type": "string"}}, "true or false"),
-            ({"type": "object", "properties": {"a": {"items": [{}]}}}, "single schema"),
-            ({"type": "object", "properties": {"a": {"enum": []}}}, "non-empty"),
-            ({"type": "object", "properties": {"a": {"maxLength": "3"}}}, "whole number"),
-            ({"type": "object", "properties": {"a": {"type": "uuid"}}}, "cannot check"),
-        ],
+        cast(
+            list[tuple[dict[str, Any], str]],
+            [
+                ({"type": "array"}, '"type": "object"'),
+                ({"properties": {}}, '"type": "object"'),
+                ({"type": "object", "properties": {"a": {"pattern": "x"}}}, "pattern"),
+                ({"type": "object", "properties": {"a": {"items": {"oneOf": []}}}}, "oneOf"),
+                ({"type": "object", "additionalProperties": {"type": "string"}}, "true or false"),
+                ({"type": "object", "properties": {"a": {"items": [{}]}}}, "single schema"),
+                ({"type": "object", "properties": {"a": {"enum": []}}}, "non-empty"),
+                ({"type": "object", "properties": {"a": {"maxLength": "3"}}}, "whole number"),
+                ({"type": "object", "properties": {"a": {"type": "uuid"}}}, "cannot check"),
+            ],
+        ),
     )
     def test_a_schema_using_a_rule_the_walk_cannot_enforce_is_refused(
         self, schema: dict[str, Any], said: str

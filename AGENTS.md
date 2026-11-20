@@ -211,6 +211,14 @@ at every call site. Each has a test; breaking one should fail loudly rather than
   deliberate, not an oversight: a validation reads its template from the assets directory and its
   schema from the installed library, and the process suite's fixture assets dir carries the
   template WITHOUT the schema so that split cannot quietly reverse.
+- **A decide run with zero tool calls exits `0`.** It looks like the vacuous-run refusal
+  switched off. A decision is given nothing on disk to read, so a run that made no call is
+  what a sound one looks like; `gate(inspects=False)` is passed by the decide flow alone, and a
+  mutation entry flips the default to prove the review and validate flows still refuse.
+- **codex gets no subscription switch in the decide flow, grok does.** codex's switch,
+  `-c forced_login_method=...`, deletes the stored login on a mismatch (codex-cli 0.167.0,
+  seen 2026-11-20) instead of refusing the one call. Removing every `*API_KEY*` variable is
+  what holds codex to the subscription.
 - **`git` is symlinked into the stub directory in `test_process.py`.** The suite runs with a
   PATH that deliberately excludes the real `grok` and `codex`: an early version removed a
   stub, reached the genuine binary, and started a real billed model run from a unit test.

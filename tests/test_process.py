@@ -2401,7 +2401,12 @@ class TestDecideMode(Harness):
         self.schema_file.write_text(json.dumps(DECIDE_SCHEMA), encoding="utf-8")
 
     def decide(
-        self, provider: str, *args: str, timeout: float = 120, **envextra: str
+        self,
+        provider: str,
+        *args: str,
+        timeout: float = 120,
+        env_extra: dict[str, str] | None = None,
+        **envextra: str,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -2413,7 +2418,7 @@ class TestDecideMode(Harness):
             ],
             capture_output=True,
             text=True,
-            env=self.env(**envextra),
+            env=self.env(**{**(env_extra or {}), **envextra}),
             cwd=self.work,
             timeout=timeout,
             check=False,
@@ -2498,7 +2503,7 @@ class TestDecideMode(Harness):
     def test_the_runner_is_given_no_api_key(self, provider: str):
         self.answer(provider)
         keys = {"XAI_API_KEY": "xai-x", "OPENAI_API_KEY": "sk-x", "CODEX_API_KEY": "sk-x"}
-        assert self.decide(provider, **keys).returncode == 0
+        assert self.decide(provider, env_extra=keys).returncode == 0
         env = self.seen()["env"]
         assert [k for k in env if "API_KEY" in k and k != "GROK_DISABLE_API_KEY_AUTH"] == []
         assert ("GROK_DISABLE_API_KEY_AUTH" in env) == (provider == "grok")
