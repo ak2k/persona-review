@@ -231,7 +231,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a malformed structured_output falls through to the raw text",
         "persona_review/validate.py",
-        r"        if not isinstance\(obj, dict\) or key not in obj:",
+        r"        if not isinstance\(obj, dict\) or \(key is not None and key not in obj\):",
         "        if False:",
     ),
     Mutation(
@@ -240,7 +240,7 @@ MUTATIONS: list[Mutation] = [
         # answer, because the answer is fine — it is the RUN that never happened.
         "a run that made no tool calls certifies a clean review again",
         "persona_review/validate.py",
-        r"    if stats\.local_tool_calls == 0:",
+        r"    if inspects and stats\.local_tool_calls == 0:",
         "    if False:",
     ),
     Mutation(
@@ -248,8 +248,8 @@ MUTATIONS: list[Mutation] = [
         # Refusing on the total passes it, because searches are calls.
         "the refusal counts web searches as having inspected the repository",
         "persona_review/validate.py",
-        r"    if stats\.local_tool_calls == 0:",
-        "    if stats.tool_calls == 0:",
+        r"    if inspects and stats\.local_tool_calls == 0:",
+        "    if inspects and stats.tool_calls == 0:",
     ),
     Mutation(
         # The refusal names local calls; a run that made other calls has to say so, or the
@@ -2062,7 +2062,7 @@ MUTATIONS: list[Mutation] = [
         # check the gate believes whatever top-level key the answer happens to carry.
         "the object answer's top-level key is never checked",
         "persona_review/validate.py",
-        r"    if not isinstance\(decoded, dict\) or key not in decoded:",
+        r"    if key is not None and key not in decoded:",
         "    if False:",
     ),
     # ----------------------------------------------------------------------------------
@@ -2361,7 +2361,7 @@ MUTATIONS: list[Mutation] = [
         # the first reads a warning as the reason.
         "the served-model warning is printed on a refused run",
         "persona_review/validate.py",
-        r"(    if stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
+        r"(    if inspects and stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
         r"(    warning = served_model_warning\(label, evidence, stats, match\)\n"
         r"    if warning is not None:\n        _warn\(warning\)\n)",
         r"\2\1",
