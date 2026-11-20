@@ -23,7 +23,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -127,6 +127,29 @@ def _git_env() -> dict[str, str]:
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def is_api_key_variable(name: str) -> bool:
+    """Whether a variable name carries an API key a provider CLI could bill against.
+
+    By name rather than by a list of the providers' variables: grok 1.0.77 alone reads
+    XAI_API_KEY, GROK_CODE_XAI_API_KEY and GATEWAY_API_KEY, and a list goes stale on the
+    next release in the direction of spending money.
+    """
+    upper = name.upper()
+    return "API_KEY" in upper or "APIKEY" in upper
+
+
+def subscription_env(extra: Iterable[tuple[str, str]] = ()) -> dict[str, str]:
+    """This process's environment with every API-key variable removed, plus `extra`.
+
+    A decide call must run on the CLI's own subscription login. With a key in the
+    environment the CLI may prefer it, or fall back to it when the subscription refuses,
+    and either way the call is billed per token.
+    """
+    env = {name: value for name, value in os.environ.items() if not is_api_key_variable(name)}
+    env.update(extra)
     return env
 
 
@@ -346,8 +369,14 @@ def execute(
     stdin_path: Path | None,
     idle_secs: float,
     hard_secs: float,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> ExecResult:
-    """Run a provider CLI under an idle watchdog and a hard deadline."""
+    """Run a provider CLI under an idle watchdog and a hard deadline.
+
+    `env` replaces the inherited environment when given; `cwd` is the child's working
+    directory, the caller's when None.
+    """
     with contextlib.ExitStack() as stack:
         stdin_arg: int | IO[bytes] = subprocess.DEVNULL
         if stdin_path is not None:
@@ -360,6 +389,8 @@ def execute(
                 stdin=stdin_arg,
                 stdout=out,
                 stderr=err,
+                env=None if env is None else dict(env),
+                cwd=cwd,
                 # Its own process group, so the watchdog can stop the helpers too.
                 start_new_session=True,
             )

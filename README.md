@@ -62,6 +62,7 @@ prints `no findings` (or `no verdicts`) unfenced at exit `0`, as `--all` does.
 | `4` | the runner itself exited non-zero |
 | `5` | idle or hard timeout; the run was killed and partial output kept |
 | `6` | the model answered without attempting a single local tool call — it inspected nothing. Through codex a local call is a `command_execution` or `local_shell_call` item; a file change, patch, web search, MCP call or function call is not one |
+| `7` | decide commands only: the provider refused the subscription login (an auth failure, or usage exhausted, 402); not retried under any other credentials |
 | `78` | over `CE_PERSONA_MAX_PROMPT_TOKENS` — refused, never summarized |
 
 The distinctions that matter to a caller are `1`, `4` and `6`. `1` is the model's fault — it
@@ -456,6 +457,55 @@ it for you.
 and a cap that exists on one provider is a contract this package cannot publish. `CE_PERSONA_IDLE_SECS`
 and `CE_PERSONA_HARD_SECS` bound a validation exactly as they bound a review.
 
+## Deciding: a prompt and a schema in, one object out
+
+`ce-grok-decide` and `ce-codex-decide` answer a caller's prompt with one JSON object that
+satisfies the caller's JSON Schema. They exist for callers that want a model's judgment on a
+question, such as a nightly loop putting an open decision to a panel of models, without a
+repository to review:
+
+```console
+$ ce-codex-decide judge-work-x.md -s judge-schema.json
+ce-codex-decide: 1 answer -> /tmp/.../decide-codex.json
+```
+
+They take `-s/--schema` (required), `-m` and `-e`, and the same `CE_PERSONA_*` environment. They
+run through the same argv builders, watchdogs, artifacts and gate as the review commands. The
+differences, and why each one is there:
+
+- **The provider starts in an empty temporary directory**, given as its `--cwd` or `-C` and as
+  its process working directory. A decision answers from its prompt, so it has no tree to read,
+  and a run with no tool calls is the expected case rather than exit `6`. `codex` is passed
+  `--skip-git-repo-check`, without which it refuses to start outside a repository.
+- **The subscription login only.** Every environment variable whose name contains `API_KEY` or
+  `APIKEY` is removed before the provider starts, and grok gets
+  `GROK_DISABLE_API_KEY_AUTH=true`, its own switch refusing key auth. codex gets no equivalent:
+  its switch, `forced_login_method`, deletes the stored login on a mismatch (codex-cli 0.167.0
+  printed "Logging out." and removed `~/.codex/auth.json`) rather than refusing the one call.
+  The review and validate commands keep the caller's environment unchanged.
+- **A refused login exits `7`.** When the run fails and the provider's stderr, or an error event
+  in its stream (codex `error` or `turn.failed`, grok a `result` with `is_error`), names an auth
+  failure or exhausted usage, such as grok's `402 Payment Required ... usage balance exhausted`,
+  the command exits `7` rather than `4`, and does not retry under any other credentials. The
+  model's own text is never read for this, because a decision about billing can quote a 402. A
+  caller records the call as not run and tries again once the login works or the usage resets.
+- **The hard deadline is at most 1200 s**, whatever `CE_PERSONA_HARD_SECS` says, so a caller can
+  plan a run around the bound. A smaller value still applies.
+- **The schema is checked at every depth.** It must declare `"type": "object"` at the top and use
+  only `type`, `enum`, `required`, `properties`, `items`, `minItems`, `maxItems`, `minimum`,
+  `maximum`, `minLength`, `maxLength`, a boolean `additionalProperties`, and annotations. A schema
+  using anything else exits `2` before the provider is called. The answer is then held to every
+  rule, nested objects and arrays of objects included, and an enum keeps `true` and `1` apart.
+  The schema is copied into the run directory when it is read, and the answer is judged against
+  that copy, not against whatever is at the caller's path after the run.
+
+**Artifacts** land on the stem `decide-<provider>`: `.json` (the answer), `-provenance.json`,
+`-schema.json`, `-events.jsonl`, `-prompt.md` and `-stderr.log`. The sidecar records
+`kind=decide`, the `hard_secs` in force, and SHA-256 hashes of the caller's prompt (from the bytes
+read), the schema copy and the prompt the model received, which is the caller's prompt followed by
+the schema and the answer contract. Two decisions through one provider at once take separate
+`CE_PERSONA_RUN_DIR`s.
+
 ## How the findings are extracted
 
 Not by scanning prose. That heuristic produced three silent false-passes.
@@ -582,6 +632,14 @@ only comparable if they ran the same brief — and `base_ref=HEAD~1` names a dif
 day, so without the resolved SHAs a finding reading `f.py:42` cannot be tied to the code it was
 about. Reviewing a directory that is not a git repository is fine; the SHA fields record
 `unresolved:` rather than going missing.
+
+## Changes in 0.4.0
+
+- **New: `ce-grok-decide` and `ce-codex-decide`** (see *Deciding* above).
+- **New exit status `7`**, returned by the decide commands only: the provider refused the
+  subscription login. The review and validate commands report a provider failure as `4`, as
+  before.
+- Every other command, flag and exit status is unchanged.
 
 ## Changes in 0.3.9
 

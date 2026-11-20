@@ -53,6 +53,10 @@ class Invocation:
     prompt_file: Path
     schema_text: str
     last_file: Path | None
+    # False when `repo` is an empty scratch directory rather than a checkout: a decide call
+    # reads nothing from disk, and codex refuses to start outside a git repository without
+    # being told that is intended.
+    in_repository: bool = True
 
 
 def _grok_argv(inv: Invocation) -> list[str]:
@@ -110,6 +114,8 @@ def _codex_argv(inv: Invocation) -> list[str]:
     argv = ["codex", "exec", "-C", str(inv.repo), "-s", "read-only", "-m", inv.model]
     argv += ["-c", f'model_reasoning_effort="{inv.effort}"']
     argv += ["--ephemeral", "--color", "never", "--json"]
+    if not inv.in_repository:
+        argv.append("--skip-git-repo-check")
     if inv.last_file is not None:
         argv += ["-o", str(inv.last_file)]
     # Trailing `-` reads the prompt from stdin, which keeps a large brief clear of ARG_MAX.
@@ -141,6 +147,10 @@ class Provider:
     # codex writes its final message to a separate file via -o; grok's answer is in the stream.
     writes_last_message: bool
     install_hint: str
+    # Set in the provider's environment for a decide call, on top of removing every API-key
+    # variable: the CLI's own switch refusing key auth, where it has one, so a key stored in
+    # its config cannot be used either.
+    subscription_env: tuple[tuple[str, str], ...] = ()
 
     @property
     def model_help(self) -> str:
@@ -166,6 +176,11 @@ class Provider:
         """
         return f"ce-{self.name}-validate"
 
+    @property
+    def decide_command(self) -> str:
+        """The console command that returns one schema-valid JSON object for a prompt."""
+        return f"ce-{self.name}-decide"
+
 
 GROK = Provider(
     name="grok",
@@ -186,6 +201,8 @@ GROK = Provider(
     prompt_on_stdin=False,
     writes_last_message=False,
     install_hint="see https://github.com/xai-org/grok-build",
+    # `auth.disable_api_key_auth`; grok 1.0.77 documents the variable as equivalent.
+    subscription_env=(("GROK_DISABLE_API_KEY_AUTH", "true"),),
 )
 
 CODEX = Provider(
@@ -205,6 +222,8 @@ CODEX = Provider(
     prompt_on_stdin=True,
     writes_last_message=True,
     install_hint="install the OpenAI codex CLI and run `codex login`",
+    # No switch here. codex's is `-c forced_login_method=...`, and on a mismatch codex-cli
+    # 0.167.0 deletes the stored login ("Logging out.") rather than refusing the one call.
 )
 
 PROVIDERS: dict[str, Provider] = {p.name: p for p in (GROK, CODEX)}

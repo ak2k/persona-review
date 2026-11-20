@@ -386,7 +386,7 @@ def validate(found: Artifact, schema: JSONObject) -> int:
     return check_object(found, schema, "findings", demand_item_rules=True)
 
 
-def from_object_file(text: str, key: str = "findings") -> Artifact:
+def from_object_file(text: str, key: str | None = "findings") -> Artifact:
     """The findings object from a file that is the final message and nothing else.
 
     Strict by design. `codex exec -o` writes only the final message and the prompt demands
@@ -401,7 +401,9 @@ def from_object_file(text: str, key: str = "findings") -> Artifact:
             f"final message is not a single JSON object: {exc}. The prompt requires the "
             f"final message to be exactly one JSON object with no prose or code fences."
         )
-    if not isinstance(decoded, dict) or key not in decoded:
+    if not isinstance(decoded, dict):
+        fail("final message is JSON but not an object")
+    if key is not None and key not in decoded:
         fail(f"final message is JSON but carries no {key} key")
     return decoded
 
@@ -428,7 +430,7 @@ BAD_STOP_REASONS = frozenset(
 )
 
 
-def from_grok_events(text: str, key: str = "findings") -> Artifact:
+def from_grok_events(text: str, key: str | None = "findings") -> Artifact:
     """The findings object from grok's NDJSON `result` event.
 
     The run's own terminal status is checked before its answer is believed. That matters
@@ -478,9 +480,9 @@ def from_grok_events(text: str, key: str = "findings") -> Artifact:
         # the raw text when `--json-schema` was in force means the schema-constrained channel
         # produced something unexpected and the gate quietly used a different one instead —
         # the answer it returns is then from a channel nobody asked for.
-        if not isinstance(obj, dict) or key not in obj:
+        if not isinstance(obj, dict) or (key is not None and key not in obj):
             fail(
-                f"grok's result event carries a structured_output that is not a {key} "
+                f"grok's result event carries a structured_output that is not a {key or 'JSON'} "
                 f"object ({type(obj).__name__}); --json-schema was requested, so this is a "
                 "malformed answer rather than a reason to read the raw text"
             )
@@ -1335,7 +1337,7 @@ def _seconds(value: JSONValue) -> float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def extract(mode: str, text: str, key: str = "findings") -> Artifact:
+def extract(mode: str, text: str, key: str | None = "findings") -> Artifact:
     """Recover the model's answer through the channel its runner actually provides.
 
     Both modes read a channel the RUNNER defines — grok's terminal event, codex's
@@ -1348,7 +1350,8 @@ def extract(mode: str, text: str, key: str = "findings") -> Artifact:
     `key` is the top-level key the answer must carry. It is a parameter rather than a
     constant because a validation's answer is `{"verdicts": [...]}`: without it, a perfectly
     good verdicts object was refused at exit 1 on BOTH providers, before the schema that
-    would have judged it was ever applied.
+    would have judged it was ever applied. None asks only for an object, for a caller whose
+    schema names no single top-level key.
     """
     if mode == "object":
         return from_object_file(text, key)
@@ -1386,10 +1389,11 @@ def gate(
     prov_digests: dict[str, str] | None = None,
     evidence: Evidence,
     label: str,
-    key: str = "findings",
+    key: str | None = "findings",
     check: Callable[[Artifact, JSONObject], int] = validate,
     summarize: Callable[[Artifact, int], str] = severity_tally,
     noun: str = "findings",
+    inspects: bool = True,
 ) -> int:
     """Validate a run's answer and write its artifacts. Returns the process exit status.
 
@@ -1405,6 +1409,9 @@ def gate(
     it returned. All four default to the review, because the run frame around them — the status
     checks, the artifact order, the vacuous-run refusal — is the part neither mode may have its
     own copy of. Two gates would mean two places for the refusal to be forgotten in.
+
+    `inspects` is False only for a run that was given nothing on disk to read: a decision
+    answers from its prompt, so zero tool calls is what a sound one looks like there.
     """
     try:
         text = answer_file.read_text(encoding="utf-8", errors="replace")
@@ -1450,7 +1457,7 @@ def gate(
     # Deliberately no retry here. Whether to spend another full-effort model run is the
     # calling agent's decision and its budget; this command's job is to refuse to certify,
     # and a wrapper that silently re-ran would hide how often this happens.
-    if stats.local_tool_calls == 0:
+    if inspects and stats.local_tool_calls == 0:
         # The PROVENANCE sidecar, not the findings file. Naming the findings file here was a
         # laundering route: it invited the caller to open the very artifact just refused, and
         # `ce-persona-findings` would render it as an ordinary review. The sidecar is the

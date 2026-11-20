@@ -37,6 +37,7 @@ from persona_review import (  # noqa: E402
     assets,
     cli,
     config,
+    decide,
     errors,
     findings,
     flags,
@@ -3086,12 +3087,14 @@ class TestErrorVocabulary:
         assert errors.RunTimeout.exit_code == cli.EXIT_TIMEOUT
         assert errors.VacuousRun.exit_code == cli.EXIT_VACUOUS
         assert errors.BudgetError.exit_code == cli.EXIT_BUDGET
+        assert errors.SubscriptionRefused.exit_code == cli.EXIT_SUBSCRIPTION
         # LITERALS, because the codes are the published contract. An assertion written only
         # against the module's own constants moves with them: mutation testing caught exactly
         # that elsewhere, where redefining EXIT_USAGE to 1 left the suite green.
         assert (cli.EXIT_GATE, cli.EXIT_USAGE, cli.EXIT_ENV) == (1, 2, 3)
         assert (cli.EXIT_RUNNER, cli.EXIT_TIMEOUT, cli.EXIT_VACUOUS) == (4, 5, 6)
         assert cli.EXIT_BUDGET == 78
+        assert cli.EXIT_SUBSCRIPTION == 7
 
 
 class TestTheEnvironmentIsReadInOnePlace:
@@ -6351,7 +6354,304 @@ class TestTheExitTableSpeaksTheFlowsWords:
     def test_no_word_slot_survives_either_rendering(self):
         # The control for the substitution pass. An unfilled `{answer}` would still leave a
         # table that lists every status, which is what the assertions above mostly check.
-        for words in (errors.REVIEW_WORDS, errors.VALIDATE_WORDS):
+        for words in (errors.REVIEW_WORDS, errors.VALIDATE_WORDS, errors.DECIDE_WORDS):
             rendered = errors.render_exit_table("grok", words)
             for slot in ("{answer}", "{ok}", "{bad_argument}", "{also}", "{runner}"):
                 assert slot not in rendered, (slot, words)
+
+
+# The full argv each provider is handed, review and decide, as a golden: a flag added,
+# dropped or reordered in either builder changes what the provider CLI is allowed to do,
+# and should be read as a diff rather than inferred from a handful of membership checks.
+ARGV_GOLDEN: dict[str, list[str]] = {
+    "grok review": [
+        "grok", "--prompt-file", "/run/p.md", "--verbatim", "--model", "m", "--effort", "high",
+        "--cwd", "/repo", "--sandbox", "read-only", "--permission-mode", "bypassPermissions",
+        "--disable-web-search", "--no-wait-for-background", "--json-schema", '{"type":"object"}',
+        "--output-format", "streaming-messages-json",
+    ],
+    "grok decide": [
+        "grok", "--prompt-file", "/run/p.md", "--verbatim", "--model", "m", "--effort", "high",
+        "--cwd", "/empty", "--sandbox", "read-only", "--permission-mode", "bypassPermissions",
+        "--disable-web-search", "--no-wait-for-background", "--json-schema", '{"type":"object"}',
+        "--output-format", "streaming-messages-json",
+    ],
+    "codex review": [
+        "codex", "exec", "-C", "/repo", "-s", "read-only", "-m", "m",
+        "-c", 'model_reasoning_effort="high"', "--ephemeral", "--color", "never", "--json",
+        "-o", "/run/last.json", "-",
+    ],
+    "codex decide": [
+        "codex", "exec", "-C", "/empty", "-s", "read-only", "-m", "m",
+        "-c", 'model_reasoning_effort="high"', "--ephemeral", "--color", "never", "--json",
+        "--skip-git-repo-check", "-o", "/run/last.json", "-",
+    ],
+}  # fmt: skip
+
+
+class TestTheDecideArgv:
+    @staticmethod
+    def _inv(*, decide_call: bool) -> providers.Invocation:
+        return providers.Invocation(
+            model="m",
+            effort="high",
+            repo=Path("/empty" if decide_call else "/repo"),
+            prompt_file=Path("/run/p.md"),
+            schema_text='{"type":"object"}',
+            last_file=Path("/run/last.json"),
+            in_repository=not decide_call,
+        )
+
+    @pytest.mark.parametrize("label", sorted(ARGV_GOLDEN))
+    def test_each_provider_s_argv_matches_its_golden(self, label: str):
+        name, mode = label.split()
+        argv = providers.PROVIDERS[name].argv(self._inv(decide_call=mode == "decide"))
+        assert argv == ARGV_GOLDEN[label]
+
+    def test_a_review_argv_is_unchanged_by_the_decide_field_s_default(self):
+        # The field's default is the review: an Invocation built without it, as every caller
+        # before the decide mode builds one, gets the review argv.
+        inv = providers.Invocation(
+            model="m",
+            effort="high",
+            repo=Path("/repo"),
+            prompt_file=Path("/run/p.md"),
+            schema_text='{"type":"object"}',
+            last_file=Path("/run/last.json"),
+        )
+        assert providers.CODEX.argv(inv) == ARGV_GOLDEN["codex review"]
+
+    def test_the_decide_commands_are_named_per_provider(self):
+        assert providers.GROK.decide_command == "ce-grok-decide"
+        assert providers.CODEX.decide_command == "ce-codex-decide"
+
+
+class TestADecisionRunsOnTheSubscriptionOnly:
+    def test_every_api_key_variable_is_removed(self, monkeypatch: pytest.MonkeyPatch):
+        for name in ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY"):
+            monkeypatch.setenv(name, "sk-test")
+        monkeypatch.setenv("GATEWAY_APIKEY", "sk-test")
+        # The control: a variable that is not a key survives, so an empty environment cannot
+        # pass this test.
+        monkeypatch.setenv("CE_TEST_KEEP_ME", "1")
+        env = runner.subscription_env()
+        assert [k for k in env if "API_KEY" in k.upper() or "APIKEY" in k.upper()] == []
+        assert env["CE_TEST_KEEP_ME"] == "1"
+
+    def test_grok_s_own_switch_refusing_key_auth_is_set(self, monkeypatch: pytest.MonkeyPatch):
+        # Its name contains API_KEY, so it must be added after the scrub, not lost to it.
+        monkeypatch.setenv("GROK_DISABLE_API_KEY_AUTH", "false")
+        env = runner.subscription_env(providers.GROK.subscription_env)
+        assert env["GROK_DISABLE_API_KEY_AUTH"] == "true"
+
+    def test_codex_carries_no_switch_that_could_delete_its_login(self):
+        # codex's switch logs the user out on a mismatch rather than refusing one call.
+        assert providers.CODEX.subscription_env == ()
+        assert not any("forced_login_method" in a for a in ARGV_GOLDEN["codex decide"])
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"), [(2400.0, 1200.0), (1200.0, 1200.0), (30.0, 30.0)]
+    )
+    def test_the_hard_deadline_never_exceeds_the_cap(self, configured: float, expected: float):
+        assert decide.hard_secs(configured) == expected
+
+
+# A decision schema of the shape the nightly loop's judge returns: nested objects, enums,
+# arrays of objects, and closed objects.
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["choice", "confidence", "blast", "checks"],
+    "properties": {
+        "choice": {"type": "string", "minLength": 1},
+        "confidence": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["level", "basis"],
+            "properties": {
+                "level": {"enum": ["high", "medium", "low"]},
+                "basis": {"enum": ["measured", "inferred", "judgment"]},
+            },
+        },
+        "blast": {
+            "type": "object",
+            "required": ["reversible", "dependents"],
+            "properties": {
+                "reversible": {"type": "boolean"},
+                "dependents": {"type": "integer", "minimum": 0},
+            },
+        },
+        "checks": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {"kind": {"enum": ["bd_show", "gh_pr"]}, "arg": {"type": "string"}},
+            },
+        },
+    },
+}
+
+
+def judged(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "choice": "(1) keep it",
+        "confidence": {"level": "high", "basis": "measured"},
+        "blast": {"reversible": True, "dependents": 0},
+        "checks": [{"kind": "gh_pr", "arg": "ak2k/x#1"}],
+    }
+    base.update(over)
+    return base
+
+
+class TestTheDecideGateWalksTheWholeSchema:
+    def test_a_valid_nested_answer_passes(self):
+        assert decide.check_answer(judged(), JUDGE_SCHEMA) == 1
+
+    @pytest.mark.parametrize(
+        ("answer", "said"),
+        [
+            (judged(confidence={"level": "high"}), "answer.confidence is missing basis"),
+            (judged(blast={"reversible": True}), "answer.blast is missing dependents"),
+            (judged(checks=[{"arg": "x"}]), "answer.checks[0] is missing kind"),
+            (judged(checks=[{"kind": "rm_rf"}]), "answer.checks[0].kind is 'rm_rf'"),
+            (judged(confidence={"level": "high", "basis": "x"}), "answer.confidence.basis"),
+            (judged(blast={"reversible": 1, "dependents": 0}), "answer.blast.reversible"),
+            (judged(blast={"reversible": True, "dependents": -1}), "must be >= 0"),
+            (judged(checks=[{"kind": "gh_pr"}] * 4), "at most 3"),
+            (judged(choice=""), "minLength"),
+            (judged(extra="x"), "carries 'extra'"),
+            (
+                judged(confidence={"level": "high", "basis": "measured", "why": "x"}),
+                "carries 'why'",
+            ),
+        ],
+    )
+    def test_a_defect_at_any_depth_is_refused(self, answer: dict[str, Any], said: str):
+        with pytest.raises(validate.GateError) as caught:
+            decide.check_answer(answer, JUDGE_SCHEMA)
+        assert said in str(caught.value)
+
+    def test_an_open_object_admits_other_keys(self):
+        # The control for additionalProperties: `blast` does not close itself.
+        decide.check_answer(
+            judged(blast={"reversible": True, "dependents": 0, "x": 1}), JUDGE_SCHEMA
+        )
+
+    @pytest.mark.parametrize(("allowed", "value"), [([1], True), ([True], 1), ([0], False)])
+    def test_an_enum_keeps_booleans_and_numbers_apart(self, allowed: list[Any], value: Any):
+        schema: dict[str, Any] = {"type": "object", "properties": {"v": {"enum": allowed}}}
+        with pytest.raises(validate.GateError):
+            decide.check_answer({"v": value}, cast(validate.JSONObject, schema))
+        decide.check_answer({"v": allowed[0]}, cast(validate.JSONObject, schema))
+
+    @pytest.mark.parametrize(
+        ("schema", "said"),
+        cast(
+            list[tuple[dict[str, Any], str]],
+            [
+                ({"type": "array"}, '"type": "object"'),
+                ({"properties": {}}, '"type": "object"'),
+                ({"type": "object", "properties": {"a": {"pattern": "x"}}}, "pattern"),
+                ({"type": "object", "properties": {"a": {"items": {"oneOf": []}}}}, "oneOf"),
+                ({"type": "object", "additionalProperties": {"type": "string"}}, "true or false"),
+                ({"type": "object", "properties": {"a": {"items": [{}]}}}, "single schema"),
+                ({"type": "object", "properties": {"a": {"enum": []}}}, "non-empty"),
+                ({"type": "object", "properties": {"a": {"maxLength": "3"}}}, "whole number"),
+                ({"type": "object", "properties": {"a": {"type": "uuid"}}}, "cannot check"),
+            ],
+        ),
+    )
+    def test_a_schema_using_a_rule_the_walk_cannot_enforce_is_refused(
+        self, schema: dict[str, Any], said: str
+    ):
+        with pytest.raises(validate.GateError) as caught:
+            decide.check_root(schema)
+        assert said in str(caught.value)
+
+    def test_a_bad_schema_is_a_usage_error_before_any_run(self, tmp_path: Path):
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"type": "object", "properties": {"a": {"oneOf": []}}}))
+        with pytest.raises(errors.UsageError) as caught:
+            decide.read_schema(path)
+        assert "oneOf" in str(caught.value)
+
+    def test_the_schema_read_is_the_schema_text_and_object(self, tmp_path: Path):
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps(JUDGE_SCHEMA))
+        text, parsed = decide.read_schema(path)
+        assert parsed == JUDGE_SCHEMA
+        assert json.loads(text) == JUDGE_SCHEMA
+
+    def test_an_answer_needs_no_particular_key_but_must_be_an_object(self):
+        assert validate.from_object_file('{"choice": "x"}', None) == {"choice": "x"}
+        with pytest.raises(validate.GateError):
+            validate.from_object_file('["x"]', None)
+
+    def test_the_prompt_carries_the_schema_and_ends_on_the_boundary(self):
+        prompt = decide.build_prompt(prompt="Judge bead X.\n", schema_text=json.dumps(JUDGE_SCHEMA))
+        assert prompt.startswith("Judge bead X.")
+        assert json.dumps(JUDGE_SCHEMA) in prompt
+        assert prompt.rstrip().endswith(decide.BOUNDARY)
+
+
+# grok's 402, as the operator's probe recorded it on 2026-10-01, and codex-cli 0.167.0's
+# answer to a login of the wrong kind.
+GROK_402 = "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+CODEX_WRONG_LOGIN = "API key login is required, but ChatGPT is currently being used. Logging out."
+
+
+class TestARefusedLoginIsToldApartFromAFailedRun:
+    @staticmethod
+    def _files(tmp_path: Path, stderr: str, *events: dict[str, Any]) -> tuple[Path, Path]:
+        err, out = tmp_path / "e.log", tmp_path / "o.jsonl"
+        err.write_text(stderr, encoding="utf-8")
+        out.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        return err, out
+
+    @pytest.mark.parametrize("line", [GROK_402, CODEX_WRONG_LOGIN, "Error: Not logged in"])
+    def test_a_failed_run_s_stderr_naming_a_refusal_is_one(self, tmp_path: Path, line: str):
+        err, out = self._files(tmp_path, f"starting\n{line}\n")
+        assert decide.refusal(err, out, include_stderr=True) == line
+
+    def test_a_successful_run_s_stderr_is_not_read(self, tmp_path: Path):
+        err, out = self._files(tmp_path, f"{GROK_402}\n")
+        assert decide.refusal(err, out, include_stderr=False) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"type": "result", "is_error": True, "result": GROK_402},
+            {"type": "turn.failed", "error": {"message": "unexpected status 401 Unauthorized"}},
+            {"type": "error", "message": "You've hit your usage limit."},
+        ],
+    )
+    def test_an_error_event_naming_a_refusal_is_one(self, tmp_path: Path, event: dict[str, Any]):
+        err, out = self._files(tmp_path, "", event)
+        assert decide.refusal(err, out, include_stderr=False) is not None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            # The model's own words: a decision about billing can quote a 402.
+            {"type": "item.completed", "item": {"type": "agent_message", "text": GROK_402}},
+            {"type": "result", "is_error": False, "result": GROK_402},
+            # A number is not a status, even in an error event.
+            {"type": "result", "is_error": True, "usage": {"output_tokens": 402}},
+        ],
+    )
+    def test_the_model_s_text_and_counts_are_not_a_refusal(
+        self, tmp_path: Path, event: dict[str, Any]
+    ):
+        err, out = self._files(tmp_path, "", event)
+        assert decide.refusal(err, out, include_stderr=True) is None
+
+    def test_an_ordinary_failure_is_not_a_refusal(self, tmp_path: Path):
+        err, out = self._files(tmp_path, "error: stream disconnected before completion\n")
+        assert decide.refusal(err, out, include_stderr=True) is None
+
+    def test_the_refusal_has_its_own_status(self):
+        assert errors.SubscriptionRefused.exit_code == 7
+        assert errors.SubscriptionRefused.exit_code != errors.GateError.exit_code
+        assert errors.SubscriptionRefused.exit_code != errors.RunnerError.exit_code

@@ -231,7 +231,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "a malformed structured_output falls through to the raw text",
         "persona_review/validate.py",
-        r"        if not isinstance\(obj, dict\) or key not in obj:",
+        r"        if not isinstance\(obj, dict\) or \(key is not None and key not in obj\):",
         "        if False:",
     ),
     Mutation(
@@ -240,7 +240,7 @@ MUTATIONS: list[Mutation] = [
         # answer, because the answer is fine — it is the RUN that never happened.
         "a run that made no tool calls certifies a clean review again",
         "persona_review/validate.py",
-        r"    if stats\.local_tool_calls == 0:",
+        r"    if inspects and stats\.local_tool_calls == 0:",
         "    if False:",
     ),
     Mutation(
@@ -248,8 +248,8 @@ MUTATIONS: list[Mutation] = [
         # Refusing on the total passes it, because searches are calls.
         "the refusal counts web searches as having inspected the repository",
         "persona_review/validate.py",
-        r"    if stats\.local_tool_calls == 0:",
-        "    if stats.tool_calls == 0:",
+        r"    if inspects and stats\.local_tool_calls == 0:",
+        "    if inspects and stats.tool_calls == 0:",
     ),
     Mutation(
         # The refusal names local calls; a run that made other calls has to say so, or the
@@ -2062,7 +2062,7 @@ MUTATIONS: list[Mutation] = [
         # check the gate believes whatever top-level key the answer happens to carry.
         "the object answer's top-level key is never checked",
         "persona_review/validate.py",
-        r"    if not isinstance\(decoded, dict\) or key not in decoded:",
+        r"    if key is not None and key not in decoded:",
         "    if False:",
     ),
     # ----------------------------------------------------------------------------------
@@ -2361,7 +2361,7 @@ MUTATIONS: list[Mutation] = [
         # the first reads a warning as the reason.
         "the served-model warning is printed on a refused run",
         "persona_review/validate.py",
-        r"(    if stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
+        r"(    if inspects and stats\.local_tool_calls == 0:\n[\s\S]*?\n)"
         r"(    warning = served_model_warning\(label, evidence, stats, match\)\n"
         r"    if warning is not None:\n        _warn\(warning\)\n)",
         r"\2\1",
@@ -2455,6 +2455,143 @@ MUTATIONS: list[Mutation] = [
         "                pass",
         suite="process",
         selector="stderr_cannot_take",
+    ),
+    # The decide mode. Each entry reverts one of its guards; the unit tier kills the ones the
+    # library decides, the process tier the ones only an installed command shows.
+    Mutation(
+        "a decision's provider is handed the caller's API keys",
+        "persona_review/runner.py",
+        r'    return "API_KEY" in upper or "APIKEY" in upper',
+        "    return False",
+    ),
+    Mutation(
+        "grok's own switch refusing key auth is no longer set for a decision",
+        "persona_review/providers.py",
+        r'    subscription_env=\(\("GROK_DISABLE_API_KEY_AUTH", "true"\),\),',
+        "    subscription_env=(),",
+    ),
+    Mutation(
+        "a decision's hard deadline follows CE_PERSONA_HARD_SECS past the cap",
+        "persona_review/decide.py",
+        r"    return min\(configured, HARD_SECS_CAP\)",
+        "    return configured",
+    ),
+    Mutation(
+        "codex is not told the empty directory is intended, and refuses to start",
+        "persona_review/providers.py",
+        r"    if not inv\.in_repository:",
+        "    if False:",
+    ),
+    Mutation(
+        "a nested object's required fields go unchecked",
+        "persona_review/decide.py",
+        r"            missing = \[k for k in required if isinstance\(k, str\) and k not in value\]",
+        "            missing = []",
+    ),
+    Mutation(
+        "a closed object accepts keys its schema does not allow",
+        "persona_review/decide.py",
+        r'            elif spec\.get\("additionalProperties"\) is False:',
+        "            elif False:",
+    ),
+    Mutation(
+        "an enum lets True stand for 1",
+        "persona_review/decide.py",
+        r"        return isinstance\(left, bool\) and isinstance\(right, bool\) and left == right",
+        "        return left == right",
+    ),
+    Mutation(
+        "a nested keyword the walk does not enforce is accepted",
+        "persona_review/decide.py",
+        r"    unknown = sorted\(set\(spec\) - DECIDE_KEYWORDS\)",
+        "    unknown = []",
+    ),
+    Mutation(
+        "the schema is not checked before the model is called",
+        "persona_review/decide.py",
+        r"^        check_root\(parsed\)$",
+        "        pass",
+    ),
+    Mutation(
+        "the model's own text is read for a refused login",
+        "persona_review/decide.py",
+        r'        if event\.get\("type"\) in \("error", "turn\.failed"\)',
+        "        if True",
+    ),
+    Mutation(
+        "a successful run's stderr is read for a refused login",
+        "persona_review/decide.py",
+        r"    texts = \[_tail_text\(stderr_file\)\] if include_stderr else \[\]",
+        "    texts = [_tail_text(stderr_file)]",
+    ),
+    Mutation(
+        "a number in an error event is read as a status",
+        "persona_review/decide.py",
+        r"    if isinstance\(value, str\):\n        return \[value\]",
+        "    if isinstance(value, (str, int)):\n        return [str(value)]",
+    ),
+    Mutation(
+        "a review that inspected nothing is no longer refused",
+        "persona_review/validate.py",
+        r"    inspects: bool = True,",
+        "    inspects: bool = False,",
+    ),
+    Mutation(
+        "a decision that made no tool call is refused like a review",
+        "persona_review/cli.py",
+        r"^        inspects=False,$",
+        "        inspects=True,",
+        suite="process",
+        selector="TestDecideMode and valid_decision",
+    ),
+    Mutation(
+        "a refused login on a failed run is reported as a runner failure",
+        "persona_review/cli.py",
+        r"            _refuse_if_unsubscribed\(provider, stem, failed=True\)\n            raise",
+        "            raise",
+        suite="process",
+        selector="TestDecideMode and refused_login",
+    ),
+    Mutation(
+        "grok's result reporting a 402 is judged as an answer",
+        "persona_review/cli.py",
+        r"^    _refuse_if_unsubscribed\(provider, stem, failed=False\)$",
+        "    pass",
+        suite="process",
+        selector="TestDecideMode and grok_result_reporting",
+    ),
+    Mutation(
+        "a decision inherits the caller's environment",
+        "persona_review/cli.py",
+        r"^                env=env,$",
+        "                env=None,",
+        suite="process",
+        selector="TestDecideMode and no_api_key",
+    ),
+    Mutation(
+        "a decision's provider starts in the caller's directory",
+        "persona_review/cli.py",
+        r"        cwd=None if in_repository else repo,",
+        "        cwd=None,",
+        suite="process",
+        selector="TestDecideMode and empty_directory",
+    ),
+    Mutation(
+        "a decision is gated against the caller's schema path after the run",
+        "persona_review/cli.py",
+        r"^        schema_path=schema_copy,$",
+        "        schema_path=Path(args.schema),",
+        suite="process",
+        selector="TestDecideMode and shown",
+    ),
+    Mutation(
+        "a decision's deadline is not capped",
+        "persona_review/cli.py",
+        r"    capped = dataclasses\.replace\("
+        r"settings, hard_secs=decide\.hard_secs\(settings\.hard_secs\)\)",
+        "    capped = settings",
+        suite="process",
+        selector="TestDecideMode and capped",
     ),
 ]
 

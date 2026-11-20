@@ -120,6 +120,18 @@ class VacuousRun(AppError):
     exit_code = 6
 
 
+class SubscriptionRefused(AppError):
+    """The provider refused the subscription login: an auth failure, or usage exhausted (402).
+
+    Raised by the decide commands only, and never retried, because the only retry that could
+    succeed is one under other credentials: an API key bills per call, which is the spend
+    these commands exist not to make. Distinct from RunnerError so a caller can record the
+    call as not run and try again after the quota resets, rather than as a failed answer.
+    """
+
+    exit_code = 7
+
+
 class BudgetError(AppError):
     """Over CE_PERSONA_MAX_PROMPT_TOKENS. Refused, never summarized.
 
@@ -171,6 +183,13 @@ EXIT_TABLE: tuple[tuple[int, tuple[str, ...]], ...] = (
             "web search, MCP call or function call is not one)",
         ),
     ),
+    (
+        SubscriptionRefused.exit_code,
+        (
+            "decide commands only: {runner} refused the subscription login (an auth",
+            "failure, or usage exhausted, 402); not retried under any other credentials",
+        ),
+    ),
     (BudgetError.exit_code, ("over CE_PERSONA_MAX_PROMPT_TOKENS; refused, never summarized",)),
 )
 
@@ -188,6 +207,12 @@ VALIDATE_WORDS: Mapping[str, str] = {
     "ok": "one verdict for every input #, exactly once",
     "bad_argument": "a batch that is not an array of findings carrying a `#` each",
     "also": ", or also carries a findings list",
+}
+DECIDE_WORDS: Mapping[str, str] = {
+    "answer": "JSON",
+    "ok": "one object that satisfies --schema",
+    "bad_argument": "an unreadable prompt or schema, a schema this gate cannot enforce",
+    "also": "",
 }
 
 

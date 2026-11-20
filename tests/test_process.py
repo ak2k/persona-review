@@ -188,6 +188,12 @@ if not sys.stdin.isatty():
         pass
 with open(os.environ["STUB_PROMPT"], "w") as fh:
     fh.write(prompt)
+# Where the runner was started and what it was given to authenticate with.
+with open(os.environ["STUB_ENV"], "w") as fh:
+    json.dump({{"cwd": os.getcwd(), "entries": os.listdir("."), "env": dict(os.environ)}}, fh)
+if spec.get("stderr"):
+    sys.stderr.write(spec["stderr"])
+    sys.stderr.flush()
 if spec.get("stdout"):
     sys.stdout.write(spec["stdout"])
     sys.stdout.flush()
@@ -412,6 +418,7 @@ class Harness:
         self.argv_log = self.work / "argv.json"
         self.child_pid_file = self.work / "child.pid"
         self.prompt_seen = self.work / "prompt-the-runner-received.md"
+        self.env_seen = self.work / "env-the-runner-received.json"
 
         installed = os.environ.get("PERSONA_REVIEW_BIN")
         self.commands: dict[str, Path] = {}
@@ -419,10 +426,12 @@ class Harness:
         # two modes share one code path, and a harness that reached only one of them is how
         # a guard ends up tested in a single mode.
         self.validate_commands: dict[str, Path] = {}
+        self.decide_commands: dict[str, Path] = {}
         for provider in PROVIDERS:
             for name, entry, table in (
                 (f"ce-{provider}-persona", f"{provider}_main", self.commands),
                 (f"ce-{provider}-validate", f"{provider}_validate_main", self.validate_commands),
+                (f"ce-{provider}-decide", f"{provider}_decide_main", self.decide_commands),
             ):
                 if installed:
                     table[provider] = Path(installed) / name
@@ -476,6 +485,7 @@ class Harness:
                 "STUB_ARGV": str(self.argv_log),
                 "STUB_CHILD": str(self.child_pid_file),
                 "STUB_PROMPT": str(self.prompt_seen),
+                "STUB_ENV": str(self.env_seen),
                 # Generous by default; the watchdog tests override them.
                 "CE_PERSONA_IDLE_SECS": "60",
                 "CE_PERSONA_HARD_SECS": "120",
@@ -2357,3 +2367,218 @@ class TestValidatorMode(Harness):
         assert "schema-valid verdicts" in proc.stdout
         assert "one verdict for every input #, exactly once" in proc.stdout
         assert "unknown or markdown-only persona" not in proc.stdout
+
+
+DECIDE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["choice", "confidence"],
+    "properties": {
+        "choice": {"type": "string"},
+        "confidence": {
+            "type": "object",
+            "required": ["level"],
+            "properties": {"level": {"enum": ["high", "medium", "low"]}},
+        },
+    },
+}
+DECISION = json.dumps({"choice": "(1) keep it", "confidence": {"level": "high"}})
+# Valid at the top level, missing a field one level down: the findings gate's walk would
+# pass it.
+DECISION_NESTED_GAP = json.dumps({"choice": "(1) keep it", "confidence": {}})
+GROK_402 = "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+CODEX_WRONG_LOGIN = "API key login is required, but ChatGPT is currently being used. Logging out."
+
+
+class TestDecideMode(Harness):
+    """The decide commands: a prompt and a schema in, one schema-valid object out."""
+
+    def setup_method(self) -> None:
+        super().setup_method()
+        self.prompt_file = self.work / "decide-prompt.md"
+        self.prompt_file.write_text("Judge bead work-x.\n", encoding="utf-8")
+        self.schema_file = self.work / "decide-schema.json"
+        self.schema_file.write_text(json.dumps(DECIDE_SCHEMA), encoding="utf-8")
+
+    def decide(
+        self,
+        provider: str,
+        *args: str,
+        timeout: float = 120,
+        env_extra: dict[str, str] | None = None,
+        **envextra: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(self.decide_commands[provider]),
+                str(self.prompt_file),
+                "-s",
+                str(self.schema_file),
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+            env=self.env(**{**(env_extra or {}), **envextra}),
+            cwd=self.work,
+            timeout=timeout,
+            check=False,
+        )
+
+    def answer(self, provider: str, payload: str = DECISION, **extra: Any) -> None:
+        """A stub that answers WITHOUT a tool call: a decision has nothing on disk to read."""
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(payload), **extra)
+        else:
+            self.set_spec(stdout=codex_stream(), last=payload, **extra)
+
+    def artifact_of(self, provider: str) -> Path:
+        return self.run_dir / f"decide-{provider}.json"
+
+    def seen(self) -> dict[str, Any]:
+        return json.loads(self.env_seen.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_valid_decision_exits_zero_with_the_object_as_its_artifact(self, provider: str):
+        self.answer(provider)
+        proc = self.decide(provider)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip().splitlines() == [
+            f"ce-{provider}-decide: 1 answer -> {self.artifact_of(provider)}"
+        ]
+        assert json.loads(self.artifact_of(provider).read_text()) == json.loads(DECISION)
+        assert proc.stderr == ""
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_decision_missing_a_nested_field_exits_one(self, provider: str):
+        self.answer(provider, DECISION_NESTED_GAP)
+        proc = self.decide(provider)
+        assert proc.returncode == 1, proc.stderr
+        assert "answer.confidence is missing level" in proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_prose_instead_of_an_object_exits_one(self, provider: str):
+        if provider == "grok":
+            self.set_spec(stdout=grok_stream(None, result="I think we should keep it."))
+        else:
+            self.set_spec(stdout=codex_stream(), last="I think we should keep it.")
+        assert self.decide(provider).returncode == 1
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_schema_the_gate_cannot_enforce_is_refused_before_the_runner_runs(
+        self, provider: str
+    ):
+        self.answer(provider)
+        self.schema_file.write_text(
+            json.dumps({"type": "object", "properties": {"a": {"oneOf": []}}}), encoding="utf-8"
+        )
+        proc = self.decide(provider)
+        assert proc.returncode == 2, proc.stderr
+        assert "oneOf" in proc.stderr
+        assert not self.argv_log.exists(), "the runner was called for a schema nobody can enforce"
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_answer_is_held_to_the_schema_the_model_was_shown(self, provider: str):
+        # The caller's schema file replaced while the model works, by a schema the answer
+        # satisfies: the gate must still judge it against the one that was read.
+        self.answer(
+            provider,
+            DECISION_NESTED_GAP,
+            overwrite={str(self.schema_file): json.dumps({"type": "object"})},
+        )
+        assert self.decide(provider).returncode == 1
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_runner_starts_in_an_empty_directory_that_is_not_the_caller_s(self, provider: str):
+        self.answer(provider)
+        assert self.decide(provider).returncode == 0
+        seen = self.seen()
+        assert seen["entries"] == []
+        assert Path(seen["cwd"]).resolve() != self.work.resolve()
+        argv = json.loads(self.argv_log.read_text())
+        flag = "--cwd" if provider == "grok" else "-C"
+        assert Path(argv[argv.index(flag) + 1]).resolve() == Path(seen["cwd"]).resolve()
+        assert ("--skip-git-repo-check" in argv) == (provider == "codex")
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_runner_is_given_no_api_key(self, provider: str):
+        self.answer(provider)
+        keys = {"XAI_API_KEY": "xai-x", "OPENAI_API_KEY": "sk-x", "CODEX_API_KEY": "sk-x"}
+        assert self.decide(provider, env_extra=keys).returncode == 0
+        env = self.seen()["env"]
+        assert [k for k in env if "API_KEY" in k and k != "GROK_DISABLE_API_KEY_AUTH"] == []
+        assert ("GROK_DISABLE_API_KEY_AUTH" in env) == (provider == "grok")
+        # The control: the environment was passed through, not emptied.
+        assert env["STUB_SPEC"] == str(self.spec)
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_review_still_inherits_the_caller_s_environment(self, provider: str):
+        # The scrub is the decide mode's; a review run is unchanged by it.
+        self.good_answer(provider)
+        assert self.review(provider, "adversarial-reviewer", XAI_API_KEY="xai-x").returncode == 0
+        assert self.seen()["env"]["XAI_API_KEY"] == "xai-x"
+
+    @pytest.mark.parametrize(
+        ("provider", "line"), [("grok", GROK_402), ("codex", CODEX_WRONG_LOGIN)]
+    )
+    def test_a_refused_login_exits_seven_not_four(self, provider: str, line: str):
+        self.answer(provider, stderr=f"{line}\n", exit=1)
+        proc = self.decide(provider)
+        assert proc.returncode == 7, proc.stderr
+        assert line in proc.stderr
+        assert proc.stdout == ""
+        assert len(json.loads(self.argv_log.read_text())) > 0
+
+    def test_a_grok_result_reporting_a_402_exits_seven(self):
+        self.set_spec(stdout=grok_stream(None, is_error=True, subtype="error", result=GROK_402))
+        proc = self.decide("grok")
+        assert proc.returncode == 7, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_any_other_runner_failure_is_still_four(self, provider: str):
+        self.answer(provider, stderr="error: stream disconnected\n", exit=1)
+        assert self.decide(provider).returncode == 4
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_successful_run_s_stderr_mentioning_401_does_not_refuse_it(self, provider: str):
+        self.answer(provider, stderr="warning: mcp server returned 401 Unauthorized\n")
+        assert self.decide(provider).returncode == 0
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_the_hard_deadline_is_capped_and_recorded(self, provider: str):
+        self.answer(provider)
+        assert self.decide(provider, CE_PERSONA_HARD_SECS="5000").returncode == 0
+        record = json.loads((self.run_dir / f"decide-{provider}-provenance.json").read_text())
+        assert record["hard_secs"] == "1200"
+        assert record["kind"] == "decide"
+        assert (
+            record["input_prompt_sha256"]
+            == hashlib.sha256(self.prompt_file.read_bytes()).hexdigest()
+        )
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_silent_decision_is_killed_by_the_watchdog(self, provider: str):
+        self.set_spec(silent_for=30)
+        proc = self.decide(provider, CE_PERSONA_IDLE_SECS="2", timeout=60)
+        assert proc.returncode == 5, proc.stderr
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_a_missing_or_empty_prompt_is_a_usage_error(self, provider: str):
+        self.answer(provider)
+        self.prompt_file.write_text("  \n", encoding="utf-8")
+        assert self.decide(provider).returncode == 2
+        self.prompt_file.unlink()
+        assert self.decide(provider).returncode == 2
+        assert not self.argv_log.exists()
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_help_documents_the_refusal_status(self, provider: str):
+        proc = subprocess.run(
+            [str(self.decide_commands[provider]), "--help"],
+            capture_output=True,
+            text=True,
+            env=self.env(),
+            check=False,
+        )
+        assert proc.returncode == 0
+        assert "  7   decide commands only" in proc.stdout
+        assert "1200s" in proc.stdout
